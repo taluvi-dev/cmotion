@@ -1,24 +1,42 @@
 ---
-// ScenePreview.astro — live preview of the homepage sample, driven by the
-// real cmotion interpreter (cmotion-render.wasm) instead of a hand-rolled
-// Three.js reproduction. Same source the docs print above; the WASM emits
-// a JSON value tree per frame, the viewer translates it into Three.js
-// objects. If this preview drifts from the code block, the renderer is
-// what's right.
+// ScenePreview.astro — inline cmotion playground on the homepage.
+// Renders an editable source textarea + a live preview, both driven by
+// cmotion-render.wasm. Same renderer /play uses; this is just the
+// minimal control surface (no PNG/video save — those are /play's job).
 ---
 
 <figure class="scene-preview">
+  <textarea class="source" data-scene-source spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
   <div class="frame">
     <canvas data-scene-preview aria-label="Live preview of the sample scene"></canvas>
   </div>
   <figcaption>
-    <span>Live preview — rendered by the cmotion interpreter running in your browser. <a href="/play/">Edit it →</a></span>
+    <span>Edit above, click <strong>Render</strong> to apply. <a href="/play/">Open in /play →</a></span>
     <button type="button" data-scene-render>Render</button>
   </figcaption>
 </figure>
 
 <style>
   .scene-preview { margin: 1.5rem 0 2rem; }
+
+  .scene-preview .source {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    height: 22em;
+    margin: 0 0 0.75rem;
+    padding: 12px 14px;
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 4px;
+    background: var(--sl-color-bg-inline-code, #f6f6f6);
+    color: var(--sl-color-text, #111);
+    font: 0.85rem/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    tab-size: 2;
+    resize: vertical;
+    outline: none;
+  }
+  .scene-preview .source:focus { border-color: var(--sl-color-accent, #555); }
+
   .scene-preview .frame {
     aspect-ratio: 16 / 9;
     border-radius: 4px;
@@ -32,6 +50,7 @@
     width: 100%;
     height: 100%;
   }
+
   .scene-preview figcaption {
     display: flex; align-items: center; justify-content: space-between; gap: 1rem;
     font-size: 0.85rem;
@@ -47,12 +66,12 @@
     border: 0; cursor: pointer;
   }
   .scene-preview figcaption button:disabled { opacity: 0.4; cursor: progress; }
+  .scene-preview figcaption .err { color: var(--sl-color-red, #b00020); font-style: normal; }
 </style>
 
 <script>
   import { boot } from "../scripts/cmotion-viewer.ts";
 
-  // Source must match the code block above on the page. Keep them in sync.
   const HOMEPAGE_SOURCE = `use std.shapes.*;
 use std.mesh3d.*;
 use std.text;
@@ -95,20 +114,24 @@ scene title(duration: Duration = 6s) -> Frame {
 }
 `;
 
-  // Encode source for /play. URL hash so it's not sent server-side and
-  // refresh-safe. btoa would mangle non-ASCII; use encodeURIComponent.
-  function editLinkFor(source: string): string {
-    return `/play/#source=${encodeURIComponent(source)}`;
+  // Update every "Open in /play →" link with the current homepage source so a
+  // visitor lands on /play with whatever they were just editing.
+  function updatePlayLinks(source: string) {
+    for (const a of document.querySelectorAll<HTMLAnchorElement>('a[href^="/play/"]')) {
+      a.href = `/play/#source=${encodeURIComponent(source)}`;
+    }
   }
 
-  // Wire up every "Edit it →" link on the page to carry the homepage source.
-  for (const a of document.querySelectorAll<HTMLAnchorElement>('a[href="/play/"]')) {
-    a.href = editLinkFor(HOMEPAGE_SOURCE);
-  }
+  async function mount(figure: HTMLElement) {
+    const canvas = figure.querySelector<HTMLCanvasElement>("canvas[data-scene-preview]");
+    const sourceEl = figure.querySelector<HTMLTextAreaElement>("textarea[data-scene-source]");
+    const btnRender = figure.querySelector<HTMLButtonElement>("button[data-scene-render]");
+    const captionText = figure.querySelector<HTMLElement>("figcaption span");
+    if (!canvas || !sourceEl || !btnRender || !captionText) return;
+    const captionDefault = captionText.innerHTML;
 
-  async function mount(canvas: HTMLCanvasElement) {
-    const figcaption = canvas.closest("figure")?.querySelector("figcaption") ?? null;
-    const btnRender = figcaption?.querySelector<HTMLButtonElement>("button[data-scene-render]") ?? null;
+    sourceEl.value = HOMEPAGE_SOURCE;
+    updatePlayLinks(HOMEPAGE_SOURCE);
 
     let view: Awaited<ReturnType<typeof boot>>;
     try {
@@ -134,26 +157,36 @@ scene title(duration: Duration = 6s) -> Frame {
       if (!running) return;
       if (visible) {
         const t = ((now - start) / 1000) % view.durationSeconds;
-        view.seek(t);
+        try { view.seek(t); } catch { /* skip frame on transient sampler error */ }
       }
       raf = requestAnimationFrame(frame);
     }
     raf = requestAnimationFrame(frame);
 
-    // Click "Render" → re-parse the source and restart the loop at t=0.
-    // Re-parsing exercises the interpreter freshly; useful if the user wants
-    // to confirm the preview is genuinely WASM-driven.
-    if (btnRender) {
-      btnRender.addEventListener("click", () => {
-        btnRender.disabled = true;
-        try {
-          view.load(HOMEPAGE_SOURCE);
-          start = performance.now();
-        } finally {
-          btnRender.disabled = false;
-        }
-      });
-    }
+    btnRender.addEventListener("click", () => {
+      btnRender.disabled = true;
+      captionText.classList.remove("err");
+      captionText.innerHTML = captionDefault;
+      const src = sourceEl.value;
+      try {
+        view.load(src);
+        start = performance.now();
+        updatePlayLinks(src);
+      } catch (e: any) {
+        captionText.textContent = String(e?.message ?? e);
+        captionText.classList.add("err");
+      } finally {
+        btnRender.disabled = false;
+      }
+    });
+
+    // ⌘/Ctrl+Enter inside the editor renders, like a notebook cell.
+    sourceEl.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        btnRender.click();
+      }
+    });
 
     // Astro view transitions: dispose on navigation to avoid leaking the WASM
     // module + WebGL context.
@@ -169,7 +202,7 @@ scene title(duration: Duration = 6s) -> Frame {
     );
   }
 
-  for (const c of document.querySelectorAll<HTMLCanvasElement>("canvas[data-scene-preview]")) {
-    mount(c);
+  for (const f of document.querySelectorAll<HTMLElement>("figure.scene-preview")) {
+    mount(f);
   }
 </script>
