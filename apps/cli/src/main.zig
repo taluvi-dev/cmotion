@@ -23,6 +23,11 @@ pub fn main() !u8 {
 
 test {
     std.testing.refAllDecls(@This());
+    // refAllDecls (not Recursive) — `tree_sitter.zig` re-exports the
+    // @cImport namespace which contains untranslatable libc macros that
+    // refAllDeclsRecursive would try to compile.
+    std.testing.refAllDecls(@import("tree_sitter.zig"));
     _ = @import("cli.zig");
     _ = @import("diagnostics.zig");
+    _ = @import("ast.zig");
 }
