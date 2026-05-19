@@ -55,59 +55,34 @@ pub const Packet = struct {
 /// regardless of internal Zig identifier renames (e.g. `fix_safety` ->
 /// `fixSafety`).
 pub fn writeJson(w: *Writer, packet: Packet) !void {
-    try w.writeAll("{\"schemaVersion\":");
-    try w.print("{d}", .{packet.schema_version});
-    try w.writeAll(",\"ok\":");
-    try w.writeAll(if (packet.ok) "true" else "false");
+    try writeJsonHeader(w, packet.ok, packet.diagnostics);
+    try writeJsonFooter(w);
+}
+
+/// Write the common envelope prefix: `{"schemaVersion":1,"ok":...,"diagnostics":[...]`
+/// (no trailing comma, no closing brace). Subcommands that produce output
+/// alongside diagnostics call this, write their own comma-prefixed fields,
+/// then call `writeJsonFooter` — so every --json invocation emits exactly
+/// one JSON document.
+pub fn writeJsonHeader(w: *Writer, ok: bool, diagnostics: []const Diagnostic) !void {
+    try w.print("{{\"schemaVersion\":{d},\"ok\":", .{schema_version});
+    try w.writeAll(if (ok) "true" else "false");
     try w.writeAll(",\"diagnostics\":[");
-    for (packet.diagnostics, 0..) |d, i| {
+    for (diagnostics, 0..) |d, i| {
         if (i != 0) try w.writeAll(",");
         try writeDiagnostic(w, d);
     }
-    try w.writeAll("]}\n");
+    try w.writeAll("]");
 }
 
-fn writeDiagnostic(w: *Writer, d: Diagnostic) !void {
-    try w.writeAll("{\"severity\":\"");
-    try w.writeAll(@tagName(d.severity));
-    try w.writeAll("\",\"code\":");
-    try writeString(w, d.code);
-    try w.writeAll(",\"message\":");
-    try writeString(w, d.message);
-    if (d.span) |s| {
-        try w.writeAll(",\"path\":");
-        try writeString(w, s.path);
-        try w.print(",\"line\":{d},\"column\":{d},\"length\":{d}", .{
-            s.line, s.column, s.length,
-        });
-    }
-    if (d.expected) |v| {
-        try w.writeAll(",\"expected\":");
-        try writeString(w, v);
-    }
-    if (d.actual) |v| {
-        try w.writeAll(",\"actual\":");
-        try writeString(w, v);
-    }
-    if (d.help) |v| {
-        try w.writeAll(",\"help\":");
-        try writeString(w, v);
-    }
-    try w.writeAll(",\"fixSafety\":\"");
-    try w.writeAll(@tagName(d.fix_safety));
-    try w.writeAll("\",\"repair\":{\"id\":");
-    try writeString(w, d.repair.id);
-    try w.writeAll(",\"summary\":");
-    try writeString(w, d.repair.summary);
-    try w.writeAll("},\"related\":[");
-    for (d.related, 0..) |r, i| {
-        if (i != 0) try w.writeAll(",");
-        try writeDiagnostic(w, r);
-    }
-    try w.writeAll("]}");
+/// Close the envelope started by `writeJsonHeader`.
+pub fn writeJsonFooter(w: *Writer) !void {
+    try w.writeAll("}\n");
 }
 
-fn writeString(w: *Writer, s: []const u8) !void {
+/// JSON-string helper exported so subcommands can encode their own
+/// envelope extras (paths, CST blobs, version strings) consistently.
+pub fn writeJsonString(w: *Writer, s: []const u8) !void {
     try w.writeByte('"');
     for (s) |b| switch (b) {
         '"' => try w.writeAll("\\\""),
@@ -119,6 +94,46 @@ fn writeString(w: *Writer, s: []const u8) !void {
         else => try w.writeByte(b),
     };
     try w.writeByte('"');
+}
+
+fn writeDiagnostic(w: *Writer, d: Diagnostic) !void {
+    try w.writeAll("{\"severity\":\"");
+    try w.writeAll(@tagName(d.severity));
+    try w.writeAll("\",\"code\":");
+    try writeJsonString(w, d.code);
+    try w.writeAll(",\"message\":");
+    try writeJsonString(w, d.message);
+    if (d.span) |s| {
+        try w.writeAll(",\"path\":");
+        try writeJsonString(w, s.path);
+        try w.print(",\"line\":{d},\"column\":{d},\"length\":{d}", .{
+            s.line, s.column, s.length,
+        });
+    }
+    if (d.expected) |v| {
+        try w.writeAll(",\"expected\":");
+        try writeJsonString(w, v);
+    }
+    if (d.actual) |v| {
+        try w.writeAll(",\"actual\":");
+        try writeJsonString(w, v);
+    }
+    if (d.help) |v| {
+        try w.writeAll(",\"help\":");
+        try writeJsonString(w, v);
+    }
+    try w.writeAll(",\"fixSafety\":\"");
+    try w.writeAll(@tagName(d.fix_safety));
+    try w.writeAll("\",\"repair\":{\"id\":");
+    try writeJsonString(w, d.repair.id);
+    try w.writeAll(",\"summary\":");
+    try writeJsonString(w, d.repair.summary);
+    try w.writeAll("},\"related\":[");
+    for (d.related, 0..) |r, i| {
+        if (i != 0) try w.writeAll(",");
+        try writeDiagnostic(w, r);
+    }
+    try w.writeAll("]}");
 }
 
 /// Plain-text rendering for terminal logs. No ANSI, no hyperlinks: keeps

@@ -61,8 +61,13 @@ Every subcommand emits the same JSON envelope under `--json`, modeled on
 Vercel Zero's diagnostic contract. Plain text by default; `--json` for
 agents, CI, and editors.
 
+**Contract: every `--json` invocation emits exactly one JSON object.** The
+shared header — `schemaVersion`, `ok`, `diagnostics[]` — is the same on
+every subcommand. Subcommands append their own fields to the same
+envelope:
+
 ```sh
-cmo --json parse src/main.cm
+cmo --json parse src/broken.cm
 ```
 
 ```json
@@ -72,19 +77,32 @@ cmo --json parse src/main.cm
   "diagnostics": [
     {
       "severity": "error",
-      "code": "CLI004",
-      "message": "`cmotion parse` is not implemented yet",
-      "help": "the tree-sitter grammar in packages/tree-sitter-cmotion is still a stub",
+      "code": "PAR100",
+      "message": "syntax error in source",
+      "path": "src/broken.cm",
+      "line": 1, "column": 1, "length": 0,
+      "help": "the parser produced a tree containing ERROR or MISSING nodes; the `cst` field on the envelope shows where",
       "fixSafety": "requires-human-review",
       "repair": {
-        "id": "wire-tree-sitter-grammar",
-        "summary": "Implement packages/tree-sitter-cmotion/grammar.js and link it into the CLI build."
+        "id": "fix-syntax",
+        "summary": "Resolve the syntax error reported by the parser."
       },
       "related": []
     }
-  ]
+  ],
+  "path": "src/broken.cm",
+  "cst": "(program (scene_decl ... (MISSING \")\") ...))"
 }
 ```
+
+Per-subcommand extras:
+
+| Subcommand | Extra fields |
+| --- | --- |
+| `parse`   | `path`, `cst` (S-expression CST as a string) |
+| `explain` | `code`, `title`, `body` |
+| `version` | `name`, `version` |
+| `check` / `fmt` | (stubs today; will land with the typechecker / formatter) |
 
 ### Field reference
 

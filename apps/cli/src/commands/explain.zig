@@ -109,12 +109,16 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
 
     const w = ctx.stdout;
     if (ctx.options.json) {
-        try w.print(
-            "{{\"schemaVersion\":1,\"code\":\"{s}\",\"title\":\"{s}\",\"body\":",
-            .{ entry.code, entry.title },
-        );
-        try writeJsonString(w, entry.body);
-        try w.writeAll("}\n");
+        // Single envelope: shared header (with empty diagnostics) +
+        // command-specific fields + shared footer.
+        try diag.writeJsonHeader(w, true, &.{});
+        try w.writeAll(",\"code\":");
+        try diag.writeJsonString(w, entry.code);
+        try w.writeAll(",\"title\":");
+        try diag.writeJsonString(w, entry.title);
+        try w.writeAll(",\"body\":");
+        try diag.writeJsonString(w, entry.body);
+        try diag.writeJsonFooter(w);
     } else {
         try w.print("{s}: {s}\n\n{s}\n", .{ entry.code, entry.title, entry.body });
     }
@@ -124,18 +128,4 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
 fn lookup(code: []const u8) ?Entry {
     for (entries) |e| if (std.mem.eql(u8, e.code, code)) return e;
     return null;
-}
-
-fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
-    try w.writeByte('"');
-    for (s) |b| switch (b) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{b}),
-        else => try w.writeByte(b),
-    };
-    try w.writeByte('"');
 }

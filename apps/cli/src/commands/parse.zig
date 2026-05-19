@@ -58,10 +58,16 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
     defer parsed.deinit();
 
     const root = parsed.root();
+    const has_error = ts.hasError(root);
 
-    if (ts.hasError(root)) {
+    // Collect diagnostics in one place so JSON and text modes emit the
+    // same set.
+    var diags = std.ArrayListUnmanaged(diag.Diagnostic){};
+    defer diags.deinit(ctx.allocator);
+
+    if (has_error) {
         const start = ts.startPoint(root);
-        try ctx.emitError(.{
+        try diags.append(ctx.allocator, .{
             .code = "PAR100",
             .message = "syntax error in source",
             .span = .{
@@ -69,59 +75,52 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
                 .line = start.row + 1,
                 .column = start.column + 1,
             },
-            .help = "the parser produced a tree containing ERROR or MISSING nodes; run `cmo parse --json` for the full CST",
+            .help = "the parser produced a tree containing ERROR or MISSING nodes; the `cst` field on the envelope shows where",
             .fix_safety = .@"requires-human-review",
             .repair = .{
                 .id = "fix-syntax",
                 .summary = "Resolve the syntax error reported by the parser.",
             },
         });
-        // Continue to emit the CST so agents can still inspect what was parsed.
     }
 
     if (ctx.options.json) {
-        try emitCstJson(ctx, path, root, source);
+        try emitJsonEnvelope(ctx, path, root, diags.items, !has_error);
     } else {
-        try emitCstSExpr(ctx, root);
+        try diag.writeText(ctx.stdout, .{ .ok = !has_error, .diagnostics = diags.items });
+        try emitSExpr(ctx, root);
     }
 
-    return if (ts.hasError(root)) 1 else 0;
+    return if (has_error) 1 else 0;
 }
 
-fn emitCstSExpr(ctx: Context, root: ts.Node) !void {
+fn emitSExpr(ctx: Context, root: ts.Node) !void {
     const sexp = ts.sexprAlloc(root) orelse return;
     defer ts.freeSExpr(sexp);
     try ctx.stdout.writeAll(std.mem.span(sexp));
     try ctx.stdout.writeAll("\n");
 }
 
-fn emitCstJson(ctx: Context, path: []const u8, root: ts.Node, source: []const u8) !void {
-    _ = source;
+fn emitJsonEnvelope(
+    ctx: Context,
+    path: []const u8,
+    root: ts.Node,
+    diagnostics: []const diag.Diagnostic,
+    ok: bool,
+) !void {
     const w = ctx.stdout;
-    try w.writeAll("{\"schemaVersion\":1,\"path\":");
-    try writeJsonString(w, path);
-    try w.writeAll(",\"cst\":");
-    // For now, embed the same S-expression tree-sitter produces. A future
-    // change can map this to a structured JSON node tree.
-    const sexp = ts.sexprAlloc(root) orelse {
-        try w.writeAll("null}\n");
-        return;
-    };
-    defer ts.freeSExpr(sexp);
-    try writeJsonString(w, std.mem.span(sexp));
-    try w.writeAll("}\n");
-}
+    try diag.writeJsonHeader(w, ok, diagnostics);
 
-fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
-    try w.writeByte('"');
-    for (s) |b| switch (b) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{b}),
-        else => try w.writeByte(b),
-    };
-    try w.writeByte('"');
+    try w.writeAll(",\"path\":");
+    try diag.writeJsonString(w, path);
+
+    try w.writeAll(",\"cst\":");
+    if (ts.sexprAlloc(root)) |sexp| {
+        defer ts.freeSExpr(sexp);
+        try diag.writeJsonString(w, std.mem.span(sexp));
+    } else {
+        try w.writeAll("null");
+    }
+
+    try diag.writeJsonFooter(w);
 }
