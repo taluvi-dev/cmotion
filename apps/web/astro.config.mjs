@@ -38,6 +38,7 @@ export default defineConfig({
 						{ label: 'Grammar', slug: 'language/grammar' },
 						{ label: 'Type system', slug: 'language/types' },
 						{ label: 'Stdlib', slug: 'language/stdlib' },
+						{ label: 'Diagnostics', slug: 'language/diagnostics' },
 					],
 				},
 				{
