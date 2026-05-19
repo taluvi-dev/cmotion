@@ -283,6 +283,126 @@ const entries = [_]Entry{
         \\diff against the source if you need to see what would change).
         ,
     },
+    .{
+        .code = "EVL001",
+        .title = "Expression form not yet supported by the interpreter",
+        .body =
+        \\The reference interpreter is stage 4 of the cmotion roadmap and
+        \\lands in slices. The v0 cut covers literals, identifiers,
+        \\paren, unary, binary, blocks-with-let, and color literals —
+        \\everything else (function calls, method calls, if/else, match,
+        \\animate, compose, lambdas, scenes, ...) is on the way but not
+        \\wired through eval yet. The diagnostic span points at the
+        \\offending sub-expression; the surrounding let evaluates to
+        \\`nil` so the rest of the program still runs.
+        ,
+    },
+    .{
+        .code = "EVL002",
+        .title = "Type mismatch during evaluation",
+        .body =
+        \\An operator or constructor received a value of the wrong kind
+        \\(e.g. boolean `&&` applied to a number, arithmetic applied to
+        \\a string, a color component that didn't reduce to a number).
+        \\The narrow `cmo check` pass catches most of these as TYP002
+        \\before eval runs; EVL002 is the runtime backstop.
+        \\
+        \\Unit mismatches inside arithmetic (`3px + 4s`) also surface
+        \\under this code today. Once the stage-2 unit algebra lands,
+        \\those will move to `UNT*` instead.
+        ,
+    },
+    .{
+        .code = "CLI012",
+        .title = "Invalid pixel dimension",
+        .body =
+        \\`cmo render --width <px>` and `--height <px>` expect a positive
+        \\integer count of pixels. Bare digits only; no unit suffix, no
+        \\fractional part.
+        ,
+    },
+    .{
+        .code = "REN001",
+        .title = "No scene to render",
+        .body =
+        \\`cmo render` evaluated the program but found no top-level
+        \\binding to draw — the program had no `let` and no scene /
+        \\component / filter with all-default parameters. Add a top-
+        \\level definition, e.g.
+        \\
+        \\  scene main() -> Frame {
+        \\    compose [rect(width: 320px, height: 180px, fill: #000)]
+        \\  }
+        \\
+        \\Today `cmo render` always picks the first top-level binding.
+        \\A future `--scene <name>` flag will let you pick among many.
+        ,
+    },
+    .{
+        .code = "REN002",
+        .title = "Could not write rendered output",
+        .body =
+        \\`cmo render --out <path>` produced pixels but the write to
+        \\disk failed. Common causes: the directory does not exist,
+        \\the path is read-only, or the filesystem is full. The pixel
+        \\buffer is discarded — re-run after fixing the I/O failure.
+        ,
+    },
+    .{
+        .code = "CLI011",
+        .title = "Invalid duration for `--at`",
+        .body =
+        \\`cmo eval --at <duration>` takes a duration spec the sampler
+        \\can convert to seconds. Recognised forms:
+        \\
+        \\  <digits>[.<digits>]        bare seconds (e.g. `2`, `1.5`)
+        \\  <digits>[.<digits>]s       seconds
+        \\  <digits>[.<digits>]ms      milliseconds
+        \\  <digits>[.<digits>]us      microseconds
+        \\  <digits>[.<digits>]ns      nanoseconds
+        \\
+        \\No sign, no underscores, no other units (px, deg, ...). If
+        \\you need a sample at "10 frames at 60 Hz", pass the resulting
+        \\duration (`--at 0.1666666666s`) — the renderer will own the
+        \\sample-rate → seconds mapping once it lands (the WIT
+        \\`render(time-samples: u64, ...)` is the renderer's view).
+        ,
+    },
+    .{
+        .code = "EVL004",
+        .title = "Missing required argument in a lambda call",
+        .body =
+        \\A lambda was called without a value for one of its parameters,
+        \\and the parameter has no default. cmotion lets you mix
+        \\positional and named arguments in a single call, so the
+        \\binding rule is: each parameter takes the first unconsumed
+        \\argument that either (a) is named with the parameter's name
+        \\or (b) is positional. Parameters with no matching argument
+        \\fall back to their default expression; parameters with no
+        \\default fire EVL004.
+        \\
+        \\Repair: pass the named argument (`f(x: 1)`), pass it
+        \\positionally (`f(1)`), or add a default to the parameter
+        \\definition (`|x: Number = 1|`).
+        ,
+    },
+    .{
+        .code = "EVL003",
+        .title = "Unresolved identifier at eval time",
+        .body =
+        \\Reserved. Today the interpreter promotes every unresolved name
+        \\path (bare ident or dotted access chain rooted at an unbound
+        \\ident) into a zero-argument `Constructed` staging value, so
+        \\that programs with `use std.foo.*;` wildcards still evaluate
+        \\cleanly without module manifests. Real typos are caught
+        \\earlier by `cmo check` (NAM003).
+        \\
+        \\Once modules land and the interpreter can distinguish a
+        \\stdlib reference from a typo, EVL003 will return for the
+        \\latter. Until then, run `cmo check` first if you want the
+        \\name-resolution view.
+        ,
+    },
 };
 
 pub fn run(ctx: Context, args: []const []const u8) !u8 {
@@ -335,4 +455,55 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
 fn lookup(code: []const u8) ?Entry {
     for (entries) |e| if (std.mem.eql(u8, e.code, code)) return e;
     return null;
+}
+
+// Every diagnostic code emitted anywhere in the CLI must resolve through
+// `lookup`, or `cmo explain CODE` falls back to CLI006 ("no explanation
+// registered"). Past regressions shipped because the emit site and the
+// explain table drifted; this test closes the loop by scanning the source
+// for emit-site code literals (the field assignment used in every
+// `ctx.emit*` call) and asserting every one is registered.
+//
+// The file list is hand-maintained: adding a new module with diagnostics
+// means adding it here. If a file is missing, its codes are simply not
+// checked — there's no way to recover the directory listing at comptime.
+test "every emitted diagnostic code has an explain entry" {
+    const sources = [_][]const u8{
+        @embedFile("../cli.zig"),
+        @embedFile("../check.zig"),
+        @embedFile("../diagnostics.zig"),
+        @embedFile("../fmt.zig"),
+        @embedFile("../lower.zig"),
+        @embedFile("../main.zig"),
+        @embedFile("../tree_sitter.zig"),
+        @embedFile("../eval.zig"),
+        @embedFile("../render.zig"),
+        @embedFile("check.zig"),
+        @embedFile("explain.zig"),
+        @embedFile("eval.zig"),
+        @embedFile("fmt.zig"),
+        @embedFile("parse.zig"),
+        @embedFile("render.zig"),
+        @embedFile("version.zig"),
+    };
+
+    const needle = ".code = \"";
+    var missing: u32 = 0;
+    for (sources) |src| {
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, src, i, needle)) |hit| {
+            const code_start = hit + needle.len;
+            const code_end = std.mem.indexOfScalarPos(u8, src, code_start, '"') orelse {
+                i = code_start;
+                continue;
+            };
+            const code = src[code_start..code_end];
+            if (lookup(code) == null) {
+                std.debug.print("emitted code '{s}' has no explain entry\n", .{code});
+                missing += 1;
+            }
+            i = code_end + 1;
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 0), missing);
 }

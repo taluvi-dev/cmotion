@@ -54,6 +54,8 @@ cmo check src/main.cm       # narrow semantic checks (NAM*/TYP*/UNT*)
 cmo fmt src/main.cm         # format to stdout (v0: imports + top-level let)
 cmo fmt --write src/main.cm # rewrite the file in place
 cmo fmt --check src/main.cm # exit non-zero if the file would change
+cmo eval src/main.cm        # evaluate top-level let bindings (stage-4 v0)
+cmo eval --at 1.5s file.cm  # sample the video stream at t=1.5s
 cmo explain CLI001          # long-form help for a diagnostic code
 ```
 
@@ -116,6 +118,7 @@ Per-subcommand extras:
 | `explain` | `code`, `title`, `body` |
 | `version` | `name`, `version` |
 | `fmt`     | `path`, `changed` (bool), `formatted` (the rewritten source). FMT001 in `diagnostics[]` under `--check` when the file would change. Exits 1 only when `--check` and `changed`. |
+| `eval`    | `path`, `result` (`{bindings: [{name, value}]}`; `null` when parse/lower fails). EVL001/002/003 in `diagnostics[]` for unsupported forms, type mismatches, and unresolved names. With `--at <duration>` the sampler resolves each `animate(...)` staging value to its value at `t` (linear interpolation, `repeat: forever` wraps modulo the span). Exits 1 on any error diagnostic. |
 
 ### `cmo parse` AST shape
 
@@ -203,6 +206,8 @@ re-run.
 | `TYP*` | Type checker | live (narrow) |
 | `UNT*` | Unit checker (`ms` vs `bpm` vs `px` etc.) | live |
 | `FMT*` | Formatter | live |
+| `EVL*` | Reference interpreter (stage 4) | live (v0) |
+| `REN*` | Software renderer | live (v0) |
 | `TIM*` | Timeline (negative duration, out-of-range keyframe) | reserved |
 | `ANM*` | Animate / keyframe rules | reserved |
 | `COL*` | Color space | reserved |

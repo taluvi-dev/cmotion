@@ -40,4 +40,8 @@ test {
     _ = @import("timing.zig");
     _ = @import("check.zig");
     _ = @import("fmt.zig");
+    _ = @import("value.zig");
+    _ = @import("eval.zig");
+    _ = @import("sampler.zig");
+    _ = @import("render.zig");
 }
