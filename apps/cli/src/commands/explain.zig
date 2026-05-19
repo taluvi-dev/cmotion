@@ -133,6 +133,26 @@ const entries = [_]Entry{
         \\field names the Zig error variant that fired.
         ,
     },
+    .{
+        .code = "TYP002",
+        .title = "Type mismatch on an annotated value",
+        .body =
+        \\An annotated `let`, `param`, or `export` was assigned a literal
+        \\value whose category doesn't match the annotation. The check is
+        \\deliberately narrow: it only fires when the annotation is a
+        \\simple type name with a known category (String, Bool, Color, or
+        \\one of the number-like types: Number, Int, Float, Duration,
+        \\Time, Angle, Length, Pixels, Frequency, Tempo, Bars, Beats,
+        \\Percent) AND the value is a literal (number, string, bool,
+        \\color). Anything more complex — calls, identifiers, generic
+        \\types — is left to the full typechecker once it lands.
+        \\
+        \\Repair: change the value to match the type, or change the type
+        \\annotation to match the value. Unit-category checks within the
+        \\number family (e.g. `let x: Duration = 6deg`) belong to UNT*
+        \\codes, not TYP002.
+        ,
+    },
 };
 
 pub fn run(ctx: Context, args: []const []const u8) !u8 {

@@ -38,7 +38,7 @@ how much trust to extend to the repair:
 | `PAR*` | Parser (tree-sitter) | implemented |
 | `LWR*` | CST → AST lowering | implemented |
 | `NAM*` | Name resolution | implemented |
-| `TYP*` | Type checker | reserved |
+| `TYP*` | Type checker | partial (TYP002 only) |
 | `UNT*` | Unit checker | reserved |
 | `TIM*` | Timeline (negative duration, out-of-range keyframe) | reserved |
 | `ANM*` | Animate / keyframe rules | reserved |
@@ -186,6 +186,40 @@ parameter's location.
 - **Repair:** `rename-duplicate-param`.
 - **Fix safety:** `api-changing` — the parameter name is part of the
   named-argument API.
+
+---
+
+## `TYP*` — Type checker
+
+### `TYP002` — Type mismatch on an annotated value
+
+An annotated `let`, `param`, or `export` was assigned a literal value
+whose category doesn't match the annotation. The check is deliberately
+narrow today: it only fires when both sides are inferable.
+
+**Fires when** the annotation is a `simple_type` whose name is a known
+category (`String`, `Bool`, `Color`, or one of the number-like types:
+`Number`, `Int`, `Float`, `Duration`, `Time`, `Angle`, `Length`,
+`Pixels`, `Frequency`, `Tempo`, `Bars`, `Beats`, `Percent`) **and**
+the value is a literal (number, string, bool, or color).
+
+**Skipped when** the value is a call, identifier, or anything that needs
+real inference — the full typechecker takes over for those.
+
+Examples:
+
+```cm
+let name: String = 42                    // TYP002: expected 'String', got a number literal
+let active: Bool = "yes"                 // TYP002: expected 'Bool', got a string literal
+component title(bg: Color = 0) -> Frame  // TYP002 on the default: expected 'Color', got a number literal
+```
+
+Unit-category mismatches **within** the number family
+(`let x: Duration = 6deg`) belong to `UNT*` codes, not `TYP002`.
+
+- **Repair:** `align-value-with-type`.
+- **Fix safety:** `local-edit` — usually only the value or annotation
+  changes, no call sites move.
 
 ---
 
