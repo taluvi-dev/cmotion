@@ -157,8 +157,124 @@ pub const Evaluator = struct {
             .unary => |u| try self.evalUnary(u, scope),
             .binary => |b| try self.evalBinary(b, scope),
             .block => |blk| try self.evalBlock(blk, scope),
+            .array => |a| try self.evalArray(a, scope),
+            .record => |r| try self.evalRecord(r, scope),
+            .index => |idx| try self.evalIndex(idx, scope),
+            .field_access => |fa| try self.evalFieldAccess(fa, scope),
+            .if_ => |i| try self.evalIf(i, scope),
+            .match => |m| try self.evalMatch(m, scope),
             else => try self.unsupported(expr),
         };
+    }
+
+    fn evalArray(self: *Evaluator, a: ast.ArrayExpr, scope: *Scope) EvalError!Value {
+        const elems = try self.arena.alloc(Value, a.elems.len);
+        for (a.elems, 0..) |e, i| elems[i] = try self.evalExpr(e, scope);
+        return .{ .array = .{ .elems = elems } };
+    }
+
+    fn evalRecord(self: *Evaluator, r: ast.RecordExpr, scope: *Scope) EvalError!Value {
+        const fields = try self.arena.alloc(value.Field, r.inits.len);
+        for (r.inits, 0..) |ri, i| {
+            fields[i] = .{
+                .name = ri.name.name,
+                .value = try self.evalExpr(ri.value.*, scope),
+            };
+        }
+        return .{ .record = .{ .fields = fields } };
+    }
+
+    fn evalIndex(self: *Evaluator, idx: ast.Index, scope: *Scope) EvalError!Value {
+        const receiver = try self.evalExpr(idx.receiver.*, scope);
+        const index = try self.evalExpr(idx.index.*, scope);
+        switch (receiver) {
+            .array => |arr| {
+                const n = numberOrError(self, idx.span, "array index", index) orelse return .nil;
+                if (n.unit != null) {
+                    try self.typeError(idx.span, "array index", "unitless integer", index);
+                    return .nil;
+                }
+                const i: i64 = @intFromFloat(n.value);
+                if (i < 0 or @as(usize, @intCast(i)) >= arr.elems.len) {
+                    try self.outOfBounds(idx.span, i, arr.elems.len);
+                    return .nil;
+                }
+                return arr.elems[@intCast(i)];
+            },
+            .record => |rec| {
+                // String-keyed indexing into a record (`r["field"]`). The
+                // raw payload includes the surrounding quotes, so strip
+                // them before comparing.
+                if (index != .string) {
+                    try self.typeError(idx.span, "record index", "string", index);
+                    return .nil;
+                }
+                const key = stripQuotes(index.string);
+                for (rec.fields) |f| if (std.mem.eql(u8, f.name, key)) return f.value;
+                try self.fieldMissing(idx.span, key);
+                return .nil;
+            },
+            else => {
+                try self.typeError(idx.span, "indexing", "array or record", receiver);
+                return .nil;
+            },
+        }
+    }
+
+    fn evalFieldAccess(self: *Evaluator, fa: ast.FieldAccess, scope: *Scope) EvalError!Value {
+        const receiver = try self.evalExpr(fa.receiver.*, scope);
+        switch (receiver) {
+            .record => |rec| {
+                for (rec.fields) |f| if (std.mem.eql(u8, f.name, fa.name.name)) return f.value;
+                try self.fieldMissing(fa.span, fa.name.name);
+                return .nil;
+            },
+            else => {
+                try self.typeError(fa.span, "field access", "record", receiver);
+                return .nil;
+            },
+        }
+    }
+
+    fn evalIf(self: *Evaluator, i: ast.If, scope: *Scope) EvalError!Value {
+        const cond = try self.evalExpr(i.condition.*, scope);
+        const truthy = switch (cond) {
+            .@"bool" => |b| b,
+            else => {
+                try self.typeError(i.span, "if condition", "bool", cond);
+                return .nil;
+            },
+        };
+        if (truthy) return self.evalBlock(i.then, scope);
+        if (i.else_branch) |eb| return switch (eb) {
+            .block => |blk| self.evalBlock(blk, scope),
+            .if_ => |e| self.evalExpr(e.*, scope),
+        };
+        return .nil;
+    }
+
+    fn evalMatch(self: *Evaluator, m: ast.Match, scope: *Scope) EvalError!Value {
+        const subject = try self.evalExpr(m.subject.*, scope);
+        for (m.arms) |arm| switch (arm.pattern) {
+            .wildcard => return self.evalExpr(arm.body.*, scope),
+            .ident => |id| {
+                // Bind the subject under the pattern name in a fresh scope.
+                var bound = Scope{ .parent = scope };
+                defer bound.names.deinit(self.gpa);
+                try bound.names.put(self.gpa, id.name, subject);
+                return self.evalExpr(arm.body.*, &bound);
+            },
+            .literal => |lit| {
+                const lit_value = try self.evalLiteral(lit, scope);
+                if (valuesEqual(subject, lit_value)) {
+                    return self.evalExpr(arm.body.*, scope);
+                }
+            },
+        };
+        // No arm matched. Report it under EVL002 — the value lies outside
+        // the match's covered set, a runtime type error at this stage.
+        try self.noMatchingArm(m.span, subject);
+        return .nil;
     }
 
     fn evalBlock(self: *Evaluator, block: ast.Block, parent: *Scope) EvalError!Value {
@@ -405,6 +521,80 @@ pub const Evaluator = struct {
         });
     }
 
+    fn outOfBounds(self: *Evaluator, span: ast.Span, i: i64, len: usize) EvalError!void {
+        const loc = span.location(self.source);
+        const msg = try std.fmt.allocPrint(
+            self.arena,
+            "array index {d} is out of bounds (length {d})",
+            .{ i, len },
+        );
+        try self.diagnostics.append(self.gpa, .{
+            .code = "EVL002",
+            .message = msg,
+            .span = .{
+                .path = self.path,
+                .line = loc.line,
+                .column = loc.column,
+                .length = span.end - span.start,
+            },
+            .fix_safety = .@"requires-human-review",
+            .repair = .{
+                .id = "fix-index",
+                .summary = "Use an index in the range [0, length).",
+            },
+        });
+    }
+
+    fn fieldMissing(self: *Evaluator, span: ast.Span, name: []const u8) EvalError!void {
+        const loc = span.location(self.source);
+        const msg = try std.fmt.allocPrint(
+            self.arena,
+            "record has no field '{s}'",
+            .{name},
+        );
+        try self.diagnostics.append(self.gpa, .{
+            .code = "EVL002",
+            .message = msg,
+            .span = .{
+                .path = self.path,
+                .line = loc.line,
+                .column = loc.column,
+                .length = span.end - span.start,
+            },
+            .fix_safety = .@"requires-human-review",
+            .repair = .{
+                .id = "add-or-rename-field",
+                .summary = "Add the field to the record literal, or rename the access to an existing field.",
+            },
+        });
+    }
+
+    fn noMatchingArm(self: *Evaluator, span: ast.Span, subject: Value) EvalError!void {
+        const loc = span.location(self.source);
+        const tag = @tagName(@as(std.meta.Tag(Value), subject));
+        const msg = try std.fmt.allocPrint(
+            self.arena,
+            "match has no arm for subject of kind '{s}'",
+            .{tag},
+        );
+        try self.diagnostics.append(self.gpa, .{
+            .code = "EVL002",
+            .message = msg,
+            .span = .{
+                .path = self.path,
+                .line = loc.line,
+                .column = loc.column,
+                .length = span.end - span.start,
+            },
+            .help = "add an arm covering this value, or a trailing `_ =>` wildcard arm",
+            .fix_safety = .@"requires-human-review",
+            .repair = .{
+                .id = "add-match-arm",
+                .summary = "Add a match arm whose pattern matches this value, or a `_` wildcard.",
+            },
+        });
+    }
+
     fn unitMismatch(
         self: *Evaluator,
         span: ast.Span,
@@ -514,6 +704,13 @@ fn valuesEqual(a: Value, b: Value) bool {
         // real semantics once the language pins them down.
         else => false,
     };
+}
+
+fn stripQuotes(raw: []const u8) []const u8 {
+    if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"') {
+        return raw[1 .. raw.len - 1];
+    }
+    return raw;
 }
 
 fn binOpSymbol(op: ast.BinOp) []const u8 {
@@ -684,4 +881,104 @@ test "eval: function call emits EVL001 (not yet supported)" {
 
     try std.testing.expect(r.diagnostics.len >= 1);
     try std.testing.expectEqualStrings("EVL001", r.diagnostics[0].code);
+}
+
+test "eval: array literal" {
+    var r = try evalSource("let xs = [1, 2, 3];");
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    const arr = r.program.bindings[0].value.array;
+    try std.testing.expectEqual(@as(usize, 3), arr.elems.len);
+    try std.testing.expectEqual(@as(f64, 2), arr.elems[1].number.value);
+}
+
+test "eval: record literal and field access" {
+    var r = try evalSource(
+        \\let r = { x: 10, y: 20 };
+        \\let y = r.y;
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(f64, 20), r.program.bindings[1].value.number.value);
+}
+
+test "eval: missing record field emits EVL002" {
+    var r = try evalSource(
+        \\let r = { x: 1 };
+        \\let z = r.nope;
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
+    try std.testing.expectEqualStrings("EVL002", r.diagnostics[0].code);
+}
+
+test "eval: array indexing" {
+    var r = try evalSource(
+        \\let xs = [10, 20, 30];
+        \\let mid = xs[1];
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(f64, 20), r.program.bindings[1].value.number.value);
+}
+
+test "eval: array index out of bounds emits EVL002" {
+    var r = try evalSource(
+        \\let xs = [1, 2];
+        \\let bad = xs[5];
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
+    try std.testing.expectEqualStrings("EVL002", r.diagnostics[0].code);
+}
+
+test "eval: if/else picks the right branch" {
+    var r = try evalSource(
+        \\let a = if 1 < 2 { 10 } else { 20 };
+        \\let b = if false { 1 } else if false { 2 } else { 3 };
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(f64, 10), r.program.bindings[0].value.number.value);
+    try std.testing.expectEqual(@as(f64, 3), r.program.bindings[1].value.number.value);
+}
+
+test "eval: match on literal patterns" {
+    var r = try evalSource(
+        \\let x = match 2 {
+        \\  1 => 100,
+        \\  2 => 200,
+        \\  _ => 999,
+        \\};
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(f64, 200), r.program.bindings[0].value.number.value);
+}
+
+test "eval: match with ident pattern binds the subject" {
+    var r = try evalSource(
+        \\let x = match 7 {
+        \\  n => n + 1,
+        \\};
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(f64, 8), r.program.bindings[0].value.number.value);
 }
