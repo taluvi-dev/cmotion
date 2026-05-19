@@ -654,7 +654,21 @@ fn drawExtrude(
         .roughness = style.roughness orelse 1.0,
     };
 
-    try render3d.drawMesh(arena, fb, centred, final_transform, .{}, material, lights);
+    // 2× supersampling smooths the rasteriser's hard silhouette
+    // edges at the cost of 4× the per-fragment work. For a 320×180
+    // canvas that's well under a second total; if perf becomes a
+    // need we can drop to 1× via a render flag.
+    const supersample_factor: u32 = 2;
+    try render3d.drawMeshSupersampled(
+        arena,
+        fb,
+        centred,
+        final_transform,
+        .{},
+        material,
+        lights,
+        supersample_factor,
+    );
 }
 
 /// Compute the mesh's bounding-box centre and subtract it from every

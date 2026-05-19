@@ -137,6 +137,92 @@ pub fn drawMesh(
     }
 }
 
+/// Anti-aliased mesh draw via N×N supersampling.
+///
+/// Allocates a hi-res framebuffer scaled by `factor`, blits the
+/// current `fb` into it (nearest-neighbor upsample), rasterises the
+/// mesh at the higher resolution, then box-filters the result back
+/// down. `factor = 1` short-circuits to `drawMesh` directly.
+///
+/// Why box filter and not Lanczos / gaussian: at 2× / 4×, box
+/// matches lit-pixel coverage closely (each output pixel averages
+/// 4 or 16 inputs) and avoids ringing on the hard silhouette
+/// edges typical of letter glyphs. The cost is 4× / 16× the
+/// rasteriser time, which on a 320×180 frame is still under a
+/// second.
+pub fn drawMeshSupersampled(
+    arena: std.mem.Allocator,
+    fb: *Framebuffer,
+    mesh: Mesh,
+    model: Mat4,
+    camera: Camera,
+    material: Material,
+    lights: []const Light,
+    factor: u32,
+) !void {
+    if (factor <= 1) {
+        return drawMesh(arena, fb, mesh, model, camera, material, lights);
+    }
+    const hi_w = fb.width * factor;
+    const hi_h = fb.height * factor;
+    const hi_pixels = try arena.alloc(u8, @as(usize, hi_w) * hi_h * 4);
+    var hi_fb = Framebuffer{ .pixels = hi_pixels, .width = hi_w, .height = hi_h };
+
+    // Nearest-neighbour upsample: each low-res pixel becomes a
+    // factor×factor block in hi-res. The hi-res rasteriser draws
+    // on top of this, so the box-filter downsample later sees the
+    // right background through any partially-covered pixels.
+    upsampleNN(fb.*, &hi_fb, factor);
+
+    try drawMesh(arena, &hi_fb, mesh, model, camera, material, lights);
+
+    boxFilterDownsample(&hi_fb, fb, factor);
+}
+
+fn upsampleNN(src: Framebuffer, dst: *Framebuffer, factor: u32) void {
+    var y: u32 = 0;
+    while (y < dst.height) : (y += 1) {
+        const sy = y / factor;
+        var x: u32 = 0;
+        while (x < dst.width) : (x += 1) {
+            const sx = x / factor;
+            const si = (@as(usize, sy) * src.width + sx) * 4;
+            const di = (@as(usize, y) * dst.width + x) * 4;
+            inline for (0..4) |k| dst.pixels[di + k] = src.pixels[si + k];
+        }
+    }
+}
+
+fn boxFilterDownsample(src: *Framebuffer, dst: *Framebuffer, factor: u32) void {
+    const n2 = factor * factor;
+    var y: u32 = 0;
+    while (y < dst.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < dst.width) : (x += 1) {
+            var sum_r: u32 = 0;
+            var sum_g: u32 = 0;
+            var sum_b: u32 = 0;
+            var sum_a: u32 = 0;
+            var dy: u32 = 0;
+            while (dy < factor) : (dy += 1) {
+                var dx: u32 = 0;
+                while (dx < factor) : (dx += 1) {
+                    const si = ((@as(usize, y) * factor + dy) * src.width + (@as(usize, x) * factor + dx)) * 4;
+                    sum_r += src.pixels[si + 0];
+                    sum_g += src.pixels[si + 1];
+                    sum_b += src.pixels[si + 2];
+                    sum_a += src.pixels[si + 3];
+                }
+            }
+            const di = (@as(usize, y) * dst.width + x) * 4;
+            dst.pixels[di + 0] = @intCast(sum_r / n2);
+            dst.pixels[di + 1] = @intCast(sum_g / n2);
+            dst.pixels[di + 2] = @intCast(sum_b / n2);
+            dst.pixels[di + 3] = @intCast(sum_a / n2);
+        }
+    }
+}
+
 /// Rasterise a single triangle. `a/b/c` are screen-space coords
 /// (x, y in pixels, z in NDC). Normals are world-space; lighting
 /// happens per-fragment after barycentric interpolation.
