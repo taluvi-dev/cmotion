@@ -1,4 +1,4 @@
-//! Name resolution — the first real stage of `cmo check`.
+//! Name resolution + a narrow type-annotation check — `cmo check`.
 //!
 //! Scope of this pass:
 //!   - NAM003: unknown identifier. Walks every expression and flags any
@@ -8,9 +8,16 @@
 //!   - NAM005: duplicate top-level declaration. Two `component foo` or
 //!     two imports landing on the same local name.
 //!   - NAM006: duplicate parameter name in a signature.
+//!   - TYP002: literal value doesn't match an annotated type. Fires
+//!     only when both sides are inferable: a `simple_type` whose name
+//!     names a known category (String / Bool / Color / Number / unit-
+//!     bearing) and a literal value (number / string / bool / color).
+//!     Skipped when the value is a call, ident, or anything else that
+//!     needs real type inference — that's the full typechecker's job.
 //!
-//! Out of scope (for now): types, units, forward-reference rules inside
-//! a block, fuzzy-suggest for typos.
+//! Out of scope (for now): unit-category matching (UNT* codes), generic
+//! types, function types, real inference, forward-reference rules in
+//! blocks, fuzzy-suggest for typos.
 
 const std = @import("std");
 const ast = @import("ast.zig");
@@ -44,6 +51,44 @@ const Scope = struct {
         return null;
     }
 };
+
+/// Coarse type categories the literal checker can compare. Unit-bearing
+/// types all collapse to `.number` here; the unit-category check (UNT*)
+/// will land as its own pass.
+const Category = enum { number, string, @"bool", color, unknown };
+
+fn nameToCategory(name: []const u8) Category {
+    if (std.mem.eql(u8, name, "String")) return .string;
+    if (std.mem.eql(u8, name, "Bool")) return .@"bool";
+    if (std.mem.eql(u8, name, "Color")) return .color;
+    const number_names = [_][]const u8{
+        "Number", "Int", "Float",
+        // Unit-bearing types — all numbers as far as TYP002 is concerned.
+        "Duration", "Time", "Angle", "Length", "Pixels",
+        "Frequency", "Tempo", "Bars", "Beats", "Percent",
+    };
+    for (number_names) |s| if (std.mem.eql(u8, name, s)) return .number;
+    return .unknown;
+}
+
+fn literalCategory(lit: ast.Literal) Category {
+    return switch (lit) {
+        .number => .number,
+        .string => .string,
+        .@"bool" => .@"bool",
+        .color => .color,
+    };
+}
+
+fn categoryName(c: Category) []const u8 {
+    return switch (c) {
+        .number => "number",
+        .string => "string",
+        .@"bool" => "bool",
+        .color => "color",
+        .unknown => "unknown",
+    };
+}
 
 pub const Checker = struct {
     allocator: std.mem.Allocator,
@@ -149,10 +194,73 @@ pub const Checker = struct {
     fn checkTopDecl(self: *Checker, decl: ast.TopDecl, parent: *const Scope) !void {
         switch (decl) {
             .import => {},
-            .let => |d| try self.checkExpr(d.value.*, parent),
+            .let => |d| {
+                try self.checkExpr(d.value.*, parent);
+                try self.checkLetAnnotation(d);
+            },
             .component, .scene, .filter => |d| try self.checkComponentLike(d, parent),
-            .@"export" => |d| try self.checkExpr(d.value.*, parent),
+            .@"export" => |d| {
+                try self.checkExpr(d.value.*, parent);
+                try self.checkAnnotation(d.type, d.value.*);
+            },
         }
+    }
+
+    //
+    // Type annotation check (TYP002).
+    //
+
+    fn checkLetAnnotation(self: *Checker, d: ast.LetDecl) !void {
+        if (d.type) |t| try self.checkAnnotation(t, d.value.*);
+    }
+
+    fn checkParamAnnotation(self: *Checker, p: ast.Param) !void {
+        if (p.default) |def| try self.checkAnnotation(p.type, def.*);
+    }
+
+    /// Compare an annotated type against a literal value. Skips silently
+    /// when either side isn't in TYP002's conservative scope (annotation
+    /// not a simple_type / not a known category name; value not a literal).
+    /// The real typechecker takes over for everything else.
+    fn checkAnnotation(self: *Checker, type_node: ast.Type, value: ast.Expr) !void {
+        const simple = switch (type_node) {
+            .simple => |s| s,
+            else => return,
+        };
+        const expected = nameToCategory(simple.name.name);
+        if (expected == .unknown) return;
+
+        const lit = switch (value) {
+            .literal => |l| l,
+            else => return,
+        };
+        const actual = literalCategory(lit);
+        if (actual == expected) return;
+
+        const span = value.span();
+        const loc = span.location(self.source);
+        try self.diagnostics.append(self.allocator, .{
+            .code = "TYP002",
+            .message = try std.fmt.allocPrint(
+                self.allocator,
+                "type mismatch: expected '{s}', got a {s} literal",
+                .{ simple.name.name, categoryName(actual) },
+            ),
+            .span = .{
+                .path = self.path,
+                .line = loc.line,
+                .column = loc.column,
+                .length = span.end - span.start,
+            },
+            .expected = try std.fmt.allocPrint(self.allocator, "{s} value", .{simple.name.name}),
+            .actual = try std.fmt.allocPrint(self.allocator, "{s} literal", .{categoryName(actual)}),
+            .help = "change the value to match the type, or change the type annotation to match the value",
+            .fix_safety = .@"local-edit",
+            .repair = .{
+                .id = "align-value-with-type",
+                .summary = "Use a value whose category matches the annotation.",
+            },
+        });
     }
 
     fn checkComponentLike(self: *Checker, d: ast.ComponentLike, parent: *const Scope) !void {
@@ -165,6 +273,7 @@ pub const Checker = struct {
         for (d.params) |p| {
             try self.declareParam(&body_scope, p);
             if (p.default) |def| try self.checkExpr(def.*, parent); // defaults see only the outer scope
+            try self.checkParamAnnotation(p);
         }
 
         try self.checkBlock(d.body, &body_scope);
@@ -218,6 +327,7 @@ pub const Checker = struct {
         // `let x = x + 1` as an error (NAM003 on the rhs).
         for (block.lets) |l| {
             try self.checkExpr(l.value.*, &block_scope);
+            try self.checkLetAnnotation(l);
             const gop = try block_scope.symbols.getOrPut(self.allocator, l.name.name);
             if (!gop.found_existing) {
                 gop.value_ptr.* = .{ .name = l.name.name, .span = l.name.span, .kind = .let };
@@ -369,6 +479,7 @@ pub const Checker = struct {
         for (l.params) |p| {
             try self.declareParam(&body_scope, p);
             if (p.default) |def| try self.checkExpr(def.*, parent);
+            try self.checkParamAnnotation(p);
         }
 
         try self.checkBlock(l.body, &body_scope);
