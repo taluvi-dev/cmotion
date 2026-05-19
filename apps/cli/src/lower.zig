@@ -575,8 +575,21 @@ pub const Lowerer = struct {
             if (!std.mem.eql(u8, ts.kind(c), "identifier")) continue;
             try segments.append(self.arena, self.identOf(c));
         }
-        const raw = ts.sourceSlice(node, self.source);
-        const glob = std.mem.endsWith(u8, raw, ".*");
+        // Detect the optional trailing `.*` from the CST, not the source slice.
+        // An ends-with(".*") check on the slice is whitespace-sensitive — input
+        // like `std . shapes . *` slips past it because the slice ends in
+        // ". *". The grammar attaches `.` and `*` as anonymous tokens, so we
+        // scan every child (named or not) for the `*` token instead.
+        var glob = false;
+        const total = ts.childCount(node);
+        var j: u32 = 0;
+        while (j < total) : (j += 1) {
+            const c = ts.child(node, j);
+            if (std.mem.eql(u8, ts.sourceSlice(c, self.source), "*")) {
+                glob = true;
+                break;
+            }
+        }
         return .{
             .span = self.spanOf(node),
             .segments = try segments.toOwnedSlice(self.arena),

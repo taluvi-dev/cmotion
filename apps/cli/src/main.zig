@@ -39,4 +39,5 @@ test {
     _ = @import("lower.zig");
     _ = @import("timing.zig");
     _ = @import("check.zig");
+    _ = @import("fmt.zig");
 }
