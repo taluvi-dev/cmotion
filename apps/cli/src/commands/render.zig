@@ -162,9 +162,9 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
 
     const fb = try render.renderTree(arena.allocator(), sampled, width, height);
 
-    // Write either to --out or stdout. The terminal probably doesn't
-    // want a raw PPM stream on stdout, but it's useful for piping into
-    // `display -` or similar.
+    // Format is picked from the --out extension: `.png` → PNG, anything
+    // else → PPM. Without `--out` we stream PPM to stdout (PNG to a
+    // terminal is rarely useful and binary noise everywhere).
     if (out_opt) |out_path| {
         var file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
             try ctx.emitError(.{
@@ -183,7 +183,11 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
         defer file.close();
         var file_buf: [4096]u8 = undefined;
         var file_writer = file.writer(&file_buf);
-        try render.writePpm(fb, &file_writer.interface);
+        if (std.mem.endsWith(u8, out_path, ".png")) {
+            try render.writePng(arena.allocator(), fb, &file_writer.interface);
+        } else {
+            try render.writePpm(fb, &file_writer.interface);
+        }
         try file_writer.interface.flush();
 
         try ctx.stdout.print(
