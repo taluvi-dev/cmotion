@@ -1,6 +1,6 @@
 # cmotion
 
-[cmotion.org] (https://cmotion.org)
+[cmotion.org](https://cmotion.org)
 
 A DSL for video and animation, plus the tools and surfaces around it.
 
