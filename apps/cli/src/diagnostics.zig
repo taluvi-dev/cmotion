@@ -6,6 +6,7 @@
 
 const std = @import("std");
 
+pub const Writer = std.Io.Writer;
 pub const schema_version: u32 = 1;
 
 pub const Severity = enum { @"error", warning, note };
@@ -53,105 +54,105 @@ pub const Packet = struct {
 /// Write the JSON envelope. We hand-roll the shape so field names stay stable
 /// regardless of internal Zig identifier renames (e.g. `fix_safety` ->
 /// `fixSafety`).
-pub fn writeJson(writer: anytype, packet: Packet) !void {
-    try writer.writeAll("{\"schemaVersion\":");
-    try std.fmt.format(writer, "{d}", .{packet.schema_version});
-    try writer.writeAll(",\"ok\":");
-    try writer.writeAll(if (packet.ok) "true" else "false");
-    try writer.writeAll(",\"diagnostics\":[");
+pub fn writeJson(w: *Writer, packet: Packet) !void {
+    try w.writeAll("{\"schemaVersion\":");
+    try w.print("{d}", .{packet.schema_version});
+    try w.writeAll(",\"ok\":");
+    try w.writeAll(if (packet.ok) "true" else "false");
+    try w.writeAll(",\"diagnostics\":[");
     for (packet.diagnostics, 0..) |d, i| {
-        if (i != 0) try writer.writeAll(",");
-        try writeDiagnostic(writer, d);
+        if (i != 0) try w.writeAll(",");
+        try writeDiagnostic(w, d);
     }
-    try writer.writeAll("]}\n");
+    try w.writeAll("]}\n");
 }
 
-fn writeDiagnostic(writer: anytype, d: Diagnostic) !void {
-    try writer.writeAll("{\"severity\":\"");
-    try writer.writeAll(@tagName(d.severity));
-    try writer.writeAll("\",\"code\":");
-    try writeString(writer, d.code);
-    try writer.writeAll(",\"message\":");
-    try writeString(writer, d.message);
+fn writeDiagnostic(w: *Writer, d: Diagnostic) !void {
+    try w.writeAll("{\"severity\":\"");
+    try w.writeAll(@tagName(d.severity));
+    try w.writeAll("\",\"code\":");
+    try writeString(w, d.code);
+    try w.writeAll(",\"message\":");
+    try writeString(w, d.message);
     if (d.span) |s| {
-        try writer.writeAll(",\"path\":");
-        try writeString(writer, s.path);
-        try std.fmt.format(writer, ",\"line\":{d},\"column\":{d},\"length\":{d}", .{
+        try w.writeAll(",\"path\":");
+        try writeString(w, s.path);
+        try w.print(",\"line\":{d},\"column\":{d},\"length\":{d}", .{
             s.line, s.column, s.length,
         });
     }
     if (d.expected) |v| {
-        try writer.writeAll(",\"expected\":");
-        try writeString(writer, v);
+        try w.writeAll(",\"expected\":");
+        try writeString(w, v);
     }
     if (d.actual) |v| {
-        try writer.writeAll(",\"actual\":");
-        try writeString(writer, v);
+        try w.writeAll(",\"actual\":");
+        try writeString(w, v);
     }
     if (d.help) |v| {
-        try writer.writeAll(",\"help\":");
-        try writeString(writer, v);
+        try w.writeAll(",\"help\":");
+        try writeString(w, v);
     }
-    try writer.writeAll(",\"fixSafety\":\"");
-    try writer.writeAll(@tagName(d.fix_safety));
-    try writer.writeAll("\",\"repair\":{\"id\":");
-    try writeString(writer, d.repair.id);
-    try writer.writeAll(",\"summary\":");
-    try writeString(writer, d.repair.summary);
-    try writer.writeAll("},\"related\":[");
+    try w.writeAll(",\"fixSafety\":\"");
+    try w.writeAll(@tagName(d.fix_safety));
+    try w.writeAll("\",\"repair\":{\"id\":");
+    try writeString(w, d.repair.id);
+    try w.writeAll(",\"summary\":");
+    try writeString(w, d.repair.summary);
+    try w.writeAll("},\"related\":[");
     for (d.related, 0..) |r, i| {
-        if (i != 0) try writer.writeAll(",");
-        try writeDiagnostic(writer, r);
+        if (i != 0) try w.writeAll(",");
+        try writeDiagnostic(w, r);
     }
-    try writer.writeAll("]}");
+    try w.writeAll("]}");
 }
 
-fn writeString(writer: anytype, s: []const u8) !void {
-    try writer.writeByte('"');
+fn writeString(w: *Writer, s: []const u8) !void {
+    try w.writeByte('"');
     for (s) |b| switch (b) {
-        '"' => try writer.writeAll("\\\""),
-        '\\' => try writer.writeAll("\\\\"),
-        '\n' => try writer.writeAll("\\n"),
-        '\r' => try writer.writeAll("\\r"),
-        '\t' => try writer.writeAll("\\t"),
-        0...0x1f => try std.fmt.format(writer, "\\u{x:0>4}", .{b}),
-        else => try writer.writeByte(b),
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{b}),
+        else => try w.writeByte(b),
     };
-    try writer.writeByte('"');
+    try w.writeByte('"');
 }
 
 /// Plain-text rendering for terminal logs. No ANSI, no hyperlinks: keeps
 /// agent context windows compact and logs diffable.
-pub fn writeText(writer: anytype, packet: Packet) !void {
+pub fn writeText(w: *Writer, packet: Packet) !void {
     for (packet.diagnostics) |d| {
-        try std.fmt.format(writer, "{s}[{s}]: {s}\n", .{
+        try w.print("{s}[{s}]: {s}\n", .{
             @tagName(d.severity), d.code, d.message,
         });
         if (d.span) |s| {
-            try std.fmt.format(writer, "  {s}:{d}:{d}\n", .{ s.path, s.line, s.column });
+            try w.print("  {s}:{d}:{d}\n", .{ s.path, s.line, s.column });
         }
-        if (d.expected) |v| try std.fmt.format(writer, "  expected: {s}\n", .{v});
-        if (d.actual) |v| try std.fmt.format(writer, "  actual:   {s}\n", .{v});
-        if (d.help) |v| try std.fmt.format(writer, "  help:     {s}\n", .{v});
-        try std.fmt.format(writer, "  fix:      {s} ({s})\n", .{
+        if (d.expected) |v| try w.print("  expected: {s}\n", .{v});
+        if (d.actual) |v| try w.print("  actual:   {s}\n", .{v});
+        if (d.help) |v| try w.print("  help:     {s}\n", .{v});
+        try w.print("  fix:      {s} ({s})\n", .{
             d.repair.summary, @tagName(d.fix_safety),
         });
-        try std.fmt.format(writer, "  explain:  cmotion explain {s}\n", .{d.code});
+        try w.print("  explain:  cmo explain {s}\n", .{d.code});
     }
 }
 
 test "json envelope shape" {
     var buf: [1024]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var w = Writer.fixed(&buf);
 
     const diag = Diagnostic{
         .code = "CLI001",
         .message = "unknown subcommand 'foo'",
-        .help = "run `cmotion help` for available commands",
+        .help = "run `cmo help` for available commands",
         .fix_safety = .@"requires-human-review",
     };
-    try writeJson(fbs.writer(), .{ .ok = false, .diagnostics = &.{diag} });
-    const out = fbs.getWritten();
+    try writeJson(&w, .{ .ok = false, .diagnostics = &.{diag} });
+    const out = w.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, out, "\"schemaVersion\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "\"code\":\"CLI001\"") != null);

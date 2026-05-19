@@ -107,7 +107,7 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
         return 2;
     };
 
-    const w = ctx.stdout.writer();
+    const w = ctx.stdout;
     if (ctx.options.json) {
         try w.print(
             "{{\"schemaVersion\":1,\"code\":\"{s}\",\"title\":\"{s}\",\"body\":",
@@ -126,16 +126,16 @@ fn lookup(code: []const u8) ?Entry {
     return null;
 }
 
-fn writeJsonString(writer: anytype, s: []const u8) !void {
-    try writer.writeByte('"');
+fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
+    try w.writeByte('"');
     for (s) |b| switch (b) {
-        '"' => try writer.writeAll("\\\""),
-        '\\' => try writer.writeAll("\\\\"),
-        '\n' => try writer.writeAll("\\n"),
-        '\r' => try writer.writeAll("\\r"),
-        '\t' => try writer.writeAll("\\t"),
-        0...0x1f => try std.fmt.format(writer, "\\u{x:0>4}", .{b}),
-        else => try writer.writeByte(b),
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{b}),
+        else => try w.writeByte(b),
     };
-    try writer.writeByte('"');
+    try w.writeByte('"');
 }

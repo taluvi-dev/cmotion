@@ -7,6 +7,8 @@ const fmt_cmd = @import("commands/fmt.zig");
 const explain_cmd = @import("commands/explain.zig");
 const version_cmd = @import("commands/version.zig");
 
+pub const Writer = std.Io.Writer;
+
 pub const Options = struct {
     json: bool = false,
     no_color: bool = false,
@@ -24,15 +26,14 @@ pub const Command = enum {
 pub const Context = struct {
     allocator: std.mem.Allocator,
     options: Options,
-    stdout: std.fs.File,
-    stderr: std.fs.File,
+    stdout: *Writer,
+    stderr: *Writer,
 
     pub fn emit(self: Context, packet: diag.Packet) !void {
-        const w = self.stdout.writer();
         if (self.options.json) {
-            try diag.writeJson(w, packet);
+            try diag.writeJson(self.stdout, packet);
         } else {
-            try diag.writeText(w, packet);
+            try diag.writeText(self.stdout, packet);
         }
     }
 
@@ -41,7 +42,12 @@ pub const Context = struct {
     }
 };
 
-pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !u8 {
+pub fn run(
+    allocator: std.mem.Allocator,
+    args: [][:0]u8,
+    stdout: *Writer,
+    stderr: *Writer,
+) !u8 {
     var options: Options = .{};
     var positional: std.ArrayListUnmanaged([]const u8) = .{};
     defer positional.deinit(allocator);
@@ -65,12 +71,12 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !u8 {
     var ctx = Context{
         .allocator = allocator,
         .options = options,
-        .stdout = std.io.getStdOut(),
-        .stderr = std.io.getStdErr(),
+        .stdout = stdout,
+        .stderr = stderr,
     };
 
     if (positional.items.len == 0) {
-        try printUsage(ctx.stdout.writer());
+        try printUsage(ctx.stdout);
         return 0;
     }
 
@@ -81,7 +87,7 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !u8 {
         try ctx.emitError(.{
             .code = "CLI001",
             .message = try std.fmt.allocPrint(allocator, "unknown subcommand '{s}'", .{cmd_name}),
-            .help = "run `cmotion help` for the list of subcommands",
+            .help = "run `cmo help` for the list of subcommands",
             .fix_safety = .@"requires-human-review",
             .repair = .{
                 .id = "use-known-subcommand",
@@ -92,9 +98,9 @@ pub fn run(allocator: std.mem.Allocator, args: [][:0]u8) !u8 {
     };
 
     return switch (cmd) {
-        .help => {
-            try printUsage(ctx.stdout.writer());
-            return 0;
+        .help => blk: {
+            try printUsage(ctx.stdout);
+            break :blk @as(u8, 0);
         },
         .version => version_cmd.run(ctx, rest),
         .parse => parse_cmd.run(ctx, rest),
@@ -123,8 +129,8 @@ fn parseCommand(s: []const u8) ?Command {
     return null;
 }
 
-fn printUsage(writer: anytype) !void {
-    try writer.writeAll(
+fn printUsage(w: *Writer) !void {
+    try w.writeAll(
         \\cmotion — the cmotion DSL toolchain
         \\
         \\The binary name is `cmotion`. The installer registers `cmo` as a
