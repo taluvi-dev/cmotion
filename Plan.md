@@ -1,213 +1,316 @@
 # Plan.md — handoff for the next agent
 
-Working hand-off. Read `CLAUDE.md` first for durable project orientation;
-this file is *what just shipped* and *what to pick up*. The canonical
-syntactic spec lives at https://cmotion.org/language/grammar/#ebnf
-(mirrored as `GRAMMAR.md`) — read it before extending the language.
+Working hand-off. Read `CLAUDE.md` first for durable project
+orientation; this file is *what just shipped* and *what to pick up*.
+The canonical syntactic spec lives at
+https://cmotion.org/language/grammar/#ebnf (mirrored as `GRAMMAR.md`)
+— read it before extending the language.
 
-## What just shipped on this branch (`claude/build-interpreter-ZqsfA`)
+## End-state render architecture (where this is heading)
 
-Nine commits, all green (65/65 tests). The pipeline is closed end-to-end:
+The eventual stack, set in chat:
 
 ```
-.cm source → parse → lower → eval → sample(t) → render → png
+Zig
+  ↓
+SDL3                         (window / surface / input, native only)
+  ↓
+Dawn / WebGPU                (cross-platform GPU; browser uses its own WebGPU)
+  ↓
+custom 2D renderer           ← what render.zig is becoming; CPU reference,
+                               GPU implementation later via WGSL shaders
+  ↓
+text shaping: HarfBuzz       (kerning, ligatures, complex scripts — v1)
+  ↓
+font raster: FreeType or stb_truetype  (outline rasterisation — stb v0)
 ```
 
-~13 ms cold for the taste sample at 320×180. Commit list:
+**Two complementary rendering paths**, both consuming the same value
+tree from the sampler:
 
-1. **Explain-coverage test + `lower.zig` audit.** `commands/explain.zig`
-   now embeds every CLI source file and asserts every `.code = "..."`
-   emit site resolves through `lookup`. The `endsWith`/`startsWith`
-   audit of `lower.zig` found only token-level checks already protected
-   by tree-sitter leaf-node boundaries; no code change.
-2. **Interpreter v0** — `value.zig`, `eval.zig`, `commands/eval.zig`.
-   Literals, idents, paren, unary, binary (same-unit propagation),
-   blocks-with-let. Diagnostic codes `EVL001/002/003` registered. Row
-   added to the namespace table.
-3. **Aggregates + control flow** — array, record, index, field-access,
-   if/else, match (literal / ident / wildcard patterns). No new codes.
-4. **Calls + method chains + `animate`/`compose` + scene invocation.**
-   The big slice. `Value.constructed` staging variant for stdlib calls
-   we haven't typed yet. Color components widened to `*const Value` to
-   carry animated channels. Unresolved name paths become zero-arg
-   `Constructed` values (so wildcard-imported names don't EVL003).
-   Top-level scenes / components / filters whose params all have
-   defaults are invoked automatically. The cmotion.org taste sample
-   evaluates to a complete `compose(...)` value tree with no
-   diagnostics — Plan.md's stage-4 milestone is hit.
-5. **`CLAUDE.md` points at the EBNF.** A previous session missed it.
-6. **Lambdas + closures** — every EBNF expression form is now covered
-   by eval. Snapshot-style closure capture (each binding copied into
-   the arena at lambda creation). Argument binding mixes positional
-   and named per the EBNF's `arg = [ ident , ":" ] , expr`. New
-   `EVL004` for missing-required-argument. The dead `unsupported` /
-   EVL001 emit site from v0 is gone now that every form is covered.
-7. **Stream sampler** — `cmo eval --at <t>`. New `src/sampler.zig`
-   walks the value tree and resolves every `Constructed("animate", …)`
-   to its value at `t` (linear interpolation; `repeat: forever` wraps
-   modulo the keyframe span). Reframes the value tree per the cmajor
-   parallel: the interpreter produces a video-stream description, the
-   sampler turns it into a still-frame description. `CLI011` for
-   malformed `--at` duration spec.
-8. **Software renderer + `cmo render`.** New `src/render.zig`. Honours
-   `compose [layers]`, `rect(width, height, fill)`, and hex / oklch
-   colours (oklch → sRGB via Ottosson's reference matrices). RGBA8
-   framebuffer, source-over compositing. PPM (P6) output. Everything
-   else (3D content, lights, materials, …) is silently dropped — the
-   taste preview is currently just the dark background. `REN001/002`,
-   `CLI012`. New namespace row.
-9. **PNG output.** Hand-rolled encoder in `render.zig` (~130 lines,
-   no new deps). RGBA8, stored deflate, standard CRC32/Adler-32 from
-   `std.hash`. `cmo render --out frame.png` picks the encoder by the
-   output extension. iPad-friendly.
+- **CPU / WASM (canonical, this branch's focus):** `render.zig`
+  compiled native for the CLI and to wasm32 for the browser editor
+  and Cloudflare containers. Deterministic, runs everywhere bits
+  run, produces the final bounce. *No GPU dependency anywhere on
+  this path.*
+- **GPU realtime (editor preview, deferred):** SDL3 window hosting
+  Dawn/WebGPU on native, browser's own WebGPU on the web. Shaders
+  mirror the CPU reference within a tolerance. Optimised for
+  latency during authoring, not for canonical pixels.
 
-State: `zig build` + `zig build test` (65/65) both work in-session via
-the existing session-start hook. The taste sample renders to a valid
-PNG in ~13 ms; the visible output is just the background colour today
-because the 3D glyph constructors are still no-ops in the renderer.
+The current arc (visual fidelity in the CPU renderer) is **building
+the reference**. Once the CPU renderer matches the example, the GPU
+path is "port these algorithms to WGSL and verify output stays
+within tolerance." HarfBuzz layers on top of FreeType/stb_truetype
+when complex text becomes a need; stb_truetype alone is v0.
 
-Decision log (where the renderer / interpreter diverges from "obvious"):
+The rest of this file is the **active priority arc** — what's
+actually next, not the multi-year shape above.
 
-- **`Value.constructed` is the staging variant for un-typed stdlib
-  calls.** A previous Plan.md decision was "typed records all the
-  way"; Constructed is still typed (tagged by name) but acts as a
-  renderer-facing staging area. Specific constructors graduate to
-  dedicated variants when the renderer has shape expectations for
-  them. Nothing has graduated yet.
-- **Color components are `*const Value`, not `Number`.** Cmotion colors
-  can have animated channels (`oklch(0.78, 0.20, hue)`); the sampler
-  resolves them.
-- **Unresolved name paths become zero-arg Constructed values.** Without
-  module manifests we can't tell `forever` (a stdlib name) from a typo;
-  `cmo check` (NAM003) is the typo path; `cmo eval` keeps running.
-- **Snapshot closures, not late-binding.** Each capture is a value at
-  creation time. Mutual recursion via two `let`s in the same block
-  doesn't see each other yet; defer until something forces it.
+## What just shipped on this branch (`claude/continue-plan-md-4Ms7e`)
+
+Six commits, all green (76/76 native tests + WASM-vs-native pixel
+parity). The renderer reads as the taste sample *structurally* but
+not yet *visually* — see "Why this isn't done yet" below.
+
+```
+.cm source → parse → lower → eval → sample(t) → render → png / wasm
+                                                              │
+                                                              ├── native CLI (link in cmotion binary)
+                                                              └── cmotion-render.wasm (18.7 KB, freestanding)
+```
+
+Commits, in order:
+
+1. **Place shapes by canvas centre with `at:` and `translate(...)`.**
+   Centered-by-default convention; `rect(at: vec2(...))` shifts the
+   centre; `translate(shape, x:, y:)` (also the `.translate(...)`
+   method-chain form) wraps a child. (0,0) = canvas centre, +x right,
+   +y down. `fillRect` moved to f64 coords + internal clamping so
+   negative / off-canvas positions work.
+2. **Drop the 3D wrappers through to a flat fallback.** `render3d`,
+   `extrude`, `material`, `rotate`, `scale` are no-op wrappers in v0
+   that paint their first positional child flat. `Style` accumulator
+   propagates `material.fill:` to fill-less inner shapes; an inner
+   `fill:` still wins. **None of the 3D semantics are honoured today
+   — this is the gap we're filling next.**
+3. **Paint `text.glyph` as block-letter bitmap text.** 5×7 bitmap
+   font (A-Z, 0-9, basics) scaled to `size:` (default 96px). Picks up
+   the inherited material colour. Placeholder until real TTF lands.
+4. **Wire `oklab(...)` and `srgb(...)` colour literals.** Both routed
+   through the same Ottosson matrices oklch already uses; srgb reads
+   channels in 0..1.
+5. **Real deflate for PNG — Up filter + fixed-Huffman + LZ77.**
+   Taste-sample PNG dropped from 230 KB to 2.6 KB. Hand-rolled
+   because Zig 0.15.1's `std.compress.flate.Compress` is broken
+   (`bit_writer` field referenced but missing, `Container.writeFooter`
+   missing). Round-trip test through stdlib `Decompress` validates
+   the bit stream.
+6. **Build the renderer as WASM, prove byte-parity with native.**
+   Second compilation target via `zig build wasm` →
+   `cmotion-render.wasm` (~18.7 KB at ReleaseSmall, wasm32-freestanding,
+   no libc). `zig build test-parity` renders the same fixture both
+   ways under Node and asserts byte-equality across all 320×180×3
+   pixel channels. Session-start hook pre-builds the WASM artifact.
+
+The WASM build only exports `render_taste(w, h, out)` against a
+hand-built scene today — the full `render_cm(source, t, w, h, out)`
+that takes `.cm` source is blocked on cross-compiling tree-sitter +
+the parser to WASM, and on a couple of POSIX shims. **That work is
+deferred** — see "Don't" below.
+
+## Why this isn't done yet — the visual gap
+
+The taste sample on cmotion.org renders as a 3D extruded letter "C"
+in a warm metallic-ish material, rotating around Y, wobbling around
+X, pulsing in scale, lit by ambient + two directional lights. The
+CLI today renders a flat block-letter C in solid colour. *Every*
+3D wrapper unwraps to its child; the rotation/scale/wobble
+animations sample correctly but the resolved values are dropped on
+the floor; lights aren't a concept the renderer knows about.
+
+Visible gaps, in order of impact:
+
+1. **Letter is blocky, not Inter Bold** — block-letter bitmap vs a
+   real TTF rasteriser.
+2. **Letter is flat, not extruded** — no 3D mesh from the outline.
+3. **No 3D rasteriser** — `render3d` is a no-op; there's no
+   transform → project → z-buffer → shade pipeline.
+4. **No lighting** — ambient + directional lights have nowhere to
+   apply. The "C" has no normals to light against.
+5. **Animations sample but don't visibly move** — rotate / scale
+   transforms are dropped by the flat-fallback unwrap, so even
+   though `sampler.sampleAt(t=2s)` produces the right numbers, the
+   renderer ignores them.
+6. **Two sampler holes** — `easing.out_cubic` is recognised but
+   ignored (pulse animates linearly), and `wave(amplitude, period)`
+   isn't resolved at all (wobble passes through as an opaque
+   `Constructed`).
+7. **Material params lost** — `metalness`, `roughness` are dropped
+   along with the rest of `.material(...)`.
 
 ## What to pick up — in priority order
 
-### 1. Make the preview *look* like the taste sample
+This is the arc to **make the CLI render look like the cmotion.org
+example**. Six focused commits, smallest visible payoff first.
+Browser delivery is on pause until this lands — it's pointless to
+ship a flat block-letter C to the iPad.
 
-Today the rendered PNG shows the dark `oklch(0.10, 0.04, 280)`
-background and nothing else — every other constructor in the taste
-sample (`extrude`, `text.glyph`, `wave`, `render3d`, lights, …) is a
-no-op in `render.zig`. Each one is a small `paintX` function. Suggested
-order, smallest visible payoff first:
+### 1. Sampler completeness — easing + `wave(...)`
 
-- **`translate(x: ..., y: ...)` + a position arg on `rect`.** Today every
-  rect paints from the canvas top-left, which is a *position* bug
-  staring at the viewer. Pick a convention (centered-by-default? `at:
-  vec2(x, y)`?), implement, write tests with two rects at different
-  positions.
-- **A 3D fallback.** `extrude(text.glyph("C", ...), depth: 80px)`
-  could render as a flat outline of the glyph at the canvas center —
-  not 3D, but the right *shape* in the right place. Drop the depth,
-  drop the material, drop the rotation. The taste preview suddenly
-  reads as "letter C on a dark background." That's the goal.
-- **Basic text** — pick a font (Inter Bold is in the taste; we can ship
-  a single vendored TTF or compile-time-embed a minimal one). Glyph
-  rasterization from a TTF is the awkward part; alternatively, render
-  text as block letters (low-fi but works).
-- **Color extras** — `oklab(...)` and `srgb(...)` literals are wired
-  through eval but render as magenta. ~20 lines each.
+Two small additions to `sampler.zig`, no renderer changes:
 
-Each of these is 1 commit, ships visible output. Good morale loop.
+- **`wave(amplitude, period)` resolver.** Treat the `Constructed`
+  as a continuous function: `value = amplitude · sin(2π · t /
+  period)`. Honours `amplitude` units (deg, rad, …) by carrying the
+  unit through to the output number. ~20 LOC.
+- **Easing curves applied to `animate{}`.** Look up
+  `opts.easing` as `Constructed("easing.<name>", [])` and feed the
+  named curve to the interpolation fraction. Start with
+  `out_cubic`, `in_cubic`, `in_out_cubic`, `linear` (the
+  default). ~30 LOC.
 
-### 2. Real deflate for PNG (~150 lines, no new deps)
+After this commit: `cmo eval --at 0.5s` of `pulse` returns `1.06`,
+not the linear `1.03`. `wobble` at `t=3s` returns
+`8.6·sin(π/2) = 8.6deg`, not an opaque `wave(...)` constructor.
+The renderer can't show the difference yet — that's later commits
+— but every number coming out of the sampler is now the *right*
+number.
 
-Current PNGs use stored deflate, so a 320×180 RGBA is ~230 KB.
-`std.compress.flate` (or a hand-rolled LZ77 + static Huffman) brings
-that to ~5 KB for the kind of mostly-flat-color output the v0 renderer
-produces. The boundary stays at `writePng`; nothing else changes.
-Needed before golden-image regression tests scale — see (4).
+Tests: extend `sampler.zig`'s existing test suite with a
+known-value table for each easing curve at known fractions, and
+sample `wave(...)` at quarter-period multiples.
 
-### 3. Phase 2 — WASM-component renderer behind wasmtime
+### 2. Real TTF font — `stb_truetype` + Inter Bold
 
-Today's `render.zig` is linked directly into `cmo`. The goal (per the
-WIT in chat) is a renderer WASM component that the CLI loads via
-wasmtime, and the *same* component runs in a browser. The work splits:
+Vendor `stb_truetype.h` (single-header, ~2 KLOC C, MIT, no
+transitive deps) under `apps/cli/vendor/`. Vendor Inter Bold (OFL,
+~300 KB .ttf) under the same place; pin a specific version in
+`scripts/fetch-deps.sh` so it survives a clean clone.
 
-- **Vendor `wasmtime-c-api`.** Prebuilt artefact in `apps/cli/vendor/`
-  or built from source via cargo in the session-start hook. ~80 MB
-  precompiled.
-- **WIT scaffolding.** `interface video-renderer { record frame { ... }
-  ; render: func(time-samples: u64, scene: u32) -> frame }`. Decide:
-  scene is a u32 index *or* the scene description is passed as bytes.
-  Bytes-as-payload is the simpler v0 because it doesn't require
-  cmotion → WASM codegen (stage 5).
-- **Guest module.** Compile `render.zig` (or a Zig fork of it) to
-  `wasm32-wasi`. Imports nothing, exports `render`. Serialise the
-  sampled value tree → bytes on the host side (JSON is the obvious
-  v0; CBOR/msgpack later).
-- **Host switch.** Replace the direct `render.renderTree` call in
-  `commands/render.zig` with a wasmtime instance call. The CLI surface
-  doesn't change.
+Replace `apps/cli/src/render.zig`'s block-letter path:
 
-Renderer logic doesn't change between phases. Once this lands, the web
-side can `import { engine } from './engine.wasm'` and get the same
-pixels we produce on the CLI.
+- New `apps/cli/src/font.zig` wraps the stb FFI:
+  `loadFont(bytes) → Font`, `glyphOutline(font, codepoint, size_px) →
+  []Contour`, where each `Contour` is a list of cubic Bézier
+  segments (or pre-flattened line segments for v0 — simpler).
+- `paintTextGlyph` uses the outline at the requested size, rasterises
+  with a coverage-based scanline fill (or stb's
+  `stbtt_GetGlyphBitmap` for v0 — black box but works), composites
+  with the inherited material colour.
 
-### 4. Golden-image regression tests
+After this commit: the C is a real, kerned Inter Bold C, still flat
+2D. Visually the biggest single jump.
 
-Once (2) lands and PNG fixtures are ~5 KB each, add `tests/golden/`
-with reference PNGs for a few small `.cm` test programs at known `t`
-values. A new test (in `render.zig` or a sibling) re-renders each and
-byte-compares to the fixture. Catches renderer regressions cheaply.
+### 3. Mesh from outline — `extrude(outline, depth)`
 
-Until then, the per-pixel `expectEqual` style in `render.zig`'s
-existing tests is the bar.
+No renderer changes. Pure data:
 
-### 5. Animation depth
+- New `apps/cli/src/mesh.zig`. `Mesh` struct: positions `[]Vec3`,
+  normals `[]Vec3`, indices `[]u32`, plus a flat `material:
+  MaterialId` if we want to thread fill through. The geometry
+  pipeline produces these from a 2D outline + a depth scalar.
+- `extrude(outline, depth: px)` returns a mesh with two faces (front
+  + back) tessellated from the outline (ear-clipping triangulation
+  for v0; mostly-convex letter glyphs handle it well) plus side
+  walls (quad strip per outline segment, two triangles each).
+- Method-chain wrappers (`.material(...)`, `.rotate(...)`,
+  `.scale(...)`) start producing structured data instead of opaque
+  `Constructed`. The flat-fallback unwrap in render.zig stays as
+  the fallback path for things that don't yet have a mesh.
 
-The sampler is linear-only today and ignores `easing.*` / `direction:` /
-multi-track / springs. Each is a focused addition to `sampler.zig`:
+After this commit: still nothing visible, but `extrude(...)`
+returns a mesh you can inspect via `cmo eval --json`. Builds
+confidence in the data shape before the rasteriser consumes it.
 
-- **Easing.** Look up `opts.easing` as a `Constructed("easing.<name>", [])`
-  and apply the curve to the interpolation fraction. Cubic-in/out and a
-  small library of named curves covers most cases.
-- **Colour blending in oklch space** (currently floor-sampling for
-  non-number keyframe values). Needs a "lerp two colors in their stated
-  space" helper in `value.zig`.
-- **`delay: <duration>`** — shift the local `t` before interpolation.
-- **Springs** — physics-based, time-domain integration. Heavier; punt
-  until something asks for it.
+### 4. 3D rasteriser with lights — the big one
 
-## Decisions left to the user
+The cornerstone commit. Roughly:
 
-- **Which next? (1) (2) (3) (4) (5)?** Recommendation: **(1)** for two
-  commits to make the preview readable, then **(2)** before golden
-  tests pile up at 230 KB each, then **(3)** to close the cross-surface
-  loop.
-- **Renderer guest language for phase 2** — Zig (no new toolchain,
-  reuses `render.zig` mostly verbatim) or Rust (best Component Model
-  support today; AssemblyScript was a third option but its WIT support
-  lags). Recommendation: Zig.
-- **Position convention for shapes** — centered-by-default with a
-  top-left override, or top-left-by-default with an `at:` arg? The EBNF
-  doesn't say. Whichever is picked should land with the `translate`
-  commit.
-- **What to do with the now-orphan `EVL001` and `EVL003` explain
-  entries?** Both are registered but unemitted in the interpreter.
-  `commands/eval.zig`'s catch-all still emits EVL001 on a Zig-error
-  bubble; EVL003 is documented as reserved for when modules land and
-  we can tell typos from imports. Leave them.
+- **Transform stage.** Model → world (apply `rotate`, `scale`,
+  `translate` as 4×4 matrices; sampler-resolved animation scalars
+  feed the matrices). World → view (camera at origin, looking down
+  -Z; perspective projection with a fixed FOV for v0). View → clip
+  → screen.
+- **Rasterise.** Scanline-fill triangles with perspective-correct
+  barycentric interpolation of normals. Z-buffer is a `[w*h]f32`
+  arena slice. No SIMD yet; just clean Zig.
+- **Shade.** Per-fragment Lambertian against ambient + directional
+  lights. `lights:` is an array of constructed values; the renderer
+  reads `ambient(intensity)` and `directional(from: vec3, intensity)`
+  forms. `material.fill` is the albedo; metalness / roughness are
+  read but ignored (cosmetic for the next commit).
+- **Compose** into the existing 2D framebuffer. The 3D layer rasterises
+  over whatever the 2D background put down. Compose stays the v0
+  back-to-front rule.
+
+After this commit: **the taste sample renders as a 3D, lit,
+rotating, pulsing, wobbling letter C against the dark background.
+The level of the example.**
+
+Test: render at `t=0`, `t=1.5s`, `t=3s` and assert the bounding box
+of the lit pixels moves the way the rotation says it should.
+Numerical, not perceptual.
+
+### 5. Material refinement — metalness + roughness + multi-light
+
+Once (4) lands, the C looks 3D but flat-shaded (only diffuse). Add:
+
+- **Specular term** — simplified GGX-ish (or Blinn-Phong if we want
+  fewer lines). Roughness controls the highlight tightness;
+  metalness controls how much of the diffuse goes away and how much
+  of the specular tints with the albedo.
+- **Multi-light specular summation** — the taste sample's two
+  directionals from very different angles should produce two
+  highlights on a roughness-0.35 metal-ish surface. That's the
+  *visual character* of the example.
+
+After this commit: the C reads as the warm metallic letter from
+cmotion.org, with the right two highlights.
+
+### 6. (Optional) MSAA / supersampling
+
+3D rasteriser edges are jaggy at 320×180. Either:
+
+- 4× supersampling: render at 640×360, box-filter to 320×180. ~30
+  LOC, slow (4× cost), great quality.
+- MSAA: per-fragment coverage masks, sample shading once but rasterise
+  edges at 4× resolution. ~150 LOC, fast, near-equivalent quality.
+
+Defer until (1)-(5) ship. The PNG output is already at 2.6 KB so
+the cost of "slightly fatter PNGs from supersampling smoke" is
+negligible.
+
+## What's deferred
+
+- **Browser editor / `/play` page.** No point until the renderer
+  looks right. `cmotion-render.wasm` continues building green via
+  the existing parity test; we don't expand its surface.
+- **Full `render_cm(source, t, w, h, out)` in WASM.** Needs
+  tree-sitter cross-compiled to WASM + POSIX shims. Tackle when
+  the visual fidelity work lands and the browser editor becomes
+  the focus.
+- **AI-assisted editing UX.** Out of scope until the renderer can
+  show what the user is asking the AI to change.
+- **WebGPU realtime preview / SDL3 / Dawn.** Optional separate
+  track for an eventual native editor; not blocking anything.
+- **Audio pipeline (`std.audio`).** Separate workstream when assets
+  matter.
+- **Image / video / 3D-model asset callbacks.** Shape designed in
+  earlier planning; wait until the renderer can show them.
+- **Golden-image regression tests** (old Plan.md priority 4). Will
+  matter once the 3D pipeline lands; today there's not enough
+  visual stability yet for a fixture-based suite.
 
 ## Don't
 
 - **Don't redesign the value tree to be renderer-aware.** The
-  interpreter produces descriptions; the renderer interprets them. If
-  the renderer wants a new shape, add a `Value.<x>` variant *and*
-  graduate the corresponding `Constructed("x", ...)` callers — don't
-  pre-bake renderer concerns into eval.
-- **Don't add backends (CanvasKit / WGSL) before phase 2 lands.** They
-  consume the same WIT contract; building them parallel to the
-  software renderer creates drift.
-- **Don't expand `check.zig` into a full typechecker as a side quest.**
-  Stage 2 grows out of what the interpreter and renderer found
-  ambiguous — pull, don't push.
-- **Don't make the sampler renderer-shaped.** It produces a `Value`
-  tree of the same shape as eval's output. The renderer is the only
-  consumer that knows about pixels.
-- **Don't try to pull the Three.js `ScenePreview` into the loop.** It's
-  marketing on cmotion.org; the real preview is what `cmo render` (and,
-  once phase 2 lands, the WASM component) produces.
+  interpreter produces descriptions; the renderer interprets them.
+  When the 3D pipeline wants a new shape (`Mesh`, `Light`, …), add
+  a `Value.<x>` variant *and* graduate the corresponding
+  `Constructed("x", ...)` callers — don't pre-bake renderer
+  concerns into eval.
+- **Don't expand the WASM build's surface during the 3D work.**
+  The parity test catches non-deterministic regressions on the
+  `render_taste` path; that's enough. Don't try to land
+  `render_cm` (parser-in-WASM) and the 3D pipeline at the same
+  time.
+- **Don't make the sampler renderer-shaped.** It produces a Value
+  tree of the same shape as eval's output. The renderer is the
+  only consumer that knows about pixels — and now, normals,
+  transforms, lights.
+- **Don't expand `check.zig` into a full typechecker as a side
+  quest.** Stage 2 grows out of what the renderer found ambiguous —
+  pull, don't push.
+- **Don't add backends (CanvasKit / WGSL / native GPU) before the
+  software renderer matches the example.** The CPU/WASM render is
+  the canonical production path (Cloudflare containers, iPad
+  Safari, edge functions — none of them have GPUs); the eventual
+  GPU pipeline is realtime-preview-only.
+- **Don't reach for SIMD / threading optimizations in the 3D
+  pipeline before it works correctly.** Clean readable Zig first;
+  a 320×180 frame at ReleaseFast should be well under 100 ms even
+  naive. Optimize when something profiles slow.
+- **Don't try to pull the Three.js `ScenePreview` into the loop.**
+  It's marketing on cmotion.org; the real preview is what
+  `cmo render` produces.
