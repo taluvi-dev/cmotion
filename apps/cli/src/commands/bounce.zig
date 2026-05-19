@@ -161,26 +161,6 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
 
     const scene_value = eval_result.bindings[0].value;
 
-    // Open output, set up APNG writer.
-    var file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
-        try ctx.emitError(.{
-            .code = "REN002",
-            .message = try std.fmt.allocPrint(
-                ctx.allocator,
-                "could not write output file {s}: {s}",
-                .{ out_path, @errorName(err) },
-            ),
-            .span = .{ .path = out_path },
-            .fix_safety = .@"requires-human-review",
-            .repair = .{ .id = "fix-output-path", .summary = "Ensure the directory exists and is writable." },
-        });
-        return 1;
-    };
-    defer file.close();
-
-    var file_buf: [4096]u8 = undefined;
-    var file_writer = file.writer(&file_buf);
-
     const total_frames = @as(u32, @intFromFloat(@ceil(duration_s * @as(f64, @floatFromInt(fps)))));
     if (total_frames == 0) {
         try ctx.emitError(.{
@@ -192,8 +172,45 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
         return 1;
     }
 
+    // Pick output format from the --out extension. `.mp4` → shell
+    // out to ffmpeg (PNG sequence in a tmp dir + libx264 mux);
+    // anything else → animated PNG, written inline via our PNG
+    // encoder. MP4 needs ffmpeg installed; APNG has zero external
+    // dependencies and works everywhere our renderer does.
+    if (std.mem.endsWith(u8, out_path, ".mp4")) {
+        return runMp4(ctx, arena.allocator(), scene_value, out_path, width, height, fps, total_frames, duration_s);
+    }
+    return runApng(ctx, arena.allocator(), scene_value, out_path, width, height, fps, total_frames, duration_s);
+}
+
+fn runApng(
+    ctx: Context,
+    arena: std.mem.Allocator,
+    scene_value: @import("../value.zig").Value,
+    out_path: []const u8,
+    width: u32,
+    height: u32,
+    fps: u32,
+    total_frames: u32,
+    duration_s: f64,
+) !u8 {
+    var file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
+        try ctx.emitError(.{
+            .code = "REN002",
+            .message = try std.fmt.allocPrint(ctx.allocator, "could not write output file {s}: {s}", .{ out_path, @errorName(err) }),
+            .span = .{ .path = out_path },
+            .fix_safety = .@"requires-human-review",
+            .repair = .{ .id = "fix-output-path", .summary = "Ensure the directory exists and is writable." },
+        });
+        return 1;
+    };
+    defer file.close();
+
+    var file_buf: [4096]u8 = undefined;
+    var file_writer = file.writer(&file_buf);
+
     var aw = try render.ApngWriter.init(
-        arena.allocator(),
+        arena,
         &file_writer.interface,
         width,
         height,
@@ -202,9 +219,51 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
         total_frames,
     );
 
-    // Per-frame: use a sub-arena so frame allocations don't pile
-    // up across the loop. The APNG header / final IEND chunk live
-    // on the outer arena.
+    var f: u32 = 0;
+    while (f < total_frames) : (f += 1) {
+        const t = @as(f64, @floatFromInt(f)) / @as(f64, @floatFromInt(fps));
+        var frame_arena = std.heap.ArenaAllocator.init(ctx.allocator);
+        defer frame_arena.deinit();
+        const fa = frame_arena.allocator();
+        const sampled = try sampler.sampleAt(fa, scene_value, t);
+        const fb = try render.renderTree(fa, sampled, width, height);
+        try aw.writeFrame(fb);
+    }
+    try aw.finish();
+    try file_writer.interface.flush();
+
+    try ctx.stdout.print(
+        "bounced {d} frames at {d}fps ({d:.2}s) {d}×{d} -> {s}\n",
+        .{ total_frames, fps, duration_s, width, height, out_path },
+    );
+    try ctx.timing.writeText(ctx.stdout);
+    return 0;
+}
+
+fn runMp4(
+    ctx: Context,
+    arena: std.mem.Allocator,
+    scene_value: @import("../value.zig").Value,
+    out_path: []const u8,
+    width: u32,
+    height: u32,
+    fps: u32,
+    total_frames: u32,
+    duration_s: f64,
+) !u8 {
+    // 1. Make a tmp dir for the PNG sequence.
+    var tmpl_buf: [256]u8 = undefined;
+    const tmpl = try std.fmt.bufPrint(&tmpl_buf, "/tmp/cmo-bounce-{d}-XXXXXX", .{std.os.linux.getpid()});
+    const tmp_dir_path = try arena.dupe(u8, tmpl);
+    // Replace XXXXXX with the current ns timestamp; cheap and good enough.
+    const ns = std.time.nanoTimestamp();
+    const ts_str = try std.fmt.allocPrint(arena, "{x}", .{@as(u64, @intCast(@mod(ns, 0xFFFFFFFFFF)))});
+    @memcpy(tmp_dir_path[tmp_dir_path.len - 6 ..][0..@min(6, ts_str.len)], ts_str[0..@min(6, ts_str.len)]);
+
+    try std.fs.cwd().makePath(tmp_dir_path);
+    defer std.fs.cwd().deleteTree(tmp_dir_path) catch {};
+
+    // 2. Render the frame sequence.
     var f: u32 = 0;
     while (f < total_frames) : (f += 1) {
         const t = @as(f64, @floatFromInt(f)) / @as(f64, @floatFromInt(fps));
@@ -214,10 +273,53 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
 
         const sampled = try sampler.sampleAt(fa, scene_value, t);
         const fb = try render.renderTree(fa, sampled, width, height);
-        try aw.writeFrame(fb);
+
+        const frame_path = try std.fmt.allocPrint(fa, "{s}/f{d:0>5}.png", .{ tmp_dir_path, f });
+        var frame_file = try std.fs.cwd().createFile(frame_path, .{});
+        defer frame_file.close();
+        var frame_buf: [4096]u8 = undefined;
+        var frame_writer = frame_file.writer(&frame_buf);
+        try render.writePng(fa, fb, &frame_writer.interface);
+        try frame_writer.interface.flush();
     }
-    try aw.finish();
-    try file_writer.interface.flush();
+
+    // 3. Shell out to ffmpeg.
+    const fps_str = try std.fmt.allocPrint(arena, "{d}", .{fps});
+    const input_pattern = try std.fmt.allocPrint(arena, "{s}/f%05d.png", .{tmp_dir_path});
+    const argv = [_][]const u8{
+        "ffmpeg",
+        "-y",                   "-loglevel",   "error",
+        "-framerate",           fps_str,
+        "-i",                   input_pattern,
+        "-c:v",                 "libx264",
+        "-preset",              "slow",
+        "-pix_fmt",             "yuv420p",
+        "-crf",                 "18",
+        out_path,
+    };
+    var child = std.process.Child.init(&argv, ctx.allocator);
+    child.stderr_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.spawn() catch |err| {
+        try ctx.emitError(.{
+            .code = "REN003",
+            .message = try std.fmt.allocPrint(ctx.allocator, "could not spawn ffmpeg: {s}", .{@errorName(err)}),
+            .help = "MP4 output requires ffmpeg on the PATH. Install it (e.g. `apt install ffmpeg`) or use a .apng output for a no-dependency path.",
+            .fix_safety = .@"requires-human-review",
+            .repair = .{ .id = "install-ffmpeg", .summary = "Install ffmpeg, or change --out to a .apng file." },
+        });
+        return 1;
+    };
+    const result = try child.wait();
+    if (result != .Exited or result.Exited != 0) {
+        try ctx.emitError(.{
+            .code = "REN003",
+            .message = try std.fmt.allocPrint(ctx.allocator, "ffmpeg exited non-zero ({s})", .{@tagName(result)}),
+            .fix_safety = .@"requires-human-review",
+            .repair = .{ .id = "check-ffmpeg-output", .summary = "Re-run with the frames preserved to inspect ffmpeg's stderr." },
+        });
+        return 1;
+    }
 
     try ctx.stdout.print(
         "bounced {d} frames at {d}fps ({d:.2}s) {d}×{d} -> {s}\n",
