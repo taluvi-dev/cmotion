@@ -1,0 +1,14 @@
+---
+title: Bouncing ball
+description: A 2D circle whose vertical position is driven by a looping keyframe animation.
+---
+
+import ExampleScene from '../../../components/ExampleScene.astro';
+import { BOUNCING_BALL_SOURCE } from '../../../examples/sources.ts';
+
+A flat-shaded `circle` over a near-white background. The ball's `y`
+position is bound to a three-keyframe `animate` block that
+ping-pongs between two extremes and loops `forever`. No 3D, no
+lighting — just a 2D layer with a `translate` postfix.
+
+<ExampleScene source={BOUNCING_BALL_SOURCE} />

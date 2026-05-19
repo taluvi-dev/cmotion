@@ -242,6 +242,32 @@ function buildRect(node: JsonNode): THREE.Object3D {
   return new THREE.Mesh(geom, mat);
 }
 
+function buildCircle(node: JsonNode): THREE.Object3D {
+  const f = namedFields(node);
+  const r = numberOf(f.radius) * pxToWorld;
+  const geom = new THREE.CircleGeometry(r, 64);
+  const mat = new THREE.MeshBasicMaterial({ color: toThreeColor(f.fill) });
+  return new THREE.Mesh(geom, mat);
+}
+
+// .translate(x?, y?, z?) on a layer. px units → world units via pxToWorld
+// (matches how rect/circle widths get scaled); unitless values pass
+// through, which is what 3D scenes expect.
+function buildTranslate(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
+  const args = positionalArgs(node);
+  const f = namedFields(node);
+  const inner = buildLayer(args[0], ctx);
+  if (!inner) return null;
+  const scale = (v: JsonNode): number => {
+    if (!v || v.kind !== "number") return 0;
+    return v.unit === "px" ? v.value * pxToWorld : v.value;
+  };
+  inner.position.x += scale(f.x);
+  inner.position.y += scale(f.y);
+  inner.position.z += scale(f.z);
+  return inner;
+}
+
 // extrude(shape, depth: ...). Shape is a positional first arg; today the
 // only translator-supported shape is `text.glyph(...)`.
 function buildExtrude(node: JsonNode, ctx: BuildCtx): THREE.Mesh | null {
@@ -372,6 +398,8 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   switch (node.name) {
     case "rect":
       return buildRect(node);
+    case "circle":
+      return buildCircle(node);
     case "render3d":
       return buildRender3d(node, ctx);
     case "extrude":
@@ -382,6 +410,8 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       return buildRotate(node, ctx);
     case "scale":
       return buildScale(node, ctx);
+    case "translate":
+      return buildTranslate(node, ctx);
     default:
       console.warn(`[cmotion-viewer] no translator for "${node.name}"`);
       return null;
