@@ -156,12 +156,19 @@ fn isFlatFallback(name: []const u8) bool {
         or std.mem.eql(u8, name, "scale");
 }
 
-/// `text.glyph(string, font?, size?)` — low-fi block-letter renderer.
-/// Each character is a 5×7 bit grid scaled to roughly `size` pixels
-/// tall (default 96px); the bitmap font covers uppercase A–Z, digits,
-/// space, `.,:-!?` and a placeholder box for anything else. The
-/// `font:` arg is read but unused (the renderer ships exactly one
-/// font); real TTF rasterization is a later slice.
+/// True for the native build, false for `wasm32-*`. Gates the TTF
+/// path (stb_truetype needs libm symbols the freestanding WASM
+/// target doesn't provide). WASM keeps the block-letter fallback
+/// until that target either gains math shims or moves to wasm32-wasi.
+const has_ttf_font = !@import("builtin").target.cpu.arch.isWasm();
+const font = if (has_ttf_font) @import("font.zig") else void;
+
+/// `text.glyph(string, font?, size?)` — paints each character through
+/// the bundled TTF on native, or as 5×7 block letters on WASM. The
+/// `font:` arg is read but unused (one font ships); `size:` controls
+/// the cap height in pixels (default 96). Glyphs are anti-aliased on
+/// native (coverage from stb_truetype composited via source-over);
+/// the block-letter WASM fallback is binary on/off.
 fn paintTextGlyph(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) void {
     var text_raw: []const u8 = "";
     var size_px: f64 = 96;
@@ -175,27 +182,129 @@ fn paintTextGlyph(c: value.Constructed, fb: *Framebuffer, off: Offset, style: St
     const text = stripQuotes(text_raw);
     if (text.len == 0) return;
 
-    // The bitmap font is 5×7; pick an integer pixel size for each cell
-    // so straight strokes stay crisp. A cell of 0 collapses the glyph
-    // entirely — clamp to at least 1.
+    const rgba: [4]u8 = if (style.fill) |fv| valueToRgba(fv) else .{ 255, 255, 255, 255 };
+
+    if (has_ttf_font) {
+        paintTextGlyphTTF(text, size_px, fb, off, rgba);
+    } else {
+        paintTextGlyphBlocks(text, size_px, fb, off, rgba);
+    }
+}
+
+/// Outline-based path: rasterise each codepoint via stb_truetype and
+/// composite the coverage bitmap into the framebuffer with the active
+/// material colour. Centres the run vertically on the cap-height
+/// midpoint (so a centred "C" sits visually at the canvas centre,
+/// not at the baseline) and horizontally on the total advance width.
+fn paintTextGlyphTTF(
+    text: []const u8,
+    size_px: f64,
+    fb: *Framebuffer,
+    off: Offset,
+    rgba: [4]u8,
+) void {
+    const size_f32: f32 = @floatCast(size_px);
+    const vm = font.vmetrics(size_f32);
+    const total_w: f32 = font.measureWidth(text, size_f32);
+
+    // Centre the visual block on the canvas centre + outer offset.
+    // We position the baseline so that (ascent + descent) / 2 sits at
+    // the requested centre — that's the visual middle of the glyphs,
+    // not the baseline itself.
+    const cx = @as(f64, @floatFromInt(fb.width)) / 2.0 + off.x;
+    const cy = @as(f64, @floatFromInt(fb.height)) / 2.0 + off.y;
+    var pen_x: f64 = cx - @as(f64, @floatCast(total_w)) / 2.0;
+    const baseline_y: f64 = cy - @as(f64, @floatCast(vm.ascent + vm.descent)) / 2.0;
+
+    for (text) |ch| {
+        const g = font.rasterise(ch, size_f32) orelse {
+            // No glyph in the font — advance by a quarter of the size
+            // as a placeholder (better than collapsing to zero).
+            pen_x += size_px * 0.25;
+            continue;
+        };
+        defer font.freeBitmap(g);
+
+        const gx = pen_x + @as(f64, @floatFromInt(g.x_offset));
+        const gy = baseline_y + @as(f64, @floatFromInt(g.y_offset));
+        blitCoverage(fb, g.pixels, g.width, g.height, gx, gy, rgba);
+        pen_x += @as(f64, @floatCast(g.advance));
+    }
+}
+
+/// Place an 8-bit coverage bitmap at (x0, y0) and composite it into
+/// the framebuffer as `rgba` with coverage-as-alpha. Source-over
+/// against whatever's already there. Clips to canvas bounds. The
+/// coverage path is the hot one for text — every glyph goes through
+/// this — so it's worth keeping it tight.
+fn blitCoverage(
+    fb: *Framebuffer,
+    coverage: []const u8,
+    cw: u32,
+    ch: u32,
+    x0: f64,
+    y0: f64,
+    rgba: [4]u8,
+) void {
+    const fb_w: i64 = @intCast(fb.width);
+    const fb_h: i64 = @intCast(fb.height);
+    const gx0_i: i64 = @intFromFloat(@floor(x0));
+    const gy0_i: i64 = @intFromFloat(@floor(y0));
+    const gw: i64 = @intCast(cw);
+    const gh: i64 = @intCast(ch);
+
+    const xs = @max(0, gx0_i);
+    const ys = @max(0, gy0_i);
+    const xe = @min(fb_w, gx0_i + gw);
+    const ye = @min(fb_h, gy0_i + gh);
+    if (xs >= xe or ys >= ye) return;
+
+    var row: i64 = ys;
+    while (row < ye) : (row += 1) {
+        const src_row: usize = @intCast(row - gy0_i);
+        var col: i64 = xs;
+        while (col < xe) : (col += 1) {
+            const src_col: usize = @intCast(col - gx0_i);
+            const cov = coverage[src_row * @as(usize, cw) + src_col];
+            if (cov == 0) continue;
+            const i = (@as(usize, @intCast(row)) * fb.width + @as(usize, @intCast(col))) * 4;
+            // Source colour pre-multiplied by coverage; source-over
+            // against destination. Final alpha clamps to opaque since
+            // text doesn't introduce transparency.
+            const sa = (@as(f32, @floatFromInt(rgba[3])) / 255.0) * (@as(f32, @floatFromInt(cov)) / 255.0);
+            const ia = 1.0 - sa;
+            inline for (0..3) |k| {
+                const dst = @as(f32, @floatFromInt(fb.pixels[i + k])) / 255.0;
+                const src = @as(f32, @floatFromInt(rgba[k])) / 255.0;
+                const out = src * sa + dst * ia;
+                fb.pixels[i + k] = @intFromFloat(@round(out * 255.0));
+            }
+            fb.pixels[i + 3] = 255;
+        }
+    }
+}
+
+/// Block-letter fallback — the 5×7 bitmap path that shipped before
+/// TTF rasterisation. Used by the WASM build (no libm in freestanding)
+/// and as a safety net if the bundled font ever fails to load.
+fn paintTextGlyphBlocks(
+    text: []const u8,
+    size_px: f64,
+    fb: *Framebuffer,
+    off: Offset,
+    rgba: [4]u8,
+) void {
     const cell_i: i64 = @max(1, @as(i64, @intFromFloat(@round(size_px / 7))));
     const cell: f64 = @floatFromInt(cell_i);
     const glyph_w = 5 * cell;
     const glyph_h = 7 * cell;
-    const advance = 6 * cell; // one-cell gap between glyphs
-    const total_w: f64 = if (text.len == 0)
-        0
-    else
-        advance * @as(f64, @floatFromInt(text.len - 1)) + glyph_w;
+    const advance = 6 * cell;
+    const total_w: f64 = advance * @as(f64, @floatFromInt(text.len - 1)) + glyph_w;
 
     const cx = @as(f64, @floatFromInt(fb.width)) / 2.0 + off.x;
     const cy = @as(f64, @floatFromInt(fb.height)) / 2.0 + off.y;
     var origin_x = cx - total_w / 2.0;
     const origin_y = cy - glyph_h / 2.0;
-
-    // `text.glyph` doesn't take its own fill; pick up the inherited
-    // material colour (or white if none).
-    const rgba: [4]u8 = if (style.fill) |fv| valueToRgba(fv) else .{ 255, 255, 255, 255 };
 
     for (text) |ch| {
         const bits = lookupGlyph(ch);
@@ -1115,13 +1224,16 @@ test "renderTree: text.glyph picks up the inherited material `fill:`" {
     const tree: value.Value = .{ .constructed = .{ .name = "material", .fields = mat_fields } };
 
     const fb = try renderTree(a, tree, 128, 128);
-    // Find any painted pixel and check it's green, not white.
+    // The TTF path produces anti-aliased coverage — edge pixels are
+    // partially covered, so the green channel ranges 1..255 across
+    // the glyph. Find a *core* pixel (>90% covered) and assert it's
+    // green-on-black, not white, magenta, or some other fallback.
     var i: usize = 3;
     var found = false;
     while (i < fb.pixels.len) : (i += 4) {
-        if (fb.pixels[i] != 0) {
+        if (fb.pixels[i - 2] > 230) {
             try std.testing.expectEqual(@as(u8, 0), fb.pixels[i - 3]);
-            try std.testing.expectEqual(@as(u8, 255), fb.pixels[i - 2]);
+            try std.testing.expect(fb.pixels[i - 2] > 230); // mostly green
             try std.testing.expectEqual(@as(u8, 0), fb.pixels[i - 1]);
             found = true;
             break;

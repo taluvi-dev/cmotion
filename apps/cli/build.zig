@@ -4,6 +4,10 @@ const ts_runtime_root = "vendor/tree-sitter";
 const ts_runtime_lib = ts_runtime_root ++ "/lib/src/lib.c";
 const grammar_root = "../../packages/tree-sitter-cmotion";
 const grammar_parser = grammar_root ++ "/src/parser.c";
+const stb_root = "vendor/stb";
+const stb_header = stb_root ++ "/stb_truetype.h";
+const stb_impl = "src/stb_impl.c";
+const font_file = "vendor/fonts/DMSans-Bold.ttf";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -30,9 +34,17 @@ pub fn build(b: *std.Build) void {
     exe_mod.addIncludePath(b.path(ts_runtime_root ++ "/lib/include"));
     exe_mod.addIncludePath(b.path(ts_runtime_root ++ "/lib/src"));
     exe_mod.addIncludePath(b.path(grammar_root ++ "/src"));
+    exe_mod.addIncludePath(b.path(stb_root));
 
     exe_mod.addCSourceFile(.{ .file = b.path(ts_runtime_lib), .flags = c_flags });
     exe_mod.addCSourceFile(.{ .file = b.path(grammar_parser), .flags = c_flags });
+    exe_mod.addCSourceFile(.{ .file = b.path(stb_impl), .flags = c_flags });
+
+    // Expose the bundled font under a named import so `@embedFile`
+    // in src/font.zig can reach it — `@embedFile` is gated to the
+    // module's package path, so a sibling vendor/ directory needs
+    // this indirection.
+    exe_mod.addAnonymousImport("font_ttf", .{ .root_source_file = b.path(font_file) });
 
     const exe = b.addExecutable(.{
         .name = "cmotion",
@@ -131,6 +143,27 @@ fn requireVendoredDeps(b: *std.Build) void {
             \\
             \\
         , .{grammar_parser});
+        std.process.exit(1);
+    };
+    cwd.access(stb_header, .{}) catch {
+        std.debug.print(
+            \\error: stb_truetype.h not found at {s}.
+            \\
+            \\Run apps/cli/scripts/fetch-deps.sh to vendor it, then re-run zig build.
+            \\
+            \\
+        , .{stb_header});
+        std.process.exit(1);
+    };
+    cwd.access(font_file, .{}) catch {
+        std.debug.print(
+            \\error: bundled font not found at {s}.
+            \\
+            \\Run apps/cli/scripts/fetch-deps.sh to fetch DM Sans Bold, then
+            \\re-run zig build.
+            \\
+            \\
+        , .{font_file});
         std.process.exit(1);
     };
     _ = b;
