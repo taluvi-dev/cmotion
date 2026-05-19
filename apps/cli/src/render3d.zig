@@ -342,25 +342,36 @@ fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
     for (lights) |l| {
         switch (l) {
             .ambient => |amb| {
-                // Hemispheric ambient — a cool sky tint from above,
-                // a warm ground tint from below, the equator a
-                // neutral grey. n.y selects the gradient (y-up in
-                // world space). The whole thing scales by the
-                // scene's ambient `intensity:` so users can dim
-                // it via the same knob they had before.
-                const sky_color: [3]f32 = .{ 0.55, 0.62, 0.78 };
-                const ground_color: [3]f32 = .{ 0.35, 0.30, 0.22 };
-                const t = normal.y * 0.5 + 0.5;
+                // Image-based lighting via a procedural sky/ground
+                // environment. Diffuse: sample env along the normal
+                // (cheap stand-in for full irradiance convolution).
+                // Specular: sample env along the reflection vector
+                // R, modulated by Fresnel × (1 − roughness)² (rough
+                // surfaces blur the reflection until it approaches
+                // diffuse — the "split-sum" approximation Epic
+                // popularised, simplified for our LDR-only env).
+                const env_diffuse = sampleEnvironment(normal);
+                const reflect = computeReflect(view, normal);
+                const env_specular = sampleEnvironment(reflect);
+
+                // Schlick Fresnel at normal-incidence-ish angle (we
+                // already bounded n_dot_v above). Roughness term
+                // dampens the spec reflection on rough surfaces.
+                const fres_n = 1.0 - n_dot_v;
+                const fres_n5 = fres_n * fres_n * fres_n * fres_n * fres_n;
+                const rough_atten = (1.0 - roughness) * (1.0 - roughness);
+
                 inline for (0..3) |k| {
-                    const hemi = std.math.lerp(ground_color[k], sky_color[k], t);
-                    // Energy-conserving: ambient only enters via the
-                    // diffuse channel (no F at ambient since we don't
-                    // know an incidence angle). Metalness suppresses
-                    // diffuse, so highly metallic surfaces darken
-                    // under pure ambient — that's physically correct
-                    // and matches what MeshStandardMaterial does in
-                    // Three.js without an environment map.
-                    lit[k] += albedo[k] * hemi * amb.intensity * (1.0 - metalness);
+                    // Diffuse irradiance (energy-conserving against
+                    // metalness — metals don't have a diffuse term).
+                    const diff = albedo[k] * env_diffuse[k] * (1.0 - metalness);
+                    // Specular reflection of the env. F0 modulated
+                    // by Schlick rim term so grazing angles
+                    // brighten — that's the visual signature of
+                    // proper IBL on metals.
+                    const F_env = f0[k] + (1.0 - f0[k]) * fres_n5;
+                    const spec = env_specular[k] * F_env * rough_atten;
+                    lit[k] += (diff + spec) * amb.intensity;
                 }
             },
             .directional => |dir| {
@@ -443,6 +454,46 @@ fn acesFilmic(x: f32) f32 {
     const d: f32 = 0.59;
     const e: f32 = 0.14;
     return std.math.clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+/// Procedural environment sampled by direction. The same sky/ground
+/// gradient the ambient pass uses, generalised so reflections of
+/// the env can show up on the surface of metals — that's what
+/// turns "lit metal" into "metallic-looking surface that reflects
+/// its world." Three lobes: a slightly-tinted zenith blue, a
+/// neutral horizon white-ish, a warm earthy nadir. No HDR yet —
+/// values stay in [0, 1] linear.
+fn sampleEnvironment(direction: Vec3) [3]f32 {
+    // Sky / horizon / ground colours. Picked to read as "outdoor
+    // overcast" — pleasant on metal without dominating diffuse.
+    const sky: [3]f32 = .{ 0.62, 0.71, 0.86 };
+    const horizon: [3]f32 = .{ 0.82, 0.81, 0.78 };
+    const ground: [3]f32 = .{ 0.30, 0.25, 0.20 };
+
+    const y = std.math.clamp(direction.y, -1.0, 1.0);
+    var out: [3]f32 = .{ 0, 0, 0 };
+    if (y >= 0) {
+        // Upper hemisphere: lerp horizon → sky as we look up.
+        const t = std.math.pow(f32, y, 0.6); // soft falloff for a more believable haze line
+        inline for (0..3) |k| out[k] = std.math.lerp(horizon[k], sky[k], t);
+    } else {
+        // Lower hemisphere: lerp horizon → ground as we look down.
+        const t = std.math.pow(f32, -y, 0.6);
+        inline for (0..3) |k| out[k] = std.math.lerp(horizon[k], ground[k], t);
+    }
+    return out;
+}
+
+/// Reflection vector: `R = 2 · (N · V) · N − V`, where `V` is the
+/// direction *from the surface to the viewer*. For a mirror, this
+/// is the direction the surface samples the environment from.
+fn computeReflect(view: Vec3, normal: Vec3) Vec3 {
+    const dot = normal.dot(view);
+    return Vec3{
+        .x = 2 * dot * normal.x - view.x,
+        .y = 2 * dot * normal.y - view.y,
+        .z = 2 * dot * normal.z - view.z,
+    };
 }
 
 fn writePixel(fb: *Framebuffer, x: u32, y: u32, rgba: [4]u8) void {
