@@ -597,12 +597,9 @@ pub const Lowerer = struct {
 
     fn spanOf(self: *Lowerer, node: ts.Node) ast.Span {
         _ = self;
-        const sp = ts.startPoint(node);
         return .{
             .start = ts.startByte(node),
             .end = ts.endByte(node),
-            .line = sp.row + 1,
-            .column = sp.column + 1,
         };
     }
 };

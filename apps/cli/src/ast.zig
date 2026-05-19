@@ -23,16 +23,46 @@ const std = @import("std");
 // Source spans
 //
 
+/// A byte range into the source buffer. 8 bytes. Line/column are NOT
+/// stored — they're derived on demand via `Span.location(source)` because
+/// most spans never feed a diagnostic and computing them up-front was a
+/// 16-byte tax on every node.
 pub const Span = struct {
     /// Byte offset into the source buffer (inclusive).
     start: u32,
     /// Byte offset into the source buffer (exclusive).
     end: u32,
-    /// 1-based line of `start`.
+
+    pub fn location(self: Span, source: []const u8) Location {
+        return locate(source, self.start);
+    }
+};
+
+pub const Location = struct {
+    /// 1-based line.
     line: u32,
-    /// 1-based column (in bytes) of `start`.
+    /// 1-based column, in bytes.
     column: u32,
 };
+
+/// Walk `source` up to `byte_offset` counting newlines. O(byte_offset) —
+/// fine for typical source files; a precomputed line-start table can slot
+/// in later if profiling shows it's worth it.
+pub fn locate(source: []const u8, byte_offset: u32) Location {
+    const end = @min(@as(usize, byte_offset), source.len);
+    var line: u32 = 1;
+    var col: u32 = 1;
+    var i: usize = 0;
+    while (i < end) : (i += 1) {
+        if (source[i] == '\n') {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    return .{ .line = line, .column = col };
+}
 
 //
 // Leaf-level data
@@ -408,7 +438,7 @@ test "Expr can recurse through pointers" {
 
     const inner_ident = Expr{
         .ident = .{
-            .span = .{ .start = 0, .end = 3, .line = 1, .column = 1 },
+            .span = .{ .start = 0, .end = 3 },
             .name = "foo",
         },
     };
@@ -419,11 +449,38 @@ test "Expr can recurse through pointers" {
 
     const paren = Expr{
         .paren = .{
-            .span = .{ .start = 0, .end = 5, .line = 1, .column = 1 },
+            .span = .{ .start = 0, .end = 5 },
             .inner = inner_ptr,
         },
     };
 
     try std.testing.expectEqual(@as(u32, 0), paren.span().start);
     try std.testing.expectEqualStrings("foo", paren.paren.inner.ident.name);
+}
+
+test "Span.location maps byte offsets to line/column" {
+    const source = "use std;\nlet x = 1;\nlet y = 2;\n";
+
+    // start of file
+    try std.testing.expectEqual(Location{ .line = 1, .column = 1 }, locate(source, 0));
+
+    // start of "let x" — offset 9 (after "use std;\n")
+    try std.testing.expectEqual(Location{ .line = 2, .column = 1 }, locate(source, 9));
+
+    // the "x" in "let x" — offset 13 ("use std;\nlet x")
+    try std.testing.expectEqual(Location{ .line = 2, .column = 5 }, locate(source, 13));
+
+    // start of "let y"
+    try std.testing.expectEqual(Location{ .line = 3, .column = 1 }, locate(source, 20));
+
+    // past end clamps to end
+    try std.testing.expectEqual(Location{ .line = 4, .column = 1 }, locate(source, 1000));
+
+    // method form
+    const span = Span{ .start = 13, .end = 14 };
+    try std.testing.expectEqual(Location{ .line = 2, .column = 5 }, span.location(source));
+}
+
+test "Span size shrank to 8 bytes" {
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(Span));
 }

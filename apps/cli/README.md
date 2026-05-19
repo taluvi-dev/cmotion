@@ -160,7 +160,10 @@ Categories and their tags:
 | `Literal` | `number`, `string`, `bool`, `color` |
 | `Color`   | `hex`, `oklch`, `oklab`, `srgb` |
 
-Every node carries a `span: { start, end, line, column }` for diagnostics.
+Every node carries a `span: { start, end }` (byte range only — line and
+column are computed on demand by the diagnostic emitter via
+`ast.locate(source, byte_offset)`, since most spans never feed a
+diagnostic and the up-front cost was 8 bytes per node).
 Identifiers and literal text are slices into the source file, not
 interned strings, so reading them back is zero-copy. The AST is built
 into an arena allocated by `cmo parse` and freed after the JSON is
