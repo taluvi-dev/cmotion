@@ -99,10 +99,66 @@ Per-subcommand extras:
 
 | Subcommand | Extra fields |
 | --- | --- |
-| `parse`   | `path`, `cst` (S-expression CST as a string) |
+| `parse`   | `path`, `cst` (S-expression CST as a string), `ast` (typed tree; `null` when syntax errors prevented lowering) |
 | `explain` | `code`, `title`, `body` |
 | `version` | `name`, `version` |
 | `check` / `fmt` | (stubs today; will land with the typechecker / formatter) |
+
+### `cmo parse` AST shape
+
+`cmo --json parse` emits both `cst` (tree-sitter S-expression string,
+useful for grep) and `ast` (the typed tree from `src/ast.zig`). The AST
+is a recursive tree of tagged unions; each node is rendered as a single-
+key object whose key is the union tag. For example:
+
+```jsonc
+{ "ast": {
+    "span": { "start": 0, "end": 1024, "line": 1, "column": 1 },
+    "decls": [
+      { "import": {
+          "span": {...},
+          "path": { "span": {...}, "segments": [...], "glob": true },
+          "alias": null
+      } },
+      { "scene": {
+          "span": {...},
+          "name": { "span": {...}, "name": "title" },
+          "params": [
+            { "span": {...}, "name": {"name":"duration"},
+              "type": { "simple": {"name":{"name":"Duration"}, "args":[]} },
+              "default": { "literal": { "number": {"text":"6","unit":"s"} } }
+            }
+          ],
+          "return_type": { "simple": { "name": {"name":"Frame"}, "args": [] } },
+          "body": {
+            "lets": [...],
+            "result": { "call": {...} }
+          }
+      } }
+    ]
+} }
+```
+
+Categories and their tags:
+
+| Category | Tags |
+| --- | --- |
+| `TopDecl` | `import`, `let`, `component`, `scene`, `filter`, `export` |
+| `Expr`    | `literal`, `ident`, `paren`, `binary`, `unary`, `call`, `method_call`, `field_access`, `index`, `if_`, `match`, `lambda`, `animate`, `compose`, `record`, `array`, `block` |
+| `Type`    | `simple`, `tuple`, `record`, `function` |
+| `Pattern` | `literal`, `ident`, `wildcard` |
+| `Literal` | `number`, `string`, `bool`, `color` |
+| `Color`   | `hex`, `oklch`, `oklab`, `srgb` |
+
+Every node carries a `span: { start, end, line, column }` for diagnostics.
+Identifiers and literal text are slices into the source file, not
+interned strings, so reading them back is zero-copy. The AST is built
+into an arena allocated by `cmo parse` and freed after the JSON is
+written, so subsequent runs don't accumulate memory.
+
+If `cst` is non-null but `ast` is `null`, the parse had syntax errors
+(see `diagnostics[]`) and lowering was skipped; fix the syntax and
+re-run.
 
 ### Field reference
 

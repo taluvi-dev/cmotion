@@ -1,6 +1,8 @@
 const std = @import("std");
 const diag = @import("../diagnostics.zig");
 const ts = @import("../tree_sitter.zig");
+const ast = @import("../ast.zig");
+const lower = @import("../lower.zig");
 const Context = @import("../cli.zig").Context;
 
 const max_source_bytes: usize = 16 * 1024 * 1024;
@@ -60,9 +62,7 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
     const root = parsed.root();
     const has_error = ts.hasError(root);
 
-    // Collect diagnostics in one place so JSON and text modes emit the
-    // same set.
-    var diags = std.ArrayListUnmanaged(diag.Diagnostic){};
+    var diags: std.ArrayListUnmanaged(diag.Diagnostic) = .{};
     defer diags.deinit(ctx.allocator);
 
     if (has_error) {
@@ -84,8 +84,40 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
         });
     }
 
+    // Lowering: only attempt when the parse is clean. On a tree with
+    // ERROR/MISSING nodes, lowering would either bail with a confusing
+    // diagnostic or produce a partial AST; better to leave the CST as
+    // the consumer's view and let them fix the syntax first.
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+    var program: ?ast.Program = null;
+    if (!has_error) {
+        var lowerer = lower.Lowerer.init(arena.allocator(), source);
+        program = lowerer.lowerProgram(root) catch |err| blk: {
+            // A lowering failure on a clean CST means our CST<->AST mapping
+            // has a gap. Surface it as LWR000 so it's findable.
+            try diags.append(ctx.allocator, .{
+                .severity = .warning,
+                .code = "LWR000",
+                .message = try std.fmt.allocPrint(
+                    ctx.allocator,
+                    "lowering failed on a clean CST: {s}",
+                    .{@errorName(err)},
+                ),
+                .span = .{ .path = path },
+                .help = "the cst field is still emitted; this means src/lower.zig has a gap for some node kind",
+                .fix_safety = .@"requires-human-review",
+                .repair = .{
+                    .id = "extend-lowering",
+                    .summary = "Add a branch to lower.zig for the missing CST node kind.",
+                },
+            });
+            break :blk null;
+        };
+    }
+
     if (ctx.options.json) {
-        try emitJsonEnvelope(ctx, path, root, diags.items, !has_error);
+        try emitJsonEnvelope(ctx, path, root, source, diags.items, !has_error, program);
     } else {
         try diag.writeText(ctx.stdout, .{ .ok = !has_error, .diagnostics = diags.items });
         try emitSExpr(ctx, root);
@@ -105,9 +137,12 @@ fn emitJsonEnvelope(
     ctx: Context,
     path: []const u8,
     root: ts.Node,
+    source: []const u8,
     diagnostics: []const diag.Diagnostic,
     ok: bool,
+    program: ?ast.Program,
 ) !void {
+    _ = source;
     const w = ctx.stdout;
     try diag.writeJsonHeader(w, ok, diagnostics);
 
@@ -118,6 +153,13 @@ fn emitJsonEnvelope(
     if (ts.sexprAlloc(root)) |sexp| {
         defer ts.freeSExpr(sexp);
         try diag.writeJsonString(w, std.mem.span(sexp));
+    } else {
+        try w.writeAll("null");
+    }
+
+    try w.writeAll(",\"ast\":");
+    if (program) |p| {
+        try std.json.Stringify.value(p, .{}, w);
     } else {
         try w.writeAll("null");
     }
