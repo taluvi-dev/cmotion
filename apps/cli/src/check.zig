@@ -5,6 +5,12 @@
 //!     `ident` whose name isn't in scope. Suppressed when any
 //!     `use path.*` wildcard import is in effect, since we don't have
 //!     module manifests yet.
+//!   - NAM004: forward reference to a block-local `let` that's declared
+//!     later in the same block (`let a = b; let b = 1;`). We pre-scan
+//!     each block so an unresolved ident can be upgraded from NAM003
+//!     to NAM004 with a cross-reference to where the binding actually
+//!     lives. `let x = x + 1` still fires NAM003 (the name truly isn't
+//!     visible — it's not "future" either, it doesn't exist yet).
 //!   - NAM005: duplicate top-level declaration. Two `component foo` or
 //!     two imports landing on the same local name.
 //!   - NAM006: duplicate parameter name in a signature.
@@ -53,10 +59,20 @@ const Scope = struct {
     symbols: std.StringHashMapUnmanaged(Symbol) = .{},
     /// Inherited along the chain so any scope query can ask once.
     has_wildcard_import: bool,
+    /// Names that WILL be declared later in this block scope. Only set
+    /// during a block walk. Consulted by `checkIdent` when a name fails
+    /// `lookup` — a hit here turns NAM003 into NAM004 (forward reference).
+    future_names: ?*const std.StringHashMapUnmanaged(ast.Span) = null,
 
     fn lookup(self: *const Scope, name: []const u8) ?Symbol {
         if (self.symbols.get(name)) |s| return s;
         if (self.parent) |p| return p.lookup(name);
+        return null;
+    }
+
+    fn lookupFuture(self: *const Scope, name: []const u8) ?ast.Span {
+        if (self.future_names) |fns| if (fns.get(name)) |s| return s;
+        if (self.parent) |p| return p.lookupFuture(name);
         return null;
     }
 };
@@ -533,10 +549,22 @@ pub const Checker = struct {
         };
         defer block_scope.symbols.deinit(self.allocator);
 
-        // Block lets are sequential — check the value against the
-        // currently-visible names, THEN declare. That preserves
-        // `let x = x + 1` as an error (NAM003 on the rhs).
+        // Pre-scan: every let-name in this block goes into future_names
+        // so out-of-order references can be reported as NAM004 instead
+        // of NAM003. We remove each name from this map BEFORE walking
+        // its own value, so `let x = x + 1` still fires NAM003 (the
+        // name truly doesn't exist at that point — not in scope, not
+        // declared yet either).
+        var future_names: std.StringHashMapUnmanaged(ast.Span) = .{};
+        defer future_names.deinit(self.allocator);
         for (block.lets) |l| {
+            const gop = try future_names.getOrPut(self.allocator, l.name.name);
+            if (!gop.found_existing) gop.value_ptr.* = l.name.span;
+        }
+        block_scope.future_names = &future_names;
+
+        for (block.lets) |l| {
+            _ = future_names.remove(l.name.name);
             try self.checkExpr(l.value.*, &block_scope);
             try self.checkLetAnnotation(l);
             const gop = try block_scope.symbols.getOrPut(self.allocator, l.name.name);
@@ -635,6 +663,42 @@ pub const Checker = struct {
     fn checkIdent(self: *Checker, id: ast.Ident, scope: *const Scope) !void {
         if (scope.lookup(id.name) != null) return;
         if (scope.has_wildcard_import) return;
+
+        // Forward-reference within a block? Pre-scan populated
+        // `future_names` on block scopes; a hit upgrades NAM003 to NAM004
+        // and points at the actual declaration so the user can either
+        // reorder or use a different scope.
+        if (scope.lookupFuture(id.name)) |future_span| {
+            const loc = id.span.location(self.source);
+            const decl_loc = future_span.location(self.source);
+            try self.diagnostics.append(self.allocator, .{
+                .code = "NAM004",
+                .message = try std.fmt.allocPrint(
+                    self.allocator,
+                    "forward reference to '{s}'",
+                    .{id.name},
+                ),
+                .span = .{
+                    .path = self.path,
+                    .line = loc.line,
+                    .column = loc.column,
+                    .length = id.span.end - id.span.start,
+                },
+                .expected = "names declared earlier in the enclosing block",
+                .actual = try std.fmt.allocPrint(
+                    self.allocator,
+                    "'{s}' is declared later in this block at line {d} column {d}",
+                    .{ id.name, decl_loc.line, decl_loc.column },
+                ),
+                .help = "move the declaration above this use, or hoist it to an enclosing scope",
+                .fix_safety = .@"local-edit",
+                .repair = .{
+                    .id = "reorder-block-let",
+                    .summary = "Place the `let` declaration above the use, or move it to an outer scope.",
+                },
+            });
+            return;
+        }
 
         const loc = id.span.location(self.source);
         try self.diagnostics.append(self.allocator, .{

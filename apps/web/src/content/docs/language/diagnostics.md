@@ -165,6 +165,31 @@ Repair is one of:
 - **Repair:** `declare-or-import`.
 - **Fix safety:** `local-edit`.
 
+### `NAM004` — Forward reference within a block
+
+A name was referenced before its `let` declaration in the same block.
+Block lets are lexically scoped — they're visible only to code that
+appears after their declaration. The diagnostic's `actual` field names
+the line and column where the binding actually lives, so an agent can
+choose between two repairs: reorder so the declaration comes first, or
+hoist the declaration to an enclosing scope.
+
+```cm
+component title() -> Frame {
+  let a = b;      // NAM004: 'b' is declared later in this block at line 3 column 7
+  let b = 1;
+  a
+}
+```
+
+Distinct from `NAM003`: if the name is never declared anywhere in the
+block (or any enclosing scope), you get `NAM003`. Self-reference
+(`let x = x + 1`) is also `NAM003` — the name doesn't exist yet at
+that point even though it will.
+
+- **Repair:** `reorder-block-let`.
+- **Fix safety:** `local-edit`.
+
 ### `NAM005` — Duplicate top-level declaration
 
 Two top-level declarations resolve to the same local name (for example
