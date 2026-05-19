@@ -39,7 +39,7 @@ how much trust to extend to the repair:
 | `LWR*` | CST → AST lowering | implemented |
 | `NAM*` | Name resolution | implemented |
 | `TYP*` | Type checker | partial (TYP002 only) |
-| `UNT*` | Unit checker | reserved |
+| `UNT*` | Unit checker | partial (UNT001 only) |
 | `TIM*` | Timeline (negative duration, out-of-range keyframe) | reserved |
 | `ANM*` | Animate / keyframe rules | reserved |
 | `COL*` | Color space | reserved |
@@ -220,6 +220,46 @@ Unit-category mismatches **within** the number family
 - **Repair:** `align-value-with-type`.
 - **Fix safety:** `local-edit` — usually only the value or annotation
   changes, no call sites move.
+
+---
+
+## `UNT*` — Unit checker
+
+### `UNT001` — Unit category mismatch
+
+An annotated number-family `let`, `param`, or `export` was assigned a
+number literal whose unit suffix lives in the wrong category. The check
+cascades from `TYP002`: it runs only when both sides are number-side,
+the annotated type name pins a unit category, and the literal carries
+a unit.
+
+Type → unit category mapping:
+
+| Type | Allowed units |
+|---|---|
+| `Duration` / `Time` | `s`, `ms`, `us`, `ns` |
+| `Angle` | `deg`, `rad`, `turn` |
+| `Length` / `Pixels` | `px` |
+| `Percent` | `%` |
+| `Frequency` | `hz`, `khz` |
+| `Tempo` | `bpm` |
+| `Bars` | `bars` |
+| `Beats` | `beats` |
+| `Number` / `Int` / `Float` | (no unit) |
+
+Examples:
+
+```cm
+let timeout: Duration = 6deg    // UNT001: Duration expects Time, got 6deg (Angle)
+let count: Number  = 5ms        // UNT001: Number expects unitless, got 5ms (Time)
+let timeout: Duration = 500ms   // OK
+```
+
+Silent when the literal has no unit at all (`let x: Duration = 42`) —
+that case is a future `UNT002` (missing required unit).
+
+- **Repair:** `align-unit-with-type`.
+- **Fix safety:** `local-edit`.
 
 ---
 
