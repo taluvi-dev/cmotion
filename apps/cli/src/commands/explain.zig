@@ -313,6 +313,26 @@ const entries = [_]Entry{
         ,
     },
     .{
+        .code = "CLI011",
+        .title = "Invalid duration for `--at`",
+        .body =
+        \\`cmo eval --at <duration>` takes a duration spec the sampler
+        \\can convert to seconds. Recognised forms:
+        \\
+        \\  <digits>[.<digits>]        bare seconds (e.g. `2`, `1.5`)
+        \\  <digits>[.<digits>]s       seconds
+        \\  <digits>[.<digits>]ms      milliseconds
+        \\  <digits>[.<digits>]us      microseconds
+        \\  <digits>[.<digits>]ns      nanoseconds
+        \\
+        \\No sign, no underscores, no other units (px, deg, ...). If
+        \\you need a sample at "10 frames at 60 Hz", pass the resulting
+        \\duration (`--at 0.1666666666s`) — the renderer will own the
+        \\sample-rate → seconds mapping once it lands (the WIT
+        \\`render(time-samples: u64, ...)` is the renderer's view).
+        ,
+    },
+    .{
         .code = "EVL004",
         .title = "Missing required argument in a lambda call",
         .body =

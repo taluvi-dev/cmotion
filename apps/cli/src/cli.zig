@@ -175,7 +175,7 @@ fn printUsage(w: *Writer) !void {
         \\    cmo parse <file>        Parse a .cm source file and print its AST
         \\    cmo check <file>        Type-check a .cm source file
         \\    cmo fmt <file>          Format a .cm source file (use --write / --check)
-        \\    cmo eval <file>         Evaluate top-level let bindings (stage-4 v0)
+        \\    cmo eval [--at <t>] <file>  Evaluate top-level lets; `--at` samples the stream
         \\    cmo explain <code>      Show the long-form explanation for a diagnostic code
         \\    cmo version             Print the cmotion version
         \\    cmo help                Show this message
