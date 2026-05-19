@@ -30,4 +30,5 @@ test {
     _ = @import("cli.zig");
     _ = @import("diagnostics.zig");
     _ = @import("ast.zig");
+    _ = @import("lower.zig");
 }
