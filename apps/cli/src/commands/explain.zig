@@ -313,6 +313,42 @@ const entries = [_]Entry{
         ,
     },
     .{
+        .code = "CLI012",
+        .title = "Invalid pixel dimension",
+        .body =
+        \\`cmo render --width <px>` and `--height <px>` expect a positive
+        \\integer count of pixels. Bare digits only; no unit suffix, no
+        \\fractional part.
+        ,
+    },
+    .{
+        .code = "REN001",
+        .title = "No scene to render",
+        .body =
+        \\`cmo render` evaluated the program but found no top-level
+        \\binding to draw — the program had no `let` and no scene /
+        \\component / filter with all-default parameters. Add a top-
+        \\level definition, e.g.
+        \\
+        \\  scene main() -> Frame {
+        \\    compose [rect(width: 320px, height: 180px, fill: #000)]
+        \\  }
+        \\
+        \\Today `cmo render` always picks the first top-level binding.
+        \\A future `--scene <name>` flag will let you pick among many.
+        ,
+    },
+    .{
+        .code = "REN002",
+        .title = "Could not write rendered output",
+        .body =
+        \\`cmo render --out <path>` produced pixels but the write to
+        \\disk failed. Common causes: the directory does not exist,
+        \\the path is read-only, or the filesystem is full. The pixel
+        \\buffer is discarded — re-run after fixing the I/O failure.
+        ,
+    },
+    .{
         .code = "CLI011",
         .title = "Invalid duration for `--at`",
         .body =
@@ -440,10 +476,14 @@ test "every emitted diagnostic code has an explain entry" {
         @embedFile("../lower.zig"),
         @embedFile("../main.zig"),
         @embedFile("../tree_sitter.zig"),
+        @embedFile("../eval.zig"),
+        @embedFile("../render.zig"),
         @embedFile("check.zig"),
         @embedFile("explain.zig"),
+        @embedFile("eval.zig"),
         @embedFile("fmt.zig"),
         @embedFile("parse.zig"),
+        @embedFile("render.zig"),
         @embedFile("version.zig"),
     };
 
