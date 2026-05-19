@@ -171,6 +171,13 @@ test "imports keep aliases and globs" {
     try std.testing.expectEqualStrings("use a.b.*;\nuse a.b as c;\n", out);
 }
 
+test "glob is detected even when source has whitespace around `.*`" {
+    const allocator = std.testing.allocator;
+    const out = try formatString(allocator, "use   std . shapes . * ;\n");
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings("use std.shapes.*;\n", out);
+}
+
 test "let decl with and without type annotation" {
     const allocator = std.testing.allocator;
     const out = try formatString(allocator, "let  x:Int=42;\nlet y =1;\n");
