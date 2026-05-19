@@ -2,9 +2,14 @@
 
 cmotion is a typed DSL for video, motion graphics, and animation. The
 authoritative roadmap is at https://cmotion.org/roadmap/ and mirrored in
-`README.md`. This file is the working note for AI sessions: where things
-live, how to build and test, and the contracts that aren't always obvious
-from the source.
+`README.md`. The authoritative syntactic spec is the EBNF at
+https://cmotion.org/language/grammar/#ebnf, mirrored at the repo root as
+`GRAMMAR.md` (and rendered from `apps/web/src/content/docs/language/grammar.md`).
+**Read it before extending the parser, the AST, or the interpreter** —
+it covers forms not yet implemented (e.g. lambdas) and pins the
+precedence ladder. This file (CLAUDE.md) is the working note for AI
+sessions: where things live, how to build and test, and the contracts
+that aren't always obvious from the source.
 
 ## Repo layout
 
