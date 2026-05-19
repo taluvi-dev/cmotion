@@ -17,8 +17,12 @@ The stdlib is intentionally small. Hosts extend it; the core stays narrow.
 ### 3D
 
 - `std.mesh3d` — `extrude(path, depth)` plus the transform postfix methods `.rotate(x/y/z: Angle)`, `.translate(...)`, `.scale(...)`, and `.material(fill, metalness?, roughness?, emissive?)`
-- `std.lighting` — `ambient(intensity)`, `directional(from, intensity)`, `point(at, intensity)`
+- `std.lighting` — `ambient(intensity)`, `directional(from: Vec3, intensity)`, `point(at: Vec3, intensity)`
 - `std.scene3d` — `render3d(mesh, lights, camera?)` projects a 3D scene to a 2D `Layer` so it can be `compose`d with 2D layers. Camera defaults to a sensible perspective; pass `camera: perspective(fov: 28deg)` or `orthographic(...)` to override.
+
+### Math
+
+- `std.math` — vector constructors `vec2(x, y)` and `vec3(x, y, z)`, plus the dot/cross/length/normalize/lerp helpers that operate on them. Vectors are values, not tuples; the grammar deliberately keeps tuples as a type-only construct, so 2- and 3-component positions and directions go through these constructors.
 
 ### Motion, color, time, audio
 

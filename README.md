@@ -66,7 +66,7 @@ one starts.
       determinism partition of stdlib. Lives as a separate document, not in
       BNF.
 - [ ] **3. Minimal stdlib** — `rect`, `image`, `mesh3d`, `compose`, `animate`,
-      `oklch`, `transport`, audio analyzers.
+      `oklch`, `vec2`, `vec3`, `transport`, audio analyzers.
 - [ ] **4. Reference interpreter in Rust** — walks the AST directly, no
       codegen. Lets us exercise the type system and stdlib without committing
       to WASM yet.
