@@ -63,8 +63,9 @@ agents, CI, and editors.
 
 **Contract: every `--json` invocation emits exactly one JSON object.** The
 shared header — `schemaVersion`, `ok`, `diagnostics[]` — is the same on
-every subcommand. Subcommands append their own fields to the same
-envelope:
+every subcommand, and the shared footer — `timing: { totalNs }` — is
+also on every envelope so agents and CI can budget the call. Subcommands
+append their own fields to the same envelope:
 
 ```sh
 cmo --json parse src/broken.cm
@@ -91,8 +92,17 @@ cmo --json parse src/broken.cm
     }
   ],
   "path": "src/broken.cm",
-  "cst": "(program (scene_decl ... (MISSING \")\") ...))"
+  "cst": "(program (scene_decl ... (MISSING \")\") ...))",
+  "timing": { "totalNs": 2815672 }
 }
+```
+
+Plain text output ends with a `timing:` line (always on):
+
+```
+$ cmo version
+cmotion 0.0.1
+timing: 0.056ms
 ```
 
 Per-subcommand extras:
