@@ -27,16 +27,17 @@
 //!     translates; method-chain form (`rect(...).translate(x:, y:)`)
 //!     stages as the same `Constructed("translate", …)` shape and works
 //!     identically.
-//!   - Color: `#rrggbb` hex (with or without alpha), and `oklch(l, c, h)`
-//!     — converted to sRGB through standard oklab → linear-sRGB →
-//!     gamma matrices. Animated channels are expected to already be
+//!   - Color literals: `#rrggbb` hex (with or without alpha),
+//!     `oklch(l, c, h)`, `oklab(l, a, b)`, `srgb(r, g, b)` (channels
+//!     in 0..1). All routed through the same oklab→linear-sRGB→gamma
+//!     pipeline. Animated channels are expected to already be
 //!     resolved by the sampler before they reach the renderer.
 //!
 //! Ignored:
-//!   - 3D content (`extrude`, `render3d`, lights, materials, ...). The
-//!     glyph in cmotion.org's taste sample renders as nothing — only
-//!     the background rect is visible.
-//!   - srgb()/oklab() color literals — not yet wired through.
+//!   - 3D content's *3D-ness* — `render3d`, `extrude`, `material`,
+//!     `rotate`, `scale` paint the wrapped child flat (see Coordinate
+//!     system); depth, lights, axis angles, scale factors, metalness
+//!     etc. are silently dropped.
 //!   - Stroke, gradients, blur, filters. Future renderer slices.
 //!
 //! Coordinate system
@@ -381,10 +382,37 @@ fn colorToRgba(c: value.Color) [4]u8 {
     return switch (c) {
         .hex => |h| hexToRgba(h.digits),
         .oklch => |v| oklchToRgba(v.l.*, v.c.*, v.h.*),
-        // oklab / srgb literals aren't wired through yet — render as
-        // magenta so the gap is visible rather than silent black.
-        else => .{ 255, 0, 255, 255 },
+        .oklab => |v| oklabComponentsToRgba(v.l.*, v.a.*, v.b.*),
+        .srgb => |v| srgbComponentsToRgba(v.r.*, v.g.*, v.b.*),
     };
+}
+
+/// Direct oklab triple — same matrices as oklch, but the a/b
+/// components are passed straight through (no polar conversion).
+fn oklabComponentsToRgba(l: value.Value, a: value.Value, b: value.Value) [4]u8 {
+    if (l != .number or a != .number or b != .number) return .{ 255, 0, 255, 255 };
+    return oklabToRgba(l.number.value, a.number.value, b.number.value);
+}
+
+/// `srgb(r, g, b)` — components are read in the 0..1 range (the cmotion
+/// convention; matches CSS `color(srgb r g b)`). Out-of-range values
+/// clamp through the encoder. A 0..255 byte triple `srgb(255, 0, 0)`
+/// also lands as red because 255 clamps to 1.0 after the implicit
+/// max-1 ceiling — fine for a v0, refine when the typechecker can
+/// distinguish the two unit conventions.
+fn srgbComponentsToRgba(r: value.Value, g: value.Value, b: value.Value) [4]u8 {
+    if (r != .number or g != .number or b != .number) return .{ 255, 0, 255, 255 };
+    return .{
+        srgbChannelToByte(r.number.value),
+        srgbChannelToByte(g.number.value),
+        srgbChannelToByte(b.number.value),
+        255,
+    };
+}
+
+fn srgbChannelToByte(x: f64) u8 {
+    const clamped = std.math.clamp(x, 0.0, 1.0);
+    return @intFromFloat(@round(clamped * 255.0));
 }
 
 fn hexToRgba(digits: []const u8) [4]u8 {
@@ -974,6 +1002,30 @@ test "oklch: known sanity values land in plausible sRGB range" {
     try std.testing.expectEqual(grey[0], grey[1]);
     try std.testing.expectEqual(grey[1], grey[2]);
     try std.testing.expect(grey[0] > 80 and grey[0] < 200);
+}
+
+test "oklab: zero chroma matches oklch with zero chroma" {
+    const num = struct {
+        fn n(x: f64) value.Value {
+            return .{ .number = .{ .value = x, .unit = null } };
+        }
+    };
+    const lab = oklabComponentsToRgba(num.n(0.5), num.n(0), num.n(0));
+    const lch = oklchToRgba(num.n(0.5), num.n(0), num.n(0));
+    try std.testing.expectEqualSlices(u8, &lch, &lab);
+}
+
+test "srgb: pure red maps to (255, 0, 0)" {
+    const num = struct {
+        fn n(x: f64) value.Value {
+            return .{ .number = .{ .value = x, .unit = null } };
+        }
+    };
+    const red = srgbComponentsToRgba(num.n(1), num.n(0), num.n(0));
+    try std.testing.expectEqual(@as(u8, 255), red[0]);
+    try std.testing.expectEqual(@as(u8, 0), red[1]);
+    try std.testing.expectEqual(@as(u8, 0), red[2]);
+    try std.testing.expectEqual(@as(u8, 255), red[3]);
 }
 
 test "writePng: emits a well-formed file with expected signature and chunks" {
