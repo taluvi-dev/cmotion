@@ -224,10 +224,13 @@ interface BuildCtx {
   lights: THREE.Light[];
   background: THREE.Color | null;
   glyphScale: number;
+  // Set from the first rect layer's width/height — defines the
+  // letterbox aspect of the rendered viewport.
+  sceneAspect: number;
 }
 
 function makeCtx(font: opentype.Font): BuildCtx {
-  return { font, lights: [], background: null, glyphScale: 2.5 };
+  return { font, lights: [], background: null, glyphScale: 2.5, sceneAspect: 16 / 9 };
 }
 
 function buildRect(node: JsonNode): THREE.Object3D {
@@ -389,10 +392,13 @@ function buildCompose(node: JsonNode, ctx: BuildCtx): THREE.Object3D {
   const group = new THREE.Group();
   const layers = arrayElems(namedFields(node).layers);
   if (layers[0]?.kind === "constructed" && layers[0].name === "rect") {
-    const bgW = numberOf(namedFields(layers[0]).width, 1920);
+    const bgFields = namedFields(layers[0]);
+    const bgW = numberOf(bgFields.width, 1920);
+    const bgH = numberOf(bgFields.height, 1080);
     pxToWorld = 2.0 / bgW;
+    ctx.sceneAspect = bgH > 0 ? bgW / bgH : 16 / 9;
     // Promote the first full-bleed rect to the scene background.
-    ctx.background = toThreeColor(namedFields(layers[0]).fill);
+    ctx.background = toThreeColor(bgFields.fill);
   }
   layers.forEach((layer, i) => {
     // Skip the layer we just promoted to background.
@@ -423,10 +429,11 @@ export function detectDurationSeconds(source: string, fallback = 6): number {
 export interface ViewerHandle {
   load(source: string): void;
   seek(t: number): void;
+  resize(): void;
   durationSeconds: number;
   versions: { cmotion: string; three: string };
   captureFrame(): Promise<Blob | null>;
-  captureClip(durationSeconds?: number, fps?: number): Promise<Blob>;
+  captureClip(durationSeconds?: number, fps?: number): Promise<{ blob: Blob; ext: string; mime: string }>;
   destroy(): void;
 }
 
@@ -437,6 +444,10 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
   let currentRoot: THREE.Object3D | null = null;
   let currentLights: THREE.Light[] = [];
   let durationSeconds = 6;
+  let lastT = 0;
+  // Scene's intended viewport aspect (set from the first rect's width/height
+  // in buildCompose). 16:9 by default to match the cmotion taste sample.
+  let sceneAspect = 16 / 9;
 
   const renderer = new THREE.WebGLRenderer({
     canvas,
@@ -446,23 +457,43 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-  const aspect = (canvas.clientWidth || 16) / (canvas.clientHeight || 9);
-  const camera = new THREE.PerspectiveCamera(28, aspect, 0.1, 100);
+  const camera = new THREE.PerspectiveCamera(28, sceneAspect, 0.1, 100);
   camera.position.set(0, 0, 6);
   camera.lookAt(0, 0, 0);
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x000000);
 
+  // Letterbox the canvas inside its parent: largest box matching sceneAspect
+  // that fits the available area (minus the stage's CSS padding).
   function resize() {
-    const w = canvas.clientWidth;
-    const h = canvas.clientHeight;
+    const parent = canvas.parentElement;
+    if (!parent) return;
+    const cs = getComputedStyle(parent);
+    const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const availW = parent.clientWidth - padX;
+    const availH = parent.clientHeight - padY;
+    if (availW <= 0 || availH <= 0) return;
+    let w = availW;
+    let h = w / sceneAspect;
+    if (h > availH) {
+      h = availH;
+      w = h * sceneAspect;
+    }
+    canvas.style.width = `${w}px`;
+    canvas.style.height = `${h}px`;
     renderer.setSize(w, h, false);
-    camera.aspect = w / h;
+    camera.aspect = sceneAspect;
     camera.updateProjectionMatrix();
+    // Re-render at the last applied time so the new size shows correct
+    // pixels immediately (otherwise we wait for the next applyFrame).
+    if (handle) renderer.render(scene, camera);
   }
+  // Observe the parent — the canvas is sized by us, so observing it would
+  // race with our own updates.
   const ro = new ResizeObserver(resize);
-  ro.observe(canvas);
+  if (canvas.parentElement) ro.observe(canvas.parentElement);
   resize();
 
   function clearRoot() {
@@ -482,6 +513,7 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
 
   function applyFrame(t: number) {
     if (!handle) return;
+    lastT = t;
     const tree = sample(exp, handle, t) as JsonNode;
     const ctx = makeCtx(font);
     let root: THREE.Object3D | null = null;
@@ -500,6 +532,10 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
       scene.add(root);
       currentRoot = root;
     }
+    if (Math.abs(ctx.sceneAspect - sceneAspect) > 1e-6) {
+      sceneAspect = ctx.sceneAspect;
+      resize();
+    }
     renderer.render(scene, camera);
   }
 
@@ -516,32 +552,70 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
   return {
     load,
     seek: applyFrame,
+    resize,
     get durationSeconds() {
       return durationSeconds;
     },
     versions: { cmotion: interpVersion, three: THREE.REVISION },
     captureFrame() {
-      return new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+      // Re-render in the same tick as toBlob — even with preserveDrawingBuffer
+      // the WebGL back buffer can be undefined between paints, so we redraw
+      // immediately before reading it out.
+      applyFrame(lastT);
+      return new Promise<Blob | null>((resolve) =>
+        canvas.toBlob((b) => resolve(b), "image/png"),
+      );
     },
     captureClip(duration = durationSeconds, fps = 30) {
+      // iOS (all iPad/iPhone browsers use WebKit) can't play WebM and its
+      // MediaRecorder only outputs MP4, so we hard-skip WebM there. Elsewhere
+      // (Chromium/Firefox desktop) WebM/VP9 is the most reliable canvas
+      // encoder — Chrome desktop reports MP4 support but often emits 0-byte
+      // clips, so MP4 is the last-resort fallback.
+      const isiOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+        (navigator.platform === "MacIntel" && (navigator as any).maxTouchPoints > 1);
+      const candidates = isiOS
+        ? ["video/mp4;codecs=avc1.42E01E", "video/mp4;codecs=avc1", "video/mp4"]
+        : [
+            "video/webm;codecs=vp9",
+            "video/webm;codecs=vp8",
+            "video/webm",
+            "video/mp4;codecs=avc1.42E01E",
+            "video/mp4;codecs=avc1",
+            "video/mp4",
+          ];
+      const mime = candidates.find((m) => MediaRecorder.isTypeSupported(m));
+      if (!mime) {
+        return Promise.reject(new Error("no supported video codec in this browser"));
+      }
+      const ext = mime.startsWith("video/mp4") ? "mp4" : "webm";
+      // The "clean" MIME (no ;codecs= params) is what we put on the resulting
+      // Blob — browsers handle plain video/webm in the download UI correctly,
+      // but codec-tagged MIMEs sometimes bypass the save dialog.
+      const cleanMime = mime.split(";")[0];
       const stream = canvas.captureStream(fps);
-      const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-        ? "video/webm;codecs=vp9"
-        : "video/webm";
-      const rec = new MediaRecorder(stream, { mimeType: mime });
+      const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
       const chunks: Blob[] = [];
       rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-      return new Promise<Blob>((resolve) => {
-        rec.onstop = () => resolve(new Blob(chunks, { type: "video/webm" }));
-        rec.start();
+      return new Promise<{ blob: Blob; ext: string; mime: string }>((resolve, reject) => {
+        rec.onerror = (e) => reject(new Error(`MediaRecorder error: ${(e as any).error?.name ?? "unknown"}`));
+        rec.onstop = () => resolve({ blob: new Blob(chunks, { type: cleanMime }), ext, mime: cleanMime });
+        rec.start(250);
         const t0 = performance.now();
         const tick = () => {
           const elapsed = (performance.now() - t0) / 1000;
           if (elapsed >= duration) {
-            rec.stop();
+            try { applyFrame(duration); } catch {}
+            setTimeout(() => rec.stop(), 100);
             return;
           }
-          applyFrame(elapsed);
+          try {
+            applyFrame(elapsed);
+          } catch (err: any) {
+            rec.stop();
+            reject(err);
+            return;
+          }
           requestAnimationFrame(tick);
         };
         requestAnimationFrame(tick);

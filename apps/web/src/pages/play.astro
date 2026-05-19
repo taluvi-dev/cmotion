@@ -98,6 +98,8 @@ scene title(duration: Duration = 6s) -> Frame {
         border: 1px solid var(--hair); font-weight: 500; }
       button:disabled { opacity: 0.4; cursor: progress; }
       main { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+      main.code-hidden { grid-template-columns: 1fr; }
+      main.code-hidden .editor { display: none; }
       .pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
       .pane + .pane { border-left: 1px solid var(--hair); }
       .editor { position: relative; }
@@ -107,8 +109,13 @@ scene title(duration: Duration = 6s) -> Frame {
         font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         color: var(--fg); tab-size: 2;
       }
-      .stage { position: relative; background: #000; }
-      canvas { width: 100%; height: 100%; display: block; }
+      .stage { position: relative; background: #111; display: flex;
+        align-items: center; justify-content: center; padding: 20px; box-sizing: border-box;
+        overflow: hidden; }
+      canvas { display: block; background: #000;
+        box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+        flex-shrink: 0;
+        /* width/height are set in JS to letterbox the scene's aspect ratio. */ }
       .controls { position: absolute; left: 12px; right: 12px; bottom: 12px;
         display: flex; align-items: center; gap: 10px; padding: 8px 10px;
         background: rgba(255,255,255,0.92); border: 1px solid var(--hair);
@@ -123,13 +130,14 @@ scene title(duration: Duration = 6s) -> Frame {
     <header>
       <h1><a href="/">cmotion</a> · play</h1>
       <span class="status" id="status">booting…</span>
+      <button class="secondary" id="btn-code" title="Hide code editor (⌘\\)">Hide code</button>
       <button id="btn-render">Render</button>
       <button class="secondary" id="btn-play">Play</button>
-      <button class="secondary" id="btn-png" disabled>Frame PNG</button>
-      <button class="secondary" id="btn-webm" disabled>Download WebM</button>
+      <button class="secondary" id="btn-png" disabled>Save PNG</button>
+      <button class="secondary" id="btn-webm" disabled>Save video</button>
     </header>
 
-    <main>
+    <main id="layout">
       <section class="pane editor">
         <textarea id="src" spellcheck="false" autocapitalize="off" autocorrect="off">{initialSource}</textarea>
       </section>
@@ -157,6 +165,8 @@ scene title(duration: Duration = 6s) -> Frame {
       const btnPng = document.getElementById("btn-png") as HTMLButtonElement;
       const btnWebm = document.getElementById("btn-webm") as HTMLButtonElement;
       const btnBack = document.getElementById("btn-back") as HTMLButtonElement;
+      const btnCode = document.getElementById("btn-code") as HTMLButtonElement;
+      const layout = document.getElementById("layout") as HTMLElement;
       const scrub = document.getElementById("scrub") as HTMLInputElement;
       const tVal = document.getElementById("tval") as HTMLElement;
 
@@ -167,11 +177,71 @@ scene title(duration: Duration = 6s) -> Frame {
       function formatTime(t: number, total: number) {
         return `${t.toFixed(2)} / ${total.toFixed(2)}s`;
       }
-      function download(blob: Blob, name: string) {
+      // Where to save a generated Blob.
+      //
+      // Three paths in priority order:
+      //   1. File System Access API (Chrome/Edge desktop) — opens the OS save
+      //      dialog with a chosen folder + filename. The desktop "destination
+      //      chooser" the user expects.
+      //   2. Web Share API (iOS Safari / Chrome on iPad) — opens the iOS
+      //      share sheet which includes "Save to Files". The closest thing
+      //      to a destination chooser on iOS.
+      //   3. Anchor click — fallback for everything else (Firefox, older
+      //      browsers). Saves to the default Downloads folder.
+      //
+      // iOS ignores <a download> entirely so the anchor fallback there would
+      // silently open the blob in a new tab. We force the share path on iOS
+      // even when canShare is conservative.
+      const isiOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+        ((navigator as any).platform === "MacIntel" && (navigator as any).maxTouchPoints > 1);
+
+      async function saveOrShare(blob: Blob, name: string): Promise<"saved" | "shared" | "downloaded"> {
+        const w = window as any;
+        const nav = navigator as any;
+
+        // 1. File System Access (desktop Chrome / Edge): explicit save dialog.
+        if (w.showSaveFilePicker) {
+          try {
+            const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")) : "";
+            const handle = await w.showSaveFilePicker({
+              suggestedName: name,
+              types: [{
+                description: blob.type || ext,
+                accept: { [blob.type || "application/octet-stream"]: ext ? [ext] : [] },
+              }],
+            });
+            const writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            return "saved";
+          } catch (e: any) {
+            if (e?.name === "AbortError") return "saved"; // user cancelled
+            // Permission denied / other → fall through to anchor.
+          }
+        }
+
+        // 2. Web Share (iOS): present share sheet so "Save to Files" works.
+        const file = new File([blob], name, { type: blob.type });
+        const canShareFile = nav.canShare && nav.canShare({ files: [file] });
+        if (canShareFile || isiOS) {
+          try {
+            await nav.share({ files: [file], title: name });
+            return "shared";
+          } catch (e: any) {
+            if (e?.name === "AbortError") return "shared";
+            // Share genuinely failed → fall through to anchor.
+          }
+        }
+
+        // 3. Anchor fallback.
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
-        a.href = url; a.download = name; a.click();
+        a.href = url; a.download = name; a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 1000);
+        return "downloaded";
       }
 
       let view: Awaited<ReturnType<typeof boot>> | null = null;
@@ -179,21 +249,33 @@ scene title(duration: Duration = 6s) -> Frame {
       let playStart = 0;
       let rafId = 0;
 
-      function renderSource() {
+      async function renderSource() {
         if (!view) return;
+        // Parse+eval is synchronous; yield to paint the "rendering…" state
+        // so the user sees the click registered before we block the thread.
+        btnRender.disabled = true;
+        const renderLabel = btnRender.textContent;
+        btnRender.textContent = "Rendering…";
+        setStatus("rendering…");
+        await new Promise((r) => requestAnimationFrame(() => r(null)));
+        const t0 = performance.now();
         try {
           view.load(srcEl.value);
           const d = view.durationSeconds;
+          const ms = (performance.now() - t0).toFixed(0);
           scrub.max = String(d);
           scrub.value = "0";
           tVal.textContent = formatTime(0, d);
-          setStatus(`interp v${view.versions.cmotion} · three.js r${view.versions.three} · duration ${d}s`);
+          setStatus(`rendered in ${ms}ms · interp v${view.versions.cmotion} · three.js r${view.versions.three} · duration ${d}s`);
           btnPng.disabled = false;
           btnWebm.disabled = false;
         } catch (e: any) {
           setStatus(e.message, true);
           btnPng.disabled = true;
           btnWebm.disabled = true;
+        } finally {
+          btnRender.disabled = false;
+          btnRender.textContent = renderLabel;
         }
       }
 
@@ -221,6 +303,29 @@ scene title(duration: Duration = 6s) -> Frame {
         }
       }
 
+      function setCodeHidden(hidden: boolean) {
+        layout.classList.toggle("code-hidden", hidden);
+        btnCode.textContent = hidden ? "Show code" : "Hide code";
+        try { localStorage.setItem("cmotion-play:code-hidden", hidden ? "1" : "0"); } catch {}
+        // Force the viewer to recompute its letterbox once the new grid
+        // layout has settled. rAF gives the browser one tick to apply the
+        // grid-template-columns change before we read parent.clientWidth.
+        if (view) requestAnimationFrame(() => view!.resize());
+      }
+      btnCode.addEventListener("click", () => {
+        setCodeHidden(!layout.classList.contains("code-hidden"));
+      });
+      // ⌘\ / Ctrl+\ to toggle.
+      window.addEventListener("keydown", (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
+          e.preventDefault();
+          setCodeHidden(!layout.classList.contains("code-hidden"));
+        }
+      });
+      try {
+        if (localStorage.getItem("cmotion-play:code-hidden") === "1") setCodeHidden(true);
+      } catch {}
+
       btnRender.addEventListener("click", () => {
         setPlaying(false);
         renderSource();
@@ -243,24 +348,70 @@ scene title(duration: Duration = 6s) -> Frame {
       });
       btnPng.addEventListener("click", async () => {
         if (!view) return;
-        const blob = await view.captureFrame();
-        if (blob) download(blob, `cmotion-${Date.now()}.png`);
+        try {
+          const blob = await view.captureFrame();
+          if (!blob) throw new Error("canvas.toBlob returned no data");
+          const how = await saveOrShare(blob, `cmotion-${Date.now()}.png`);
+          setStatus(`PNG ${how} (${(blob.size / 1024).toFixed(1)} KB)`);
+        } catch (e: any) {
+          setStatus(`PNG: ${e.message}`, true);
+        }
       });
-      btnWebm.addEventListener("click", async () => {
+      // Two-click flow for video saves. iOS Safari's share sheet requires
+      // a "transient user activation" — a user gesture less than ~5 seconds
+      // old. Real-time recording exhausts it, so we split the work: first
+      // click records, the *second* click (which carries a fresh gesture)
+      // actually triggers the save. Desktop benefits too — showSaveFilePicker
+      // has the same activation requirement.
+      let pendingClip: { blob: Blob; name: string; durationS: number; sizeKB: number } | null = null;
+      const btnWebmLabel = btnWebm.textContent || "Save video";
+
+      async function recordClip() {
         if (!view) return;
         btnWebm.disabled = true;
-        const original = btnWebm.textContent;
         btnWebm.textContent = "recording…";
+        setStatus(`recording ${view.durationSeconds.toFixed(1)}s clip…`);
         setPlaying(false);
         try {
-          const blob = await view.captureClip();
-          download(blob, `cmotion-${Date.now()}.webm`);
+          const { blob, ext } = await view.captureClip();
+          if (!blob.size) throw new Error("recording produced 0 bytes");
+          pendingClip = {
+            blob,
+            name: `cmotion-${Date.now()}.${ext}`,
+            durationS: view.durationSeconds,
+            sizeKB: blob.size / 1024,
+          };
+          btnWebm.textContent = `Save ${pendingClip.sizeKB.toFixed(0)} KB ${ext}`;
+          btnWebm.classList.remove("secondary");
+          setStatus(`recording done — click "${btnWebm.textContent}" to save`);
         } catch (e: any) {
-          setStatus(e.message, true);
+          setStatus(`video: ${e.message}`, true);
+          btnWebm.textContent = btnWebmLabel;
         } finally {
           btnWebm.disabled = false;
-          btnWebm.textContent = original;
         }
+      }
+
+      async function saveClip() {
+        if (!pendingClip) return;
+        const { blob, name, durationS, sizeKB } = pendingClip;
+        const ext = name.slice(name.lastIndexOf(".") + 1);
+        btnWebm.disabled = true;
+        try {
+          const how = await saveOrShare(blob, name);
+          setStatus(`video ${how} (${sizeKB.toFixed(0)} KB · ${durationS.toFixed(1)}s · ${ext})`);
+        } catch (e: any) {
+          setStatus(`video: ${e.message}`, true);
+        } finally {
+          pendingClip = null;
+          btnWebm.textContent = btnWebmLabel;
+          btnWebm.classList.add("secondary");
+          btnWebm.disabled = false;
+        }
+      }
+
+      btnWebm.addEventListener("click", () => {
+        if (pendingClip) saveClip(); else recordClip();
       });
 
       try {
