@@ -153,6 +153,32 @@ const entries = [_]Entry{
         \\codes, not TYP002.
         ,
     },
+    .{
+        .code = "UNT001",
+        .title = "Unit category mismatch",
+        .body =
+        \\An annotated number-family `let`, `param`, or `export` was
+        \\assigned a number literal whose unit suffix lives in the wrong
+        \\category. Type-to-unit-category mapping:
+        \\
+        \\  Duration / Time  -> s, ms, us, ns
+        \\  Angle            -> deg, rad, turn
+        \\  Length / Pixels  -> px
+        \\  Percent          -> %
+        \\  Frequency        -> hz, khz
+        \\  Tempo            -> bpm
+        \\  Bars             -> bars
+        \\  Beats            -> beats
+        \\  Number/Int/Float -> no unit suffix
+        \\
+        \\Example: `let timeout: Duration = 6deg` -> UNT001, because
+        \\Duration expects a Time-category literal (s/ms/us/ns), and
+        \\`6deg` is in the Angle category.
+        \\
+        \\Silent when the literal has no unit at all (`let x: Duration =
+        \\42`) — that's a future UNT002 (missing required unit).
+        ,
+    },
 };
 
 pub fn run(ctx: Context, args: []const []const u8) !u8 {

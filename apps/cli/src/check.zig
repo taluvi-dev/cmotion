@@ -14,6 +14,11 @@
 //!     bearing) and a literal value (number / string / bool / color).
 //!     Skipped when the value is a call, ident, or anything else that
 //!     needs real type inference — that's the full typechecker's job.
+//!   - UNT001: unit-category mismatch within the number family. Fires
+//!     when both sides are number-side AND the annotation pins a unit
+//!     category (Duration -> time, Angle -> angle, ...) AND the literal
+//!     carries a unit whose category doesn't match. Silent when the
+//!     literal is unitless (that's a future UNT002).
 //!
 //! Out of scope (for now): unit-category matching (UNT* codes), generic
 //! types, function types, real inference, forward-reference rules in
@@ -87,6 +92,82 @@ fn categoryName(c: Category) []const u8 {
         .@"bool" => "bool",
         .color => "color",
         .unknown => "unknown",
+    };
+}
+
+/// Unit categories, mirroring the families in /language/types/. `.none`
+/// stands for an unmarked number literal — the `Number` / `Int` / `Float`
+/// row of the table.
+const UnitCategory = enum {
+    none,
+    time,
+    angle,
+    length,
+    percent,
+    frequency,
+    tempo,
+    bars,
+    beats,
+};
+
+fn unitCategory(u: ast.Unit) UnitCategory {
+    return switch (u) {
+        .s, .ms, .us, .ns => .time,
+        .hz, .khz => .frequency,
+        .deg, .rad, .turn => .angle,
+        .px => .length,
+        .percent => .percent,
+        .bpm => .tempo,
+        .bars => .bars,
+        .beats => .beats,
+    };
+}
+
+/// Map a type name to the unit category its values must inhabit, or null
+/// if the name doesn't pin a unit category (so UNT001 stays silent).
+fn nameToUnitCategory(name: []const u8) ?UnitCategory {
+    if (std.mem.eql(u8, name, "Duration") or std.mem.eql(u8, name, "Time")) return .time;
+    if (std.mem.eql(u8, name, "Angle")) return .angle;
+    if (std.mem.eql(u8, name, "Length") or std.mem.eql(u8, name, "Pixels")) return .length;
+    if (std.mem.eql(u8, name, "Percent")) return .percent;
+    if (std.mem.eql(u8, name, "Frequency")) return .frequency;
+    if (std.mem.eql(u8, name, "Tempo")) return .tempo;
+    if (std.mem.eql(u8, name, "Bars")) return .bars;
+    if (std.mem.eql(u8, name, "Beats")) return .beats;
+    if (std.mem.eql(u8, name, "Number") or std.mem.eql(u8, name, "Int") or std.mem.eql(u8, name, "Float")) return .none;
+    return null;
+}
+
+fn unitCategoryName(c: UnitCategory) []const u8 {
+    return switch (c) {
+        .none => "unitless",
+        .time => "Time",
+        .angle => "Angle",
+        .length => "Length",
+        .percent => "Percent",
+        .frequency => "Frequency",
+        .tempo => "Tempo",
+        .bars => "Bars",
+        .beats => "Beats",
+    };
+}
+
+fn unitName(u: ast.Unit) []const u8 {
+    return switch (u) {
+        .s => "s",
+        .ms => "ms",
+        .us => "us",
+        .ns => "ns",
+        .hz => "hz",
+        .khz => "khz",
+        .deg => "deg",
+        .rad => "rad",
+        .turn => "turn",
+        .px => "px",
+        .percent => "%",
+        .bpm => "bpm",
+        .bars => "bars",
+        .beats => "beats",
     };
 }
 
@@ -235,30 +316,78 @@ pub const Checker = struct {
             else => return,
         };
         const actual = literalCategory(lit);
-        if (actual == expected) return;
+        if (actual != expected) {
+            const span = value.span();
+            const loc = span.location(self.source);
+            try self.diagnostics.append(self.allocator, .{
+                .code = "TYP002",
+                .message = try std.fmt.allocPrint(
+                    self.allocator,
+                    "type mismatch: expected '{s}', got a {s} literal",
+                    .{ simple.name.name, categoryName(actual) },
+                ),
+                .span = .{
+                    .path = self.path,
+                    .line = loc.line,
+                    .column = loc.column,
+                    .length = span.end - span.start,
+                },
+                .expected = try std.fmt.allocPrint(self.allocator, "{s} value", .{simple.name.name}),
+                .actual = try std.fmt.allocPrint(self.allocator, "{s} literal", .{categoryName(actual)}),
+                .help = "change the value to match the type, or change the type annotation to match the value",
+                .fix_safety = .@"local-edit",
+                .repair = .{
+                    .id = "align-value-with-type",
+                    .summary = "Use a value whose category matches the annotation.",
+                },
+            });
+            return;
+        }
 
-        const span = value.span();
-        const loc = span.location(self.source);
+        // Broad categories agree. If both sides are number-family,
+        // descend into the unit-category check.
+        if (expected == .number) try self.checkUnitAnnotation(simple, lit.number);
+    }
+
+    fn checkUnitAnnotation(self: *Checker, simple: ast.SimpleType, number: ast.NumberLit) !void {
+        const expected_unit = nameToUnitCategory(simple.name.name) orelse return;
+        const lit_unit = number.unit orelse return; // unitless literal: defer to UNT002
+        const actual_unit = unitCategory(lit_unit);
+        if (actual_unit == expected_unit) return;
+
+        const loc = number.span.location(self.source);
         try self.diagnostics.append(self.allocator, .{
-            .code = "TYP002",
+            .code = "UNT001",
             .message = try std.fmt.allocPrint(
                 self.allocator,
-                "type mismatch: expected '{s}', got a {s} literal",
-                .{ simple.name.name, categoryName(actual) },
+                "unit mismatch: '{s}' expects {s}, got '{s}{s}' ({s})",
+                .{
+                    simple.name.name,
+                    unitCategoryName(expected_unit),
+                    number.text,
+                    unitName(lit_unit),
+                    unitCategoryName(actual_unit),
+                },
             ),
             .span = .{
                 .path = self.path,
                 .line = loc.line,
                 .column = loc.column,
-                .length = span.end - span.start,
+                .length = number.span.end - number.span.start,
             },
-            .expected = try std.fmt.allocPrint(self.allocator, "{s} value", .{simple.name.name}),
-            .actual = try std.fmt.allocPrint(self.allocator, "{s} literal", .{categoryName(actual)}),
-            .help = "change the value to match the type, or change the type annotation to match the value",
+            .expected = try std.fmt.allocPrint(self.allocator, "a {s} literal (annotated as {s})", .{
+                unitCategoryName(expected_unit),
+                simple.name.name,
+            }),
+            .actual = try std.fmt.allocPrint(self.allocator, "a {s} literal ('{s}')", .{
+                unitCategoryName(actual_unit),
+                unitName(lit_unit),
+            }),
+            .help = "change the unit suffix to match the annotated category, or change the annotation",
             .fix_safety = .@"local-edit",
             .repair = .{
-                .id = "align-value-with-type",
-                .summary = "Use a value whose category matches the annotation.",
+                .id = "align-unit-with-type",
+                .summary = "Use a literal whose unit lives in the annotated category.",
             },
         });
     }
