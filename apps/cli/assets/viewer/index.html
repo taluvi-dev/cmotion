@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>cmotion · viewer</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: oklch(0.18 0.02 280);
+        --fg: oklch(0.92 0.01 280);
+        --accent: oklch(0.72 0.16 320);
+      }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+        font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; }
+      header { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+        border-bottom: 1px solid oklch(0.30 0.02 280); }
+      header h1 { font-size: 14px; font-weight: 600; margin: 0; }
+      header .status { color: oklch(0.65 0.02 280); font-size: 12px; }
+      header button { background: var(--accent); color: oklch(0.10 0.02 280);
+        border: 0; padding: 6px 10px; border-radius: 6px; cursor: pointer; font: inherit;
+        font-weight: 600; }
+      header button:disabled { opacity: 0.5; cursor: progress; }
+      header label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+      header input[type="range"] { width: 200px; }
+      main { position: fixed; inset: 50px 0 0 0; }
+      canvas { width: 100%; height: 100%; display: block; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>cmotion · viewer</h1>
+      <span class="status" id="status">booting…</span>
+      <label>t <input type="range" id="t" min="0" max="6" step="0.01" value="0" /> <span id="tval">0.00s</span></label>
+      <button id="capture-png" disabled>capture PNG</button>
+      <button id="capture-webm" disabled>capture WebM (3s)</button>
+    </header>
+    <main><canvas id="stage"></canvas></main>
+    <script type="module">
+      import { boot } from "/cmotion-three.js";
+      const canvas = document.getElementById("stage");
+      const statusEl = document.getElementById("status");
+      const tInput = document.getElementById("t");
+      const tVal = document.getElementById("tval");
+      const pngBtn = document.getElementById("capture-png");
+      const webmBtn = document.getElementById("capture-webm");
+
+      function download(blob, name) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+
+      try {
+        const view = await boot({ canvas, statusEl });
+        statusEl.textContent = `interp v${view.versions.cmotion} · three.js r${view.versions.three}`;
+        view.seek(0);
+        tInput.addEventListener("input", () => {
+          const t = parseFloat(tInput.value);
+          tVal.textContent = `${t.toFixed(2)}s`;
+          view.seek(t);
+        });
+        pngBtn.disabled = false;
+        pngBtn.addEventListener("click", async () => {
+          const blob = await view.captureFrame();
+          download(blob, `cmotion-${Date.now()}.png`);
+        });
+        webmBtn.disabled = false;
+        webmBtn.addEventListener("click", async () => {
+          webmBtn.disabled = true;
+          webmBtn.textContent = "recording…";
+          const blob = await view.captureClip(3, 30);
+          download(blob, `cmotion-${Date.now()}.webm`);
+          webmBtn.disabled = false;
+          webmBtn.textContent = "capture WebM (3s)";
+        });
+      } catch (e) {
+        statusEl.textContent = `error: ${e.message}`;
+        console.error(e);
+      }
+    </script>
+  </body>
+</html>
