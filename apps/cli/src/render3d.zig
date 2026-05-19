@@ -396,14 +396,18 @@ fn rasteriseTriangleClipped(
             // Three edge functions; barycentric weights = each
             // edge's value scaled by inv_area. Same-sign requirement
             // accepts both front- and back-wound triangles.
-            const w_a = edgeFn(b.x, b.y, c.x, c.y, fx, fy) * inv_area;
-            const w_b = edgeFn(c.x, c.y, a.x, a.y, fx, fy) * inv_area;
-            const w_c = edgeFn(a.x, a.y, b.x, b.y, fx, fy) * inv_area;
-            // For back-wound triangles all three are negative —
-            // negate so we can use one positive check.
-            const wa = if (area < 0) -w_a else w_a;
-            const wb = if (area < 0) -w_b else w_b;
-            const wc = if (area < 0) -w_c else w_c;
+            // Dividing the sub-area edge functions by the signed
+            // triangle area already produces positive barycentrics
+            // for inside points REGARDLESS of winding (the signs of
+            // the numerator and denominator cancel). The earlier
+            // "if area<0 then negate" step was incorrectly *re-*
+            // flipping the sign on screen-CW triangles (which, due
+            // to the y-flip in our projection, are world-CCW front
+            // faces) — silently culling every front-facing triangle.
+            // Just trust the division.
+            const wa = edgeFn(b.x, b.y, c.x, c.y, fx, fy) * inv_area;
+            const wb = edgeFn(c.x, c.y, a.x, a.y, fx, fy) * inv_area;
+            const wc = edgeFn(a.x, a.y, b.x, b.y, fx, fy) * inv_area;
             if (wa < 0 or wb < 0 or wc < 0) continue;
 
             const depth = wa * a.z + wb * b.z + wc * c.z;
@@ -445,28 +449,6 @@ const Vec3F = @Vector(3, f32);
 /// along N and R for ambient + reflection. ACES filmic tone
 /// mapping + sRGB gamma encoding produces the final 8-bit output.
 fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
-    // DEBUG normal-visualisation override: encode the surface
-    // normal as RGB so the user can see directly what geometry
-    // is present at each rotation. Front cap (+z) reads light
-    // blue; back cap (-z) reads yellow; outward walls show as
-    // pinks/teals depending on xy direction. If a region of the
-    // C silhouette shows the BACKGROUND colour instead of a
-    // normal-encoded colour, there's no geometry there. Revert
-    // this override once the diagnosis lands.
-    _ = material;
-    _ = lights;
-    const r: f32 = (normal.x + 1.0) * 0.5;
-    const g: f32 = (normal.y + 1.0) * 0.5;
-    const b: f32 = (normal.z + 1.0) * 0.5;
-    return .{
-        @intFromFloat(@round(std.math.clamp(r, 0.0, 1.0) * 255.0)),
-        @intFromFloat(@round(std.math.clamp(g, 0.0, 1.0) * 255.0)),
-        @intFromFloat(@round(std.math.clamp(b, 0.0, 1.0) * 255.0)),
-        255,
-    };
-}
-
-fn shade_disabled_real(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
     const albedo: Vec3F = .{
         srgbDecode(material.albedo[0]),
         srgbDecode(material.albedo[1]),
