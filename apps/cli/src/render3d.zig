@@ -411,19 +411,21 @@ fn edgeFn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
 }
 
+/// Per-fragment RGB vector. Maps to a SIMD register on x86_64
+/// (the compiler typically pads `@Vector(3, f32)` to 4 lanes
+/// internally). All per-channel arithmetic inside `shade` runs as
+/// element-wise vector ops — the BRDF maths goes from 3 scalar
+/// passes to one SIMD pass per stage.
+const Vec3F = @Vector(3, f32);
+
 /// Shade a fragment via a physically-based BRDF: GGX/Trowbridge-Reitz
 /// normal-distribution function + Smith geometric attenuation +
 /// Schlick Fresnel for the specular term, Lambert for diffuse,
-/// hemispheric sky/ground gradient for ambient. ACES filmic tone
+/// procedural environment (sky/horizon/ground + HDR sun) sampled
+/// along N and R for ambient + reflection. ACES filmic tone
 /// mapping + sRGB gamma encoding produces the final 8-bit output.
-///
-/// The simplifications still in place: view direction treated as
-/// constant +z (narrow-FOV approximation that avoids per-fragment
-/// view recomputation); no environment-map reflection; no shadow
-/// casting. These are the polish that turns a "PBR-shaped" renderer
-/// into a "Three.js-grade" one and can land incrementally on top.
 fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
-    const albedo: [3]f32 = .{
+    const albedo: Vec3F = .{
         srgbDecode(material.albedo[0]),
         srgbDecode(material.albedo[1]),
         srgbDecode(material.albedo[2]),
@@ -436,56 +438,45 @@ fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
     // engines use.
     const roughness = @max(roughness_input, 0.04);
 
-    // F0 = the surface's reflectance at normal incidence.
-    // Dielectric: 4 % white. Metal: tinted by the albedo.
-    const f0: [3]f32 = .{
-        std.math.lerp(@as(f32, 0.04), albedo[0], metalness),
-        std.math.lerp(@as(f32, 0.04), albedo[1], metalness),
-        std.math.lerp(@as(f32, 0.04), albedo[2], metalness),
-    };
+    // F0 = mix(0.04, albedo, metalness). Dielectrics reflect 4% at
+    // normal incidence; metals reflect their albedo colour.
+    const f0_dielectric: Vec3F = @splat(0.04);
+    const metal_v: Vec3F = @splat(metalness);
+    const f0: Vec3F = f0_dielectric + (albedo - f0_dielectric) * metal_v;
 
-    var lit: [3]f32 = .{ 0, 0, 0 };
+    const ones: Vec3F = @splat(1.0);
+    const one_minus_m: Vec3F = @splat(1.0 - metalness);
 
-    // View direction — see function docstring for the constant-+z
-    // approximation. n_dot_v is bounded below to avoid singularities
-    // at grazing angles.
+    var lit: Vec3F = @splat(0);
+
+    // View direction — constant +z (camera looks down −z with narrow
+    // FOV). n_dot_v is bounded below to avoid singularities at
+    // grazing angles.
     const view = Vec3{ .x = 0, .y = 0, .z = 1 };
     const n_dot_v = @max(0.001, normal.dot(view));
 
     for (lights) |l| {
         switch (l) {
             .ambient => |amb| {
-                // Image-based lighting via a procedural sky/ground
-                // environment. Diffuse: sample env along the normal
-                // (cheap stand-in for full irradiance convolution).
-                // Specular: sample env along the reflection vector
-                // R, modulated by Fresnel × (1 − roughness)² (rough
-                // surfaces blur the reflection until it approaches
-                // diffuse — the "split-sum" approximation Epic
-                // popularised, simplified for our LDR-only env).
                 const env_diffuse = sampleEnvironment(normal);
                 const reflect = computeReflect(view, normal);
                 const env_specular = sampleEnvironment(reflect);
 
-                // Schlick Fresnel at normal-incidence-ish angle (we
-                // already bounded n_dot_v above). Roughness term
-                // dampens the spec reflection on rough surfaces.
+                // Schlick at the n·v incidence. Roughness² blurs the
+                // specular into the diffuse on rough surfaces (cheap
+                // split-sum stand-in).
                 const fres_n = 1.0 - n_dot_v;
                 const fres_n5 = fres_n * fres_n * fres_n * fres_n * fres_n;
                 const rough_atten = (1.0 - roughness) * (1.0 - roughness);
+                const fres_v: Vec3F = @splat(fres_n5);
+                const rough_v: Vec3F = @splat(rough_atten);
+                const intensity_v: Vec3F = @splat(amb.intensity);
 
-                inline for (0..3) |k| {
-                    // Diffuse irradiance (energy-conserving against
-                    // metalness — metals don't have a diffuse term).
-                    const diff = albedo[k] * env_diffuse[k] * (1.0 - metalness);
-                    // Specular reflection of the env. F0 modulated
-                    // by Schlick rim term so grazing angles
-                    // brighten — that's the visual signature of
-                    // proper IBL on metals.
-                    const F_env = f0[k] + (1.0 - f0[k]) * fres_n5;
-                    const spec = env_specular[k] * F_env * rough_atten;
-                    lit[k] += (diff + spec) * amb.intensity;
-                }
+                const diff = albedo * env_diffuse * one_minus_m;
+                const F_env = f0 + (ones - f0) * fres_v;
+                const spec = env_specular * F_env * rough_v;
+
+                lit += (diff + spec) * intensity_v;
             },
             .directional => |dir| {
                 const L = dir.direction.scale(-1).normalise();
@@ -502,38 +493,33 @@ fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
                 const ndf_denom = n_dot_h * n_dot_h * (alpha2 - 1.0) + 1.0;
                 const D = alpha2 / (std.math.pi * ndf_denom * ndf_denom);
 
-                // Smith geometric attenuation with Schlick-GGX
-                // approximation. `k` is the direct-light remapping
-                // — `(roughness + 1)² / 8`.
+                // Smith geometric attenuation with Schlick-GGX `k`.
                 const k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
                 const g_v = n_dot_v / (n_dot_v * (1.0 - k) + k);
                 const g_l = n_dot_l / (n_dot_l * (1.0 - k) + k);
                 const G = g_v * g_l;
 
-                // Schlick's Fresnel approximation.
+                // Schlick Fresnel — scalar fres_x5, broadcast into a
+                // vector for the per-channel F = f0 + (1-f0)·fres⁵.
                 const fres_x = 1.0 - v_dot_h;
                 const fres_x5 = fres_x * fres_x * fres_x * fres_x * fres_x;
+                const fres_v: Vec3F = @splat(fres_x5);
+                const F = f0 + (ones - f0) * fres_v;
 
-                // BRDF specular: (D · F · G) / (4 · n·v · n·l).
-                // F is per-channel, so the whole specular is per-channel.
                 const denom = 4.0 * n_dot_v * n_dot_l + 0.0001;
-                inline for (0..3) |k_idx| {
-                    const F = f0[k_idx] + (1.0 - f0[k_idx]) * fres_x5;
-                    const specular = (D * F * G) / denom;
-                    // Energy conservation: light reflected by F can't
-                    // also be absorbed/diffused. Metalness suppresses
-                    // the diffuse path entirely.
-                    const k_d = (1.0 - F) * (1.0 - metalness);
-                    const diffuse = k_d * albedo[k_idx] / std.math.pi;
-                    lit[k_idx] += (diffuse + specular) * dir.intensity * n_dot_l;
-                }
+                const spec_scale: Vec3F = @splat(D * G / denom);
+                const inv_pi: Vec3F = @splat(1.0 / std.math.pi);
+                const irradiance: Vec3F = @splat(dir.intensity * n_dot_l);
+
+                const specular = F * spec_scale;
+                const k_d = (ones - F) * one_minus_m;
+                const diffuse = k_d * albedo * inv_pi;
+
+                lit += (diffuse + specular) * irradiance;
             },
         }
     }
 
-    // ACES filmic tone mapping (Krzysztof Narkowicz's fit). Compresses
-    // the [0, ∞) HDR range into [0, 1] with a filmic shoulder /
-    // toe, then we gamma-encode for sRGB display.
     return .{
         finaliseChannel(lit[0]),
         finaliseChannel(lit[1]),
@@ -583,40 +569,36 @@ fn acesFilmic(x: f32) f32 {
 /// the taste sample's main directional light (vec3(3, 4, 5)) so
 /// the reflected sun catches the same face of the geometry the
 /// direct light hits.
-fn sampleEnvironment(direction: Vec3) [3]f32 {
-    const sky: [3]f32 = .{ 0.62, 0.71, 0.86 };
-    const horizon: [3]f32 = .{ 0.82, 0.81, 0.78 };
-    const ground: [3]f32 = .{ 0.30, 0.25, 0.20 };
+fn sampleEnvironment(direction: Vec3) Vec3F {
+    const sky: Vec3F = .{ 0.62, 0.71, 0.86 };
+    const horizon: Vec3F = .{ 0.82, 0.81, 0.78 };
+    const ground: Vec3F = .{ 0.30, 0.25, 0.20 };
 
     const y = std.math.clamp(direction.y, -1.0, 1.0);
-    var out: [3]f32 = .{ 0, 0, 0 };
+    var out: Vec3F = @splat(0);
     if (y >= 0) {
         const t = std.math.pow(f32, y, 0.6);
-        inline for (0..3) |k| out[k] = std.math.lerp(horizon[k], sky[k], t);
+        const t_v: Vec3F = @splat(t);
+        out = horizon + (sky - horizon) * t_v;
     } else {
         const t = std.math.pow(f32, -y, 0.6);
-        inline for (0..3) |k| out[k] = std.math.lerp(horizon[k], ground[k], t);
+        const t_v: Vec3F = @splat(t);
+        out = horizon + (ground - horizon) * t_v;
     }
 
-    // Add the sun. Direction normalized once at compile time via
-    // explicit math; magnitude of vec3(3, 4, 5) is sqrt(50) so the
-    // unit components are (3/√50, 4/√50, 5/√50).
-    const inv_root50: f32 = 0.1414213562; // 1/√50
+    // Add the sun.
+    const inv_root50: f32 = 0.1414213562;
     const sun_dir = Vec3{
         .x = 3.0 * inv_root50,
         .y = 4.0 * inv_root50,
         .z = 5.0 * inv_root50,
     };
     const cos_to_sun = std.math.clamp(direction.dot(sun_dir), 0.0, 1.0);
-    // Tight cone: pow=512 narrows the visible disk to ~3° wide
-    // (analogous to the real sun's angular size). Peak intensity
-    // 5.0 sits above [0,1] so the ACES tonemap registers it as
-    // a bright-but-not-clipped highlight.
     const sun_peak: f32 = 5.0;
     const sun_falloff = std.math.pow(f32, cos_to_sun, 512.0);
-    // Warm sun colour — very slightly biased toward yellow.
-    const sun_color: [3]f32 = .{ 1.0, 0.95, 0.85 };
-    inline for (0..3) |k| out[k] += sun_color[k] * sun_peak * sun_falloff;
+    const sun_color: Vec3F = .{ 1.0, 0.95, 0.85 };
+    const sun_contribution = sun_color * @as(Vec3F, @splat(sun_peak * sun_falloff));
+    out += sun_contribution;
 
     return out;
 }
