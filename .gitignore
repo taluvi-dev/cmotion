@@ -149,6 +149,9 @@ zig-out/
 # Vendored native deps fetched by scripts/fetch-deps.sh
 apps/cli/vendor/
 
+# Built WASM artifact copied into apps/web/public by predev/prebuild
+apps/web/public/cmotion-render.wasm
+
 # tree-sitter native build artifacts (parser.c / grammar.json / node-types.json
 # are generated from grammar.js and ARE committed, per tree-sitter convention)
 packages/tree-sitter-cmotion/build/

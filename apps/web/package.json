@@ -5,8 +5,10 @@
   "version": "0.0.0",
   "description": "cmotion.org — site and docs for the cmotion DSL",
   "scripts": {
+    "predev": "bash scripts/copy-wasm.sh",
     "dev": "astro dev",
     "start": "astro dev",
+    "prebuild": "bash scripts/copy-wasm.sh",
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",

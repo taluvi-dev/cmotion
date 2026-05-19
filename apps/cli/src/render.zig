@@ -110,6 +110,12 @@ const Style = struct {
     /// PBR-style "how rough is this surface". Defaults nil →
     /// renderer treats unset as 1 (fully rough, essentially diffuse).
     roughness: ?f32 = null,
+    /// Self-illuminating colour added after lighting. Lets faces
+    /// facing away from every light still read as the material
+    /// rather than going pitch-black. `null` = no emission.
+    emissive: ?value.Value = null,
+    /// Multiplier on `emissive`. `null` defaults to 1.0.
+    emissive_intensity: ?f32 = null,
 };
 
 /// Top-level entry point. Allocates a framebuffer in `arena` and paints
@@ -453,19 +459,23 @@ fn paintRender3D(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Sty
 
     var scene: ?value.Value = null;
     var lights_v: ?value.Value = null;
+    var camera_v: ?value.Value = null;
     for (c.fields) |f| {
         if (f.name.len == 0) {
             if (scene == null) scene = f.value;
         } else if (std.mem.eql(u8, f.name, "lights")) {
             lights_v = f.value;
+        } else if (std.mem.eql(u8, f.name, "camera")) {
+            camera_v = f.value;
         }
     }
     const sc = scene orelse return;
 
     const lights = parseLights(a, lights_v) catch return;
+    const camera = parseCamera(camera_v);
 
     var rfb: render3d.Framebuffer = .{ .pixels = fb.pixels, .width = fb.width, .height = fb.height };
-    paint3DTree(a, sc, &rfb, mesh_mod.Mat4.identity(), style, lights, off) catch {
+    paint3DTree(a, sc, &rfb, mesh_mod.Mat4.identity(), style, lights, camera, off) catch {
         // Anything that fails (out of memory, mesh with degenerate
         // triangulation, etc.) falls through silently — the bg
         // layer is still on the framebuffer, which is preferable
@@ -483,6 +493,7 @@ fn paint3DTree(
     transform: mesh_mod.Mat4,
     style: Style,
     lights: []const render3d.Light,
+    camera: render3d.Camera,
     off: Offset,
 ) !void {
     if (v != .constructed) return;
@@ -490,24 +501,23 @@ fn paint3DTree(
 
     if (std.mem.eql(u8, c.name, "rotate")) {
         const new_transform = applyRotateArgs(c, transform);
-        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, off);
+        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, camera, off);
         return;
     }
     if (std.mem.eql(u8, c.name, "scale")) {
         const new_transform = applyScaleArgs(c, transform);
-        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, off);
+        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, camera, off);
         return;
     }
     if (std.mem.eql(u8, c.name, "translate")) {
         const new_transform = applyTranslateArgs(c, transform);
-        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, off);
+        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, camera, off);
         return;
     }
     if (std.mem.eql(u8, c.name, "material")) {
-        // `.material(fill:, metalness:, roughness:)` becomes the
-        // active Style for the inner mesh's albedo + specular shape.
-        // `emissive:` is read but unused — needs an emission term in
-        // the shading equation, which a later commit adds.
+        // `.material(fill:, metalness:, roughness:, emissive:,
+        // emissive_intensity:)` becomes the active Style for the
+        // inner mesh.
         var new_style = style;
         for (c.fields) |f| {
             if (std.mem.eql(u8, f.name, "fill")) {
@@ -516,13 +526,17 @@ fn paint3DTree(
                 if (numberAsF32(f.value)) |n| new_style.metalness = n;
             } else if (std.mem.eql(u8, f.name, "roughness")) {
                 if (numberAsF32(f.value)) |n| new_style.roughness = n;
+            } else if (std.mem.eql(u8, f.name, "emissive")) {
+                new_style.emissive = f.value;
+            } else if (std.mem.eql(u8, f.name, "emissive_intensity")) {
+                if (numberAsF32(f.value)) |n| new_style.emissive_intensity = n;
             }
         }
-        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, transform, new_style, lights, off);
+        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, transform, new_style, lights, camera, off);
         return;
     }
     if (std.mem.eql(u8, c.name, "extrude")) {
-        try drawExtrude(arena, c, fb, transform, style, lights, off);
+        try drawExtrude(arena, c, fb, transform, style, lights, camera, off);
         return;
     }
     // Unknown wrapper / leaf in 3D context — fall through silently
@@ -620,11 +634,13 @@ fn drawExtrude(
     transform: mesh_mod.Mat4,
     style: Style,
     lights: []const render3d.Light,
+    camera: render3d.Camera,
     off: Offset,
 ) !void {
     var leaf: ?value.Value = null;
     var depth: f32 = 80;
-    var bevel: ?f32 = null; // null = use the auto default
+    var bevel: ?f32 = null;
+    var bevel_segments: u32 = 4; // matches Three.js ExtrudeGeometry default
     for (extrude.fields) |f| {
         if (f.name.len == 0) {
             if (leaf == null) leaf = f.value;
@@ -632,15 +648,17 @@ fn drawExtrude(
             if (numberAsF32(f.value)) |d| depth = d;
         } else if (std.mem.eql(u8, f.name, "bevel")) {
             if (numberAsF32(f.value)) |b| bevel = b;
+        } else if (std.mem.eql(u8, f.name, "bevel_segments")) {
+            if (numberAsF32(f.value)) |s| bevel_segments = @intFromFloat(@max(1.0, s));
         }
     }
     const inner = leaf orelse return;
-    // Default bevel: ~4% of depth (small enough to not collapse
-    // typical glyph strokes, large enough to read as a rounded
-    // edge under any reasonable light angle). Users can override
-    // via `extrude(..., bevel: <px>)`.
-    const eff_bevel: f32 = bevel orelse (depth * 0.04);
-    const m = (try meshFromShape(arena, inner, depth, eff_bevel)) orelse return;
+    // Default bevel: 10 % of depth (matching Three.js's
+    // ScenePreview `bevelSize: 0.04` on `depth: 0.4`), with a
+    // 1.5 px minimum so thin extrusions still have a visible
+    // bevel. Users override via `extrude(..., bevel: <px>)`.
+    const eff_bevel: f32 = bevel orelse @max(depth * 0.10, 1.5);
+    const m = (try meshFromShape(arena, inner, depth, eff_bevel, bevel_segments)) orelse return;
 
     // Centre the mesh on its own bounding-box centre, then apply the
     // user transform, then apply the canvas-centre offset. This way
@@ -660,6 +678,8 @@ fn drawExtrude(
         .albedo = if (style.fill) |fv| valueToRgba(fv) else .{ 220, 220, 220, 255 },
         .metalness = style.metalness orelse 0.0,
         .roughness = style.roughness orelse 1.0,
+        .emissive = if (style.emissive) |ev| valueToRgba(ev) else .{ 0, 0, 0, 255 },
+        .emissive_intensity = style.emissive_intensity orelse 1.0,
     };
 
     // 2× supersampling smooths the rasteriser's hard silhouette
@@ -680,7 +700,7 @@ fn drawExtrude(
         fb,
         centred,
         final_transform,
-        .{},
+        camera,
         material,
         lights,
         supersample_factor,
@@ -722,26 +742,31 @@ fn centreMesh(arena: std.mem.Allocator, m: mesh_mod.Mesh) !mesh_mod.Mesh {
 
 /// Build a mesh for the leaf shape inside an `extrude(...)`. Today
 /// only `text.glyph` is supported; rects / paths land later.
-fn meshFromShape(arena: std.mem.Allocator, leaf: value.Value, depth: f32, bevel: f32) !?mesh_mod.Mesh {
+fn meshFromShape(
+    arena: std.mem.Allocator,
+    leaf: value.Value,
+    depth: f32,
+    bevel: f32,
+    bevel_segments: u32,
+) !?mesh_mod.Mesh {
     if (leaf != .constructed) return null;
     const c = leaf.constructed;
     if (std.mem.eql(u8, c.name, "text.glyph")) {
         var text_raw: []const u8 = "";
         var size_px: f32 = 96;
+        var curve_segments: u32 = 32;
         for (c.fields) |f| {
             if (f.name.len == 0 and f.value == .string) {
                 text_raw = f.value.string;
             } else if (std.mem.eql(u8, f.name, "size")) {
                 if (numberAsF32(f.value)) |s| size_px = s;
+            } else if (std.mem.eql(u8, f.name, "curve_segments")) {
+                if (numberAsF32(f.value)) |s| curve_segments = @intFromFloat(@max(2.0, s));
             }
         }
         const text = stripQuotes(text_raw);
         if (text.len == 0) return null;
-        // For a multi-character run we'd extrude each glyph and
-        // concatenate; v0 sticks to single-codepoint marketing
-        // letters (the taste sample's "C") and extrudes only the
-        // first code point.
-        return try mesh_mod.extrudeGlyph(arena, text[0], size_px, depth, bevel);
+        return try mesh_mod.extrudeGlyph(arena, text[0], size_px, depth, bevel, bevel_segments, curve_segments);
     }
     return null;
 }
@@ -750,6 +775,30 @@ fn meshFromShape(arena: std.mem.Allocator, leaf: value.Value, depth: f32, bevel:
 /// Recognises `ambient(intensity)` (positional or named) and
 /// `directional(from: vec3(x, y, z), intensity: N)`. Anything else is
 /// silently dropped (no lights at all if the array is empty).
+/// Parse `camera(fov:, distance:, near:, far:)` into a `render3d.Camera`.
+/// Missing fields keep the engine default. Recognises angle units
+/// (deg / rad) on `fov:` so `camera(fov: 28deg)` works as expected.
+/// Unknown / non-camera input returns the default camera.
+fn parseCamera(camera_v: ?value.Value) render3d.Camera {
+    var cam = render3d.Camera{};
+    const v = camera_v orelse return cam;
+    if (v != .constructed) return cam;
+    const c = v.constructed;
+    if (!std.mem.eql(u8, c.name, "camera")) return cam;
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "fov")) {
+            if (readAngleRad(f.value)) |rad| cam.fov_rad = rad;
+        } else if (std.mem.eql(u8, f.name, "distance")) {
+            if (numberAsF32(f.value)) |d| cam.distance = d;
+        } else if (std.mem.eql(u8, f.name, "near")) {
+            if (numberAsF32(f.value)) |n| cam.near = n;
+        } else if (std.mem.eql(u8, f.name, "far")) {
+            if (numberAsF32(f.value)) |fa| cam.far = fa;
+        }
+    }
+    return cam;
+}
+
 fn parseLights(arena: std.mem.Allocator, lights_v: ?value.Value) ![]const render3d.Light {
     if (lights_v == null) return &.{};
     if (lights_v.? != .array) return &.{};
@@ -1294,6 +1343,117 @@ fn deflateZlib(arena: std.mem.Allocator, input: []const u8, writer: *std.Io.Writ
     std.mem.writeInt(u32, &adler_bytes, std.hash.Adler32.hash(input), .big);
     try writer.writeAll(&adler_bytes);
 }
+
+/// Streaming APNG writer. Builds an animated PNG (RFC unofficial,
+/// W3C "PNG Working Group" extension — supported by every modern
+/// browser and image viewer) by interleaving frame-control chunks
+/// (`fcTL`) with image data chunks (`IDAT` for frame 0, `fdAT`
+/// for subsequent frames). The base PNG is the first frame, so
+/// any non-APNG viewer falls back to a still image cleanly.
+///
+/// Usage:
+///   var aw = try ApngWriter.init(arena, writer, w, h, fps_num, fps_den, total_frames);
+///   for each frame: try aw.writeFrame(framebuffer);
+///   try aw.finish();
+///
+/// Each `writeFrame` filter + deflate-compresses the framebuffer
+/// independently — there's no inter-frame delta encoding (the
+/// PNG/APNG format doesn't support it). For static-background
+/// scenes the per-frame compression still benefits from Up-filter
+/// + LZ77 on the within-frame regularities, so file sizes stay
+/// reasonable (~1/10 the size of the raw RGBA payload).
+pub const ApngWriter = struct {
+    arena: std.mem.Allocator,
+    output: *std.Io.Writer,
+    width: u32,
+    height: u32,
+    fps_num: u16,
+    fps_den: u16,
+    seq: u32 = 0,
+    frame_idx: u32 = 0,
+
+    pub fn init(
+        arena: std.mem.Allocator,
+        output: *std.Io.Writer,
+        width: u32,
+        height: u32,
+        fps_num: u16,
+        fps_den: u16,
+        total_frames: u32,
+    ) !ApngWriter {
+        // PNG file signature.
+        try output.writeAll(&[_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
+
+        // IHDR — same shape as a static PNG (RGBA8, no interlace).
+        var ihdr: [13]u8 = undefined;
+        std.mem.writeInt(u32, ihdr[0..4], width, .big);
+        std.mem.writeInt(u32, ihdr[4..8], height, .big);
+        ihdr[8] = 8; // bit depth
+        ihdr[9] = 6; // RGBA
+        ihdr[10] = 0;
+        ihdr[11] = 0;
+        ihdr[12] = 0;
+        try writePngChunk(output, "IHDR", &ihdr);
+
+        // acTL — animation control. `num_plays = 0` is "loop forever".
+        var actl: [8]u8 = undefined;
+        std.mem.writeInt(u32, actl[0..4], total_frames, .big);
+        std.mem.writeInt(u32, actl[4..8], 0, .big);
+        try writePngChunk(output, "acTL", &actl);
+
+        return .{
+            .arena = arena,
+            .output = output,
+            .width = width,
+            .height = height,
+            .fps_num = fps_num,
+            .fps_den = fps_den,
+        };
+    }
+
+    pub fn writeFrame(self: *ApngWriter, fb: Framebuffer) !void {
+        // fcTL — frame control. Each frame: full-canvas, dispose
+        // NONE + blend SOURCE (frames are fully opaque replacements).
+        var fctl: [26]u8 = undefined;
+        std.mem.writeInt(u32, fctl[0..4], self.seq, .big);
+        std.mem.writeInt(u32, fctl[4..8], fb.width, .big);
+        std.mem.writeInt(u32, fctl[8..12], fb.height, .big);
+        std.mem.writeInt(u32, fctl[12..16], 0, .big); // x_offset
+        std.mem.writeInt(u32, fctl[16..20], 0, .big); // y_offset
+        std.mem.writeInt(u16, fctl[20..22], self.fps_num, .big);
+        std.mem.writeInt(u16, fctl[22..24], self.fps_den, .big);
+        fctl[24] = 0; // dispose_op: NONE
+        fctl[25] = 0; // blend_op: SOURCE
+        try writePngChunk(self.output, "fcTL", &fctl);
+        self.seq += 1;
+
+        // Filter + deflate-compress the frame.
+        const filtered = try filterFramebuffer(self.arena, fb);
+        var idat_buf = std.Io.Writer.Allocating.init(self.arena);
+        defer idat_buf.deinit();
+        try deflateZlib(self.arena, filtered, &idat_buf.writer);
+        const compressed = idat_buf.written();
+
+        if (self.frame_idx == 0) {
+            // First frame goes in IDAT (no sequence prefix). This
+            // makes the APNG fall back to a static PNG when viewed
+            // in a non-APNG viewer.
+            try writePngChunk(self.output, "IDAT", compressed);
+        } else {
+            // Subsequent frames go in fdAT with a sequence prefix.
+            const fdat = try self.arena.alloc(u8, 4 + compressed.len);
+            std.mem.writeInt(u32, fdat[0..4], self.seq, .big);
+            @memcpy(fdat[4..], compressed);
+            try writePngChunk(self.output, "fdAT", fdat);
+            self.seq += 1;
+        }
+        self.frame_idx += 1;
+    }
+
+    pub fn finish(self: *ApngWriter) !void {
+        try writePngChunk(self.output, "IEND", &.{});
+    }
+};
 
 fn writePngChunk(writer: anytype, chunk_type: []const u8, data: []const u8) !void {
     var len_bytes: [4]u8 = undefined;

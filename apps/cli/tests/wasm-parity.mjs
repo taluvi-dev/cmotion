@@ -17,6 +17,7 @@ import { readFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { WASI } from "node:wasi";
 
 // .../apps/cli/tests/wasm-parity.mjs → .../apps/cli
 const repoCli = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -57,11 +58,20 @@ if (nativeRgb.length !== expected) {
 }
 
 // --- WASM render → RGBA from linear memory ---
-const wasm = await WebAssembly.instantiate(readFileSync(wasmPath), {});
+//
+// The artifact is built against wasm32-wasi (so tree-sitter's C
+// runtime can link), so we satisfy wasi_snapshot_preview1 with
+// Node's bundled WASI shim. We never actually invoke `_start` —
+// host calls our exports directly — but the imports must be
+// satisfied at instantiation time.
+const wasi = new WASI({ version: "preview1" });
+const wasm = await WebAssembly.instantiate(readFileSync(wasmPath), {
+  wasi_snapshot_preview1: wasi.wasiImport,
+});
 const { exports } = wasm.instance;
 const bytes = W * H * 4;
-const ptr = exports.alloc(bytes);
-if (!ptr) fail("WASM alloc returned null");
+const ptr = exports.cm_alloc(bytes);
+if (!ptr) fail("WASM cm_alloc returned null");
 const status = exports.render_taste(W, H, ptr);
 if (status !== 0) fail(`render_taste returned ${status}`);
 const wasmRgba = new Uint8Array(exports.memory.buffer, ptr, bytes);
