@@ -86,6 +86,15 @@ const Offset = struct {
     }
 };
 
+/// Painting context inherited from outer wrappers. Currently just the
+/// active fill: `.material(child, fill: c)` sets it so that a child
+/// without its own `fill:` (e.g. `extrude(text.glyph(...))`) still
+/// picks up the colour the user asked for. As more material properties
+/// land (stroke, opacity, …) they'll thread through here too.
+const Style = struct {
+    fill: ?value.Value = null,
+};
+
 /// Top-level entry point. Allocates a framebuffer in `arena` and paints
 /// `tree` onto it. The caller picks the canvas size — typically passed
 /// from CLI flags. `tree` is expected to be the output of `sampler.sampleAt`
@@ -99,26 +108,28 @@ pub fn renderTree(
     const pixels = try arena.alloc(u8, @as(usize, width) * @as(usize, height) * 4);
     @memset(pixels, 0);
     var fb: Framebuffer = .{ .pixels = pixels, .width = width, .height = height };
-    paintValue(tree, &fb, .{});
+    paintValue(tree, &fb, .{}, .{});
     return fb;
 }
 
 /// Dispatch over the value tree. Compose and individual shape
-/// constructors paint; everything else (numbers, strings, lambdas, ...
-/// at the root or nested) is silently ignored. `off` is the accumulated
-/// translation in canvas pixels.
-fn paintValue(v: value.Value, fb: *Framebuffer, off: Offset) void {
+/// constructors paint; 3D wrappers descend to the inner shape
+/// (flat fallback — see paintWrapper); everything else (numbers,
+/// strings, lambdas, …) is silently ignored. `off` is the
+/// accumulated translation in canvas pixels; `style` is the inherited
+/// fill / material context.
+fn paintValue(v: value.Value, fb: *Framebuffer, off: Offset, style: Style) void {
     switch (v) {
         .constructed => |c| {
             if (std.mem.eql(u8, c.name, "compose")) {
-                paintCompose(c, fb, off);
+                paintCompose(c, fb, off, style);
             } else if (std.mem.eql(u8, c.name, "rect")) {
-                paintRect(c, fb, off);
+                paintRect(c, fb, off, style);
             } else if (std.mem.eql(u8, c.name, "translate")) {
-                paintTranslate(c, fb, off);
+                paintTranslate(c, fb, off, style);
+            } else if (isFlatFallback(c.name)) {
+                paintWrapper(c, fb, off, style);
             }
-            // Anything else (render3d, extrude, vec3, ...) is a no-op
-            // in v0. Stage 6/7 will pick these up.
         },
         // Arrays/records/colors/etc. at the root aren't paintable shapes
         // today; they could be addressed by a later "paint anything that
@@ -128,17 +139,31 @@ fn paintValue(v: value.Value, fb: *Framebuffer, off: Offset) void {
     }
 }
 
-fn paintCompose(c: value.Constructed, fb: *Framebuffer, off: Offset) void {
+/// Constructors that the v0 renderer doesn't model but whose inner
+/// shape is still meaningful in 2D: drop the 3D semantics, paint the
+/// wrapped child flat. The taste sample stacks `render3d` ▸ `.scale`
+/// ▸ `.rotate` ▸ `.material` ▸ `extrude` ▸ `text.glyph` — without this
+/// fallback every one of those layers would silently zero out the
+/// glyph.
+fn isFlatFallback(name: []const u8) bool {
+    return std.mem.eql(u8, name, "render3d")
+        or std.mem.eql(u8, name, "extrude")
+        or std.mem.eql(u8, name, "material")
+        or std.mem.eql(u8, name, "rotate")
+        or std.mem.eql(u8, name, "scale");
+}
+
+fn paintCompose(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) void {
     for (c.fields) |f| {
         if (!std.mem.eql(u8, f.name, "layers")) continue;
         switch (f.value) {
-            .array => |arr| for (arr.elems) |elem| paintValue(elem, fb, off),
+            .array => |arr| for (arr.elems) |elem| paintValue(elem, fb, off, style),
             else => {},
         }
     }
 }
 
-fn paintRect(c: value.Constructed, fb: *Framebuffer, off: Offset) void {
+fn paintRect(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) void {
     var w: f64 = @floatFromInt(fb.width);
     var h: f64 = @floatFromInt(fb.height);
     var fill: ?value.Value = null;
@@ -154,7 +179,15 @@ fn paintRect(c: value.Constructed, fb: *Framebuffer, off: Offset) void {
             if (valueAsOffset(f.value)) |a| at = a;
         }
     }
-    const rgba: [4]u8 = if (fill) |fv| valueToRgba(fv) else .{ 255, 255, 255, 255 };
+    // Rect's own `fill:` wins over the inherited material `fill:` —
+    // it's the more specific signal. Fall back to white if nothing's
+    // set so the rect remains visible against a transparent canvas.
+    const rgba: [4]u8 = if (fill) |fv|
+        valueToRgba(fv)
+    else if (style.fill) |sf|
+        valueToRgba(sf)
+    else
+        .{ 255, 255, 255, 255 };
 
     // Centered-by-default: the rect's geometric centre lands at the
     // canvas centre, shifted by the accumulated translate and the
@@ -169,7 +202,7 @@ fn paintRect(c: value.Constructed, fb: *Framebuffer, off: Offset) void {
 /// positional field (from a method-chain receiver `rect(...).translate(...)`
 /// or a direct call `translate(rect(...), x:, y:)`); named-only forms
 /// without a shape are a no-op.
-fn paintTranslate(c: value.Constructed, fb: *Framebuffer, off: Offset) void {
+fn paintTranslate(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) void {
     var dx: f64 = 0;
     var dy: f64 = 0;
     var child: ?value.Value = null;
@@ -182,7 +215,27 @@ fn paintTranslate(c: value.Constructed, fb: *Framebuffer, off: Offset) void {
             child = f.value;
         }
     }
-    if (child) |ch| paintValue(ch, fb, off.plus(.{ .x = dx, .y = dy }));
+    if (child) |ch| paintValue(ch, fb, off.plus(.{ .x = dx, .y = dy }), style);
+}
+
+/// Flat fallback for 3D constructors the renderer doesn't model
+/// (render3d / extrude / material / rotate / scale). The first
+/// positional is treated as the wrapped child; any `fill:` becomes
+/// the inherited style (so `.material(fill: ...)` reaches the inner
+/// glyph). Every other arg — depth, metalness, axis angles, scale
+/// factors — is dropped silently. The result: a flat 2D shape in
+/// roughly the right place, painted in roughly the right colour.
+fn paintWrapper(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) void {
+    var child: ?value.Value = null;
+    var new_style = style;
+    for (c.fields) |f| {
+        if (f.name.len == 0) {
+            if (child == null) child = f.value;
+        } else if (std.mem.eql(u8, f.name, "fill")) {
+            new_style.fill = f.value;
+        }
+    }
+    if (child) |ch| paintValue(ch, fb, off, new_style);
 }
 
 fn numberAsPixels(v: value.Value) ?f64 {
@@ -613,6 +666,89 @@ test "renderTree: compose stacks layers — later wins" {
     try std.testing.expectEqual(@as(u8, 255), fb.pixels[i + 0]);
     try std.testing.expectEqual(@as(u8, 0), fb.pixels[i + 1]);
     try std.testing.expectEqual(@as(u8, 0), fb.pixels[i + 2]);
+}
+
+test "renderTree: 3D wrappers (render3d / extrude / rotate / scale) descend to the inner shape" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The taste sample's shape: render3d ▸ scale ▸ rotate ▸ material ▸
+    // extrude ▸ <leaf>. Substitute a plain rect for the leaf so the
+    // renderer has something it knows how to paint, and confirm every
+    // wrapper transparently descends.
+    const rect_fields = try a.alloc(value.Field, 3);
+    rect_fields[0] = .{ .name = "width", .value = .{ .number = .{ .value = 4, .unit = .px } } };
+    rect_fields[1] = .{ .name = "height", .value = .{ .number = .{ .value = 4, .unit = .px } } };
+    rect_fields[2] = .{ .name = "fill", .value = .{ .color = .{ .hex = .{ .digits = "00ff00" } } } };
+    const leaf: value.Value = .{ .constructed = .{ .name = "rect", .fields = rect_fields } };
+
+    const stack = struct {
+        fn wrap(alloc: std.mem.Allocator, name: []const u8, child: value.Value) !value.Value {
+            const fs = try alloc.alloc(value.Field, 1);
+            fs[0] = .{ .name = "", .value = child };
+            return .{ .constructed = .{ .name = name, .fields = fs } };
+        }
+    };
+    var tree = leaf;
+    inline for (.{ "extrude", "material", "rotate", "scale", "render3d" }) |name| {
+        tree = try stack.wrap(a, name, tree);
+    }
+
+    const fb = try renderTree(a, tree, 16, 16);
+    const center = (8 * 16 + 8) * 4;
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 0]);
+    try std.testing.expectEqual(@as(u8, 255), fb.pixels[center + 1]);
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 2]);
+    // Corners stay untouched — the wrappers don't expand the shape.
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[3]);
+}
+
+test "renderTree: material(fill:) propagates to a fill-less inner shape" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Rect without its own fill — should inherit the material's red.
+    const rect_fields = try a.alloc(value.Field, 2);
+    rect_fields[0] = .{ .name = "width", .value = .{ .number = .{ .value = 4, .unit = .px } } };
+    rect_fields[1] = .{ .name = "height", .value = .{ .number = .{ .value = 4, .unit = .px } } };
+    const leaf: value.Value = .{ .constructed = .{ .name = "rect", .fields = rect_fields } };
+
+    const mat_fields = try a.alloc(value.Field, 2);
+    mat_fields[0] = .{ .name = "", .value = leaf };
+    mat_fields[1] = .{ .name = "fill", .value = .{ .color = .{ .hex = .{ .digits = "ff0000" } } } };
+    const tree: value.Value = .{ .constructed = .{ .name = "material", .fields = mat_fields } };
+
+    const fb = try renderTree(a, tree, 16, 16);
+    const center = (8 * 16 + 8) * 4;
+    try std.testing.expectEqual(@as(u8, 255), fb.pixels[center + 0]);
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 1]);
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 2]);
+}
+
+test "renderTree: an inner `fill:` beats the outer material `fill:`" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Rect with its own green fill inside a red material — green wins.
+    const rect_fields = try a.alloc(value.Field, 3);
+    rect_fields[0] = .{ .name = "width", .value = .{ .number = .{ .value = 4, .unit = .px } } };
+    rect_fields[1] = .{ .name = "height", .value = .{ .number = .{ .value = 4, .unit = .px } } };
+    rect_fields[2] = .{ .name = "fill", .value = .{ .color = .{ .hex = .{ .digits = "00ff00" } } } };
+    const leaf: value.Value = .{ .constructed = .{ .name = "rect", .fields = rect_fields } };
+
+    const mat_fields = try a.alloc(value.Field, 2);
+    mat_fields[0] = .{ .name = "", .value = leaf };
+    mat_fields[1] = .{ .name = "fill", .value = .{ .color = .{ .hex = .{ .digits = "ff0000" } } } };
+    const tree: value.Value = .{ .constructed = .{ .name = "material", .fields = mat_fields } };
+
+    const fb = try renderTree(a, tree, 16, 16);
+    const center = (8 * 16 + 8) * 4;
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 0]);
+    try std.testing.expectEqual(@as(u8, 255), fb.pixels[center + 1]);
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 2]);
 }
 
 test "oklch: known sanity values land in plausible sRGB range" {
