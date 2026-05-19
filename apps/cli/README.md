@@ -49,10 +49,12 @@ symlink only when no other `cmo` is on `PATH`. Pass `--no-alias` to skip.
 ```sh
 cmo help                    # usage
 cmo version                 # 0.0.1
-cmo parse src/main.cm       # parse and print the AST       (stub)
-cmo check src/main.cm       # type-check                    (stub)
-cmo fmt src/main.cm         # format in place               (stub)
-cmo explain CLI001          # long-form help for a code
+cmo parse src/main.cm       # parse and print the CST/AST
+cmo check src/main.cm       # narrow semantic checks (NAM*/TYP*/UNT*)
+cmo fmt src/main.cm         # format to stdout (v0: imports + top-level let)
+cmo fmt --write src/main.cm # rewrite the file in place
+cmo fmt --check src/main.cm # exit non-zero if the file would change
+cmo explain CLI001          # long-form help for a diagnostic code
 ```
 
 ## Diagnostic packet
@@ -110,10 +112,10 @@ Per-subcommand extras:
 | Subcommand | Extra fields |
 | --- | --- |
 | `parse`   | `path`, `cst` (S-expression CST as a string), `ast` (typed tree; `null` when syntax errors prevented lowering) |
-| `check`   | `path`. The `diagnostics[]` carry the real findings (NAM003 / NAM005 / NAM006 today; TYP* / UNT* once the typechecker lands). Exits 0 on clean, 1 on any error diagnostic. |
+| `check`   | `path`. The `diagnostics[]` carry the findings (NAM003/004/005/006, TYP002, UNT001/002, LWR000). Exits 0 on clean, 1 on any error diagnostic. |
 | `explain` | `code`, `title`, `body` |
 | `version` | `name`, `version` |
-| `fmt`     | (stub today; will land with the formatter) |
+| `fmt`     | `path`, `changed` (bool), `formatted` (the rewritten source). FMT001 in `diagnostics[]` under `--check` when the file would change. Exits 1 only when `--check` and `changed`. |
 
 ### `cmo parse` AST shape
 
@@ -192,20 +194,22 @@ re-run.
 
 ### Code namespaces
 
-| Prefix | Stage |
-| --- | --- |
-| `CLI*` | CLI itself (argument parsing, file IO) |
-| `PAR*` | Parser / tree-sitter surface |
-| `NAM*` | Name resolution |
-| `TYP*` | Type checker |
-| `UNT*` | Unit checker (`ms` vs `bpm` vs `px` etc.) |
-| `TIM*` | Timeline (negative duration, out-of-range keyframe) |
-| `ANM*` | Animate / keyframe rules |
-| `COL*` | Color space |
-| `CMP*` | Compose |
-| `ASS*` | Asset (missing, wrong type) |
-| `DET*` | Determinism partition violations |
-| `BKE*` | Backend lowering (CanvasKit / WGSL) |
+| Prefix | Stage | Status |
+| --- | --- | --- |
+| `CLI*` | CLI itself (argument parsing, file IO) | live |
+| `PAR*` | Parser / tree-sitter surface | live |
+| `LWR*` | Lowering (CST → typed AST) | live |
+| `NAM*` | Name resolution | live |
+| `TYP*` | Type checker | live (narrow) |
+| `UNT*` | Unit checker (`ms` vs `bpm` vs `px` etc.) | live |
+| `FMT*` | Formatter | live |
+| `TIM*` | Timeline (negative duration, out-of-range keyframe) | reserved |
+| `ANM*` | Animate / keyframe rules | reserved |
+| `COL*` | Color space | reserved |
+| `CMP*` | Compose | reserved |
+| `ASS*` | Asset (missing, wrong type) | reserved |
+| `DET*` | Determinism partition violations | reserved |
+| `BKE*` | Backend lowering (CanvasKit / WGSL) | reserved |
 
 Codes are stable across versions. Use `cmo explain <CODE>` for the long
 form.

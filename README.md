@@ -58,20 +58,26 @@ pnpm dev
 ## Roadmap
 
 The language and toolchain are being built in stages, from the parser up to
-realtime GPU rendering. Each stage should be usable on its own before the next
-one starts.
+realtime GPU rendering. Each stage should be usable on its own before the
+next one starts. The [website roadmap](https://cmotion.org/roadmap/) carries
+the authoritative status; this list is a quick orientation.
 
-- [ ] **1. Tree-sitter grammar** — parser, syntax highlighting, AST.
+- [x] **1. Tree-sitter grammar** — parser, syntax highlighting, AST.
+      v0.2 locked. `cmo parse`, `cmo check` (narrow semantic passes), and
+      `cmo fmt` (v0, top-level decls) run against it today; see
+      [`apps/cli/`](./apps/cli/).
 - [ ] **2. Type system spec** — units, asset types, function types, and the
       determinism partition of stdlib. Lives as a separate document, not in
-      BNF.
-- [ ] **3. Minimal stdlib** — `rect`, `image`, `mesh3d`, `compose`, `animate`,
-      `oklch`, `vec2`, `vec3`, `transport`, audio analyzers.
-- [ ] **4. Reference interpreter in Rust** — walks the AST directly, no
-      codegen. Lets us exercise the type system and stdlib without committing
-      to WASM yet.
-- [ ] **5. WASM component codegen** — once the language and stdlib are stable,
-      this is mostly mechanical.
+      BNF. `cmo check` implements a narrow first slice today
+      (literal-vs-annotation, unit categories); the full spec is the gap.
+- [ ] **3. Minimal stdlib** — `rect`, `image`, `mesh3d`, `compose`,
+      `animate`, `oklch`, `vec2`, `vec3`, `transport`, audio analyzers.
+- [ ] **4. Reference interpreter in Zig** — walks the AST directly, no
+      codegen. Lets us exercise the type system and stdlib without
+      committing to WASM yet, and serves as the conformance oracle for
+      every later backend.
+- [ ] **5. WASM component codegen** — once the language and stdlib are
+      stable, this is mostly mechanical.
 - [ ] **6. CanvasKit backend** — deterministic offline render.
 - [ ] **7. WGSL codegen** — realtime preview on the GPU.
 
