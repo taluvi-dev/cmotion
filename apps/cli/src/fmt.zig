@@ -133,7 +133,9 @@ fn isWhitespaceByte(c: u8) bool {
 
 fn countNewlines(s: []const u8) usize {
     var n: usize = 0;
-    for (s) |c| if (c == '\n') n += 1;
+    for (s) |c| {
+        if (c == '\n') n += 1;
+    }
     return n;
 }
 
