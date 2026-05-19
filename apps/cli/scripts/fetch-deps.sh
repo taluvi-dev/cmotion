@@ -16,6 +16,10 @@ TREE_SITTER_VERSION="${TREE_SITTER_VERSION:-v0.25.0}"
 # stb_truetype.h is identified by commit; the file's content stays stable
 # for years at a time but the upstream `master` is a moving target.
 STB_TRUETYPE_REV="${STB_TRUETYPE_REV:-013ac3beddff3dbffafd5177e7972067cd2b5083}"
+# Three.js pinned for the `cmo open` viewer (browser-side renderer).
+# Reproducibility relies on the pair (cmotion interp WASM + three.js)
+# being version-locked. Bump in lockstep with bundle compatibility tests.
+THREE_VERSION="${THREE_VERSION:-r170}"
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 cli_dir="$(cd "$script_dir/.." && pwd)"
@@ -23,8 +27,9 @@ vendor_dir="$cli_dir/vendor"
 ts_dir="$vendor_dir/tree-sitter"
 stb_dir="$vendor_dir/stb"
 fonts_dir="$vendor_dir/fonts"
+three_dir="$vendor_dir/three"
 
-mkdir -p "$vendor_dir" "$stb_dir" "$fonts_dir"
+mkdir -p "$vendor_dir" "$stb_dir" "$fonts_dir" "$three_dir"
 
 if [[ -d "$ts_dir/.git" ]]; then
   echo "tree-sitter already present at $ts_dir"
@@ -61,3 +66,14 @@ if [[ ! -f "$license_file" ]]; then
   curl -fsSL "https://raw.githubusercontent.com/googlefonts/dm-fonts/main/Sans/OFL.txt" -o "$license_file"
 fi
 echo "ok: $font_file ($(wc -c <"$font_file") bytes, OFL 1.1)"
+
+# three.min.js — the browser-side renderer for `cmo open`. We pin to a
+# release tag so the (cmotion interp WASM + three.js) pair stays
+# reproducible: a saved bundle replays bit-for-bit on any host with the
+# same two versions.
+three_file="$three_dir/three.module.min.js"
+if [[ ! -f "$three_file" ]] || ! grep -q "REVISION" "$three_file" 2>/dev/null; then
+  echo "fetching three.js ${THREE_VERSION}"
+  curl -fsSL "https://unpkg.com/three@0.170.0/build/three.module.min.js" -o "$three_file"
+fi
+echo "ok: $three_file ($(wc -c <"$three_file") bytes, MIT)"
