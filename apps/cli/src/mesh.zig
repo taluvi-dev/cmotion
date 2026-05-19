@@ -758,6 +758,7 @@ pub fn extrudeGlyph(
     codepoint: u32,
     size_px: f32,
     depth: f32,
+    bevel: f32,
 ) !?Mesh {
     const contours = try font.glyphContours(arena, codepoint, size_px) orelse return null;
     if (contours.len == 0) return null;
@@ -771,7 +772,311 @@ pub fn extrudeGlyph(
         for (fc, 0..) |p, j| buf[j] = .{ .x = p.x, .y = p.y };
         converted[i] = buf;
     }
-    return try extrudeContours(arena, converted, depth);
+    return try extrudeContoursBeveled(arena, converted, depth, bevel);
+}
+
+/// Move every vertex of a contour along its angle bisector by
+/// `distance`. The bisector is computed from the two adjacent
+/// edges' outward normals (rotate edge -90°). The `ccw_outer`
+/// flag flips the inset direction so outer contours shrink toward
+/// the material interior while holes shrink toward the hole
+/// interior — both produce a smaller cap polygon than the
+/// silhouette at z=0.
+///
+/// For glyphs the inset distance must stay smaller than half the
+/// narrowest stroke or the inset polygon will self-intersect /
+/// invert. Callers are expected to clamp; `extrudeContoursBeveled`
+/// reduces the bevel automatically when it detects a degenerate
+/// inset.
+pub fn insetContour(
+    arena: std.mem.Allocator,
+    contour: []const Vec2,
+    distance: f32,
+    ccw_outer: bool,
+) ![]Vec2 {
+    const n = contour.len;
+    const out = try arena.alloc(Vec2, n);
+    // Outer shrinks toward material interior (= -outward).
+    // Hole shrinks toward hole interior (= +outward).
+    const dir_sign: f32 = if (ccw_outer) -1.0 else 1.0;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const prev = contour[(i + n - 1) % n];
+        const curr = contour[i];
+        const next = contour[(i + 1) % n];
+        // Edge directions, normalized.
+        var e1x = curr.x - prev.x;
+        var e1y = curr.y - prev.y;
+        const l1 = @sqrt(e1x * e1x + e1y * e1y);
+        if (l1 > 0) {
+            e1x /= l1;
+            e1y /= l1;
+        }
+        var e2x = next.x - curr.x;
+        var e2y = next.y - curr.y;
+        const l2 = @sqrt(e2x * e2x + e2y * e2y);
+        if (l2 > 0) {
+            e2x /= l2;
+            e2y /= l2;
+        }
+        // Outward normal of each edge: rotate -90°.
+        const n1x = e1y;
+        const n1y = -e1x;
+        const n2x = e2y;
+        const n2y = -e2x;
+        // Bisector of the two outward normals.
+        var bx = n1x + n2x;
+        var by = n1y + n2y;
+        const bl = @sqrt(bx * bx + by * by);
+        if (bl > 1e-6) {
+            bx /= bl;
+            by /= bl;
+        }
+        // Compensate for the bisector vs edge-offset relationship.
+        // For a corner with interior angle θ, walking along the
+        // bisector by `d` moves perpendicular-to-each-edge by
+        // `d · sin(θ/2)`. We want the perpendicular distance to be
+        // `distance`, so step along the bisector by
+        // `distance / sin(θ/2)`. sin(θ/2) = sqrt((1 − cos(θ))/2),
+        // and cos(θ) = e1 · e2 (with appropriate sign — interior
+        // angle is between the incoming and outgoing edge so we
+        // negate e1 to point inward).
+        const dot = -e1x * e2x + -e1y * e2y; // cos of interior angle
+        const half_sin = @sqrt(@max(0.0, (1.0 - dot) * 0.5));
+        const step = if (half_sin > 1e-3) distance / half_sin else distance;
+        out[i] = .{
+            .x = curr.x + dir_sign * bx * step,
+            .y = curr.y + dir_sign * by * step,
+        };
+    }
+    return out;
+}
+
+/// Extrude a multi-contour shape with a rounded bevel between the
+/// front cap and the side walls (and again at the back). Falls
+/// through to the flat path when `bevel <= 0`. The bevel uses one
+/// linear segment plus interpolated normals — visually similar to
+/// a true rounded bevel at a fraction of the triangle count.
+///
+/// Vertex layout per contour, for `outer` of N points:
+///   [base + 0 ..  base + N)     front-cap perimeter (inset @ +half),  normal +z
+///   [base + N ..  base + 2N)    front-bevel-top    (inset @ +half),  normal slope
+///   [base + 2N .. base + 3N)    wall-top           (outline @ +half-b), normal outward
+///   [base + 3N .. base + 4N)    wall-bottom        (outline @ -half+b), normal outward
+///   [base + 4N .. base + 5N)    back-bevel-bot     (inset @ -half),  normal slope
+///   [base + 5N .. base + 6N)    back-cap perimeter (inset @ -half),  normal -z
+/// Front cap (perimeter only — earClip fills in the interior
+/// triangles using the inset polygon).
+pub fn extrudeContoursBeveled(
+    arena: std.mem.Allocator,
+    contours: []const []const Vec2,
+    depth: f32,
+    bevel: f32,
+) !Mesh {
+    if (bevel <= 0) return extrudeContours(arena, contours, depth);
+    if (contours.len == 0) return Mesh{ .positions = &.{}, .normals = &.{}, .indices = &.{} };
+
+    const half = depth * 0.5;
+    // Cap the bevel so the side-wall section (which sits between
+    // +half-bevel and -half+bevel) doesn't invert.
+    const eff_bevel = @min(bevel, half * 0.45);
+
+    // Inset each contour. If any inset collapses (degenerate or
+    // self-intersecting), halve the bevel and retry once; fall
+    // back to flat extrusion if it still fails.
+    var inset = try arena.alloc([]const Vec2, contours.len);
+    var ci: usize = 0;
+    while (ci < contours.len) : (ci += 1) {
+        inset[ci] = try insetContour(arena, contours[ci], eff_bevel, ci == 0);
+    }
+    if (!insetLooksSane(contours, inset)) {
+        // Try a smaller bevel.
+        const smaller = eff_bevel * 0.5;
+        ci = 0;
+        while (ci < contours.len) : (ci += 1) {
+            inset[ci] = try insetContour(arena, contours[ci], smaller, ci == 0);
+        }
+        if (!insetLooksSane(contours, inset)) {
+            return extrudeContours(arena, contours, depth);
+        }
+    }
+
+    // Triangulate the front cap from the INSET polygons (cap area
+    // is smaller than the silhouette by `bevel`).
+    const front_tris = try earClipWithHoles(arena, inset);
+
+    var total: usize = 0;
+    for (contours) |c| total += c.len;
+
+    const verts_per_contour_vertex: usize = 6;
+    const total_verts = verts_per_contour_vertex * total;
+    const positions = try arena.alloc(Vec3, total_verts);
+    const normals = try arena.alloc(Vec3, total_verts);
+
+    // Lay out the 6 rings per contour vertex.
+    var base: usize = 0;
+    var co: usize = 0;
+    while (co < contours.len) : (co += 1) {
+        const outline = contours[co];
+        const inset_co = inset[co];
+        const n = outline.len;
+
+        // Determine outward direction per *vertex* (averaged across
+        // its two adjacent edges) so the bevel slope normal lines
+        // up with the inset direction. For an inset move along
+        // direction d, the slope normal at the upper edge is
+        // roughly (d, 0) tilted up by `bevel / inset_length`; for
+        // v0 we use (d_xy_normalised, +1).normalise which gives a
+        // 45° slope normal — close to the actual slope for typical
+        // bevel proportions.
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const outline_v = outline[i];
+            const inset_v = inset_co[i];
+
+            // The slope direction in xy is the vector from outline
+            // toward inset (the bevel rolls in this direction
+            // going from the wall up to the cap). For an outer
+            // CCW contour this points toward the material; for a
+            // CW hole it points toward the hole interior. Either
+            // way it's the "inward" direction of the contour.
+            var sx = inset_v.x - outline_v.x;
+            var sy = inset_v.y - outline_v.y;
+            const sl = @sqrt(sx * sx + sy * sy);
+            if (sl > 1e-6) {
+                sx /= sl;
+                sy /= sl;
+            }
+            // Outward of the wall (opposite of slope-xy).
+            const outward_x = -sx;
+            const outward_y = -sy;
+
+            // Slope normal: 45° between outward and +z (or -z for
+            // the back bevel). normalise(outward + z).
+            const front_slope = Vec3{
+                .x = outward_x * std.math.sqrt1_2,
+                .y = outward_y * std.math.sqrt1_2,
+                .z = std.math.sqrt1_2,
+            };
+            const back_slope = Vec3{
+                .x = outward_x * std.math.sqrt1_2,
+                .y = outward_y * std.math.sqrt1_2,
+                .z = -std.math.sqrt1_2,
+            };
+            const wall_n = Vec3{ .x = outward_x, .y = outward_y, .z = 0 };
+
+            // Ring 0: front cap perimeter (inset @ +half), normal +z.
+            positions[base + 0 * total + i] = .{ .x = inset_v.x, .y = inset_v.y, .z = half };
+            normals[base + 0 * total + i] = .{ .x = 0, .y = 0, .z = 1 };
+            // Ring 1: front bevel top (inset @ +half), slope normal.
+            positions[base + 1 * total + i] = .{ .x = inset_v.x, .y = inset_v.y, .z = half };
+            normals[base + 1 * total + i] = front_slope;
+            // Ring 2: wall top (outline @ +half - bevel), outward normal.
+            positions[base + 2 * total + i] = .{ .x = outline_v.x, .y = outline_v.y, .z = half - eff_bevel };
+            normals[base + 2 * total + i] = wall_n;
+            // Ring 3: wall bottom (outline @ -half + bevel), outward normal.
+            positions[base + 3 * total + i] = .{ .x = outline_v.x, .y = outline_v.y, .z = -half + eff_bevel };
+            normals[base + 3 * total + i] = wall_n;
+            // Ring 4: back bevel bottom (inset @ -half), back slope normal.
+            positions[base + 4 * total + i] = .{ .x = inset_v.x, .y = inset_v.y, .z = -half };
+            normals[base + 4 * total + i] = back_slope;
+            // Ring 5: back cap perimeter (inset @ -half), normal -z.
+            positions[base + 5 * total + i] = .{ .x = inset_v.x, .y = inset_v.y, .z = -half };
+            normals[base + 5 * total + i] = .{ .x = 0, .y = 0, .z = -1 };
+        }
+        base += n;
+    }
+
+    // Build indices.
+    // - Front cap triangulation indexes into ring 0 (offset 0 from base).
+    // - Back cap triangulation indexes into ring 5 (offset 5*total from base).
+    // - Three quad strips per contour edge: front bevel, wall, back bevel.
+    var ti: usize = 0;
+    // Worst-case: front_tris.len + back_tris.len + 3 strips * 2 tris * total_edges.
+    const idx_cap: usize = front_tris.len + front_tris.len + 3 * 2 * total * 3;
+    const indices = try arena.alloc(u32, idx_cap);
+
+    // Front cap (ring 0 indices = the cap's vertex indices directly).
+    for (front_tris) |idx| {
+        indices[ti] = idx;
+        ti += 1;
+    }
+    // Back cap: same triangulation, reversed winding, offset by 5*total.
+    var bi: usize = 0;
+    const back_offset: u32 = @intCast(5 * total);
+    while (bi < front_tris.len) : (bi += 3) {
+        indices[ti + 0] = front_tris[bi + 2] + back_offset;
+        indices[ti + 1] = front_tris[bi + 1] + back_offset;
+        indices[ti + 2] = front_tris[bi + 0] + back_offset;
+        ti += 3;
+    }
+
+    // Quad strips per contour. For each strip s in {front_bevel,
+    // wall, back_bevel}, ring_top and ring_bot offsets:
+    //   front bevel: top=ring1 (offset 1*total), bot=ring2 (2*total)
+    //   wall:        top=ring2 (2*total),        bot=ring3 (3*total)
+    //   back bevel:  top=ring3 (3*total),        bot=ring4 (4*total)
+    base = 0;
+    co = 0;
+    while (co < contours.len) : (co += 1) {
+        const n = contours[co].len;
+        const ring_offsets = [_]struct { top: usize, bot: usize }{
+            .{ .top = 1 * total + base, .bot = 2 * total + base },
+            .{ .top = 2 * total + base, .bot = 3 * total + base },
+            .{ .top = 3 * total + base, .bot = 4 * total + base },
+        };
+        for (ring_offsets) |ro| {
+            var s: u32 = 0;
+            while (s < n) : (s += 1) {
+                const s_next = (s + 1) % @as(u32, @intCast(n));
+                const ta: u32 = @intCast(ro.top + s);
+                const tb: u32 = @intCast(ro.top + s_next);
+                const ba_: u32 = @intCast(ro.bot + s);
+                const bb: u32 = @intCast(ro.bot + s_next);
+                // Quad: ta, tb, bb, ba. Two triangles CCW from outside.
+                indices[ti + 0] = ta;
+                indices[ti + 1] = tb;
+                indices[ti + 2] = bb;
+                indices[ti + 3] = ta;
+                indices[ti + 4] = bb;
+                indices[ti + 5] = ba_;
+                ti += 6;
+            }
+        }
+        base += n;
+    }
+
+    return .{
+        .positions = positions,
+        .normals = normals,
+        .indices = indices[0..ti],
+    };
+}
+
+/// Heuristic sanity check: each inset contour should keep its
+/// signed area on the same side of zero as the original (no
+/// inversion) and at least 25% of the original magnitude. Catches
+/// bevel-too-large cases that would self-intersect.
+fn insetLooksSane(original: []const []const Vec2, inset: []const []const Vec2) bool {
+    if (original.len != inset.len) return false;
+    for (original, inset) |o, i| {
+        if (o.len != i.len or o.len < 3) return false;
+        const oa = signedArea(o);
+        const ia = signedArea(i);
+        // Same sign + at least 25% magnitude remaining.
+        if ((oa > 0) != (ia > 0)) return false;
+        if (@abs(ia) < @abs(oa) * 0.25) return false;
+    }
+    return true;
+}
+
+fn signedArea(poly: []const Vec2) f32 {
+    var a: f32 = 0;
+    for (poly, 0..) |p, i| {
+        const q = poly[(i + 1) % poly.len];
+        a += (q.x - p.x) * (q.y + p.y);
+    }
+    return a * 0.5;
 }
 
 //
