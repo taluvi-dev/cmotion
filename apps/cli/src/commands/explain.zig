@@ -225,6 +225,64 @@ const entries = [_]Entry{
         \\actually require an unmarked literal.
         ,
     },
+    .{
+        .code = "CLI007",
+        .title = "Unknown fmt flag",
+        .body =
+        \\`cmo fmt` accepts only `--write` (rewrite the file in place)
+        \\and `--check` (exit non-zero when the file would change).
+        \\Global flags like `--json` and `--no-color` work as usual.
+        \\Any other flag is rejected to keep the surface tight while
+        \\the formatter is still v0.
+        ,
+    },
+    .{
+        .code = "CLI008",
+        .title = "Too many source files passed to fmt",
+        .body =
+        \\`cmo fmt` is single-file for now. Pass exactly one .cm path
+        \\and loop in your shell for multiple files
+        \\(`for f in src/*.cm; do cmo fmt --write "$f"; done`).
+        \\A batch mode will land when there's a reason to coordinate
+        \\across files (e.g. import sorting that spans a project).
+        ,
+    },
+    .{
+        .code = "CLI009",
+        .title = "--write and --check are mutually exclusive",
+        .body =
+        \\`--write` rewrites the file in place; `--check` only reports
+        \\whether the file would change. Passing both is ambiguous, so
+        \\the CLI refuses. Use `--check` in CI to fail the build on
+        \\unformatted code, and `--write` locally to apply the rewrite.
+        ,
+    },
+    .{
+        .code = "CLI010",
+        .title = "Could not write formatted output",
+        .body =
+        \\`cmo fmt --write` produced a formatted buffer but the write
+        \\to the source file failed. Common causes: the file is
+        \\read-only, the directory is missing, or the filesystem is
+        \\out of space. Re-run after fixing the underlying I/O error.
+        \\To get the formatted output without rewriting the file, drop
+        \\`--write` (default mode prints to stdout) or use `--json`
+        \\and read the `formatted` field from the envelope.
+        ,
+    },
+    .{
+        .code = "FMT001",
+        .title = "File is not formatted",
+        .body =
+        \\`cmo fmt --check` ran the formatter and the result differs
+        \\from the source on disk. The check is byte-exact: any change
+        \\in whitespace, ordering, or canonicalised syntax counts.
+        \\Run `cmo fmt --write <path>` to apply the rewrite. In CI,
+        \\the non-zero exit code is the signal — the diagnostic
+        \\itself doesn't include the diff (use `cmo fmt <path>` and
+        \\diff against the source if you need to see what would change).
+        ,
+    },
 };
 
 pub fn run(ctx: Context, args: []const []const u8) !u8 {
