@@ -19,7 +19,7 @@ use std.lighting.*;
 use std.scene3d.*;
 use std.anim.*;
 
-scene title(duration: 6s) -> Frame {
+scene title(duration: Duration = 6s) -> Frame {
   let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
 
   let rot   = animate { 0s => 0deg,   6s => 360deg } with { repeat: forever };
@@ -41,8 +41,8 @@ scene title(duration: 6s) -> Frame {
 
   let lights = [
     ambient(0.35),
-    directional(from: (3, 4, 5),    intensity: 1.6),
-    directional(from: (-4, -2, -3), intensity: 0.9),
+    directional(from: vec3(3, 4, 5),    intensity: 1.6),
+    directional(from: vec3(-4, -2, -3), intensity: 0.9),
   ];
 
   compose [
