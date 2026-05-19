@@ -31,6 +31,7 @@ export default defineConfig({
 			tableOfContents: { minHeadingLevel: 2, maxHeadingLevel: 3 },
 			sidebar: [
 				{ label: 'Overview', slug: 'index' },
+				{ label: 'Play', slug: 'play', badge: { text: 'live', variant: 'tip' } },
 				{ label: 'Roadmap', slug: 'roadmap' },
 				{
 					label: 'Language',

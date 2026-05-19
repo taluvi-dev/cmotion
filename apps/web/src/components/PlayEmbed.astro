@@ -1,0 +1,364 @@
+---
+// PlayEmbed.astro — full cmotion playground UI: editor, live preview,
+// scrub, render / play / save controls. Same JS that the old standalone
+// /play page used, packaged as an embeddable component so the playground
+// can live inside the Starlight layout (with site header / search / etc.)
+// instead of being a separate full-bleed page.
+
+const initialSource = `// edit me — render to apply
+use std.shapes.*;
+use std.mesh3d.*;
+use std.text;
+use std.lighting.*;
+use std.scene3d.*;
+use std.anim.*;
+
+scene title(duration: Duration = 6s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
+
+  let rot   = animate { 0s => 0deg,   6s => 360deg } with { repeat: forever };
+  let hue   = animate { 0s => 280deg, 4s => 640deg } with { repeat: forever };
+  let pulse = animate {
+                0s    => 1.00,
+                500ms => 1.06,
+                1s    => 1.00,
+              } with { easing: easing.out_cubic, repeat: forever };
+
+  let wobble = wave(amplitude: 8.6deg, period: 12s);
+
+  let glyph = extrude(text.glyph("C", font: "Inter Bold"), depth: 16px)
+                .material(fill: oklch(0.78, 0.20, hue),
+                          metalness: 0.25,
+                          roughness: 0.35,
+                          emissive: oklch(0.65, 0.18, hue),
+                          emissive_intensity: 0.6)
+                .rotate(x: wobble, y: rot)
+                .scale(pulse);
+
+  let lights = [
+    ambient(0.35),
+    directional(from: vec3(3, 4, 5),    intensity: 1.6),
+    directional(from: vec3(-4, -2, -3), intensity: 0.9),
+  ];
+
+  compose [
+    bg,
+    render3d(glyph, lights: lights),
+  ]
+}
+`;
+---
+
+<div class="play-embed">
+  <div class="toolbar">
+    <span class="status" id="cm-status">booting…</span>
+    <button class="secondary" id="cm-btn-code" title="Hide code editor (⌘\\)">Hide code</button>
+    <button id="cm-btn-render">Render</button>
+    <button class="secondary" id="cm-btn-play">Play</button>
+    <button class="secondary" id="cm-btn-png" disabled>Save PNG</button>
+    <button class="secondary" id="cm-btn-webm" disabled>Save video</button>
+  </div>
+
+  <div class="layout" id="cm-layout">
+    <section class="pane editor">
+      <textarea id="cm-src" spellcheck="false" autocapitalize="off" autocorrect="off">{initialSource}</textarea>
+    </section>
+
+    <section class="pane stage">
+      <canvas id="cm-stage"></canvas>
+      <div class="controls">
+        <button class="secondary" id="cm-btn-back" title="seek to 0">↺</button>
+        <div class="scrub">
+          <input id="cm-scrub" type="range" min="0" max="6" step="0.01" value="0" />
+        </div>
+        <span class="t" id="cm-tval">0.00 / 6.00s</span>
+      </div>
+    </section>
+  </div>
+</div>
+
+<style>
+  .play-embed {
+    --pe-bg: #fff;
+    --pe-fg: #000;
+    --pe-muted: #777;
+    --pe-hair: #d8d8d8;
+    --pe-accent: #000;
+    --pe-accent-fg: #fff;
+    --pe-panel: #fafafa;
+    --pe-warn: #b00020;
+
+    display: grid;
+    grid-template-rows: 44px 1fr;
+    /* Fill the available vertical space below the site header. The exact
+       header height varies (Starlight changes it on small screens), so we
+       use a min-height fallback plus dvh so iOS Safari's collapsing URL
+       bar doesn't leave a gap. */
+    height: calc(100dvh - var(--cm-header-offset, 80px));
+    min-height: 520px;
+    background: var(--pe-bg);
+    color: var(--pe-fg);
+    font: 13px/1.4 ui-sans-serif, system-ui, sans-serif;
+    border: 1px solid var(--pe-hair);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .toolbar {
+    display: flex; align-items: center; gap: 10px; padding: 0 14px;
+    border-bottom: 1px solid var(--pe-hair); background: var(--pe-bg);
+  }
+  .toolbar .status {
+    color: var(--pe-muted); font-size: 12px; flex: 1;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .toolbar .status.err { color: var(--pe-warn); }
+  .toolbar button {
+    background: var(--pe-accent); color: var(--pe-accent-fg); border: 0;
+    padding: 6px 12px; border-radius: 4px; cursor: pointer; font: inherit;
+    font-weight: 600;
+  }
+  .toolbar button.secondary {
+    background: transparent; color: var(--pe-fg);
+    border: 1px solid var(--pe-hair); font-weight: 500;
+  }
+  .toolbar button:disabled { opacity: 0.4; cursor: progress; }
+
+  .layout { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+  .layout.code-hidden { grid-template-columns: 1fr; }
+  .layout.code-hidden .editor { display: none; }
+  .pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  .pane + .pane { border-left: 1px solid var(--pe-hair); }
+  .editor { position: relative; }
+  .editor textarea {
+    flex: 1; width: 100%; height: 100%; box-sizing: border-box;
+    padding: 16px; border: 0; outline: 0; resize: none; background: var(--pe-panel);
+    font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    color: var(--pe-fg); tab-size: 2;
+  }
+  .stage {
+    position: relative; background: #111; display: flex;
+    align-items: center; justify-content: center; padding: 20px; box-sizing: border-box;
+    overflow: hidden;
+  }
+  .stage canvas {
+    display: block; background: #000;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+    flex-shrink: 0;
+  }
+  .controls {
+    position: absolute; left: 12px; right: 12px; bottom: 12px;
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    background: rgba(255,255,255,0.92); border: 1px solid var(--pe-hair);
+    border-radius: 6px; backdrop-filter: blur(6px);
+  }
+  .controls .scrub { flex: 1; }
+  .controls .scrub input { width: 100%; }
+  .controls .t {
+    font-variant-numeric: tabular-nums; color: var(--pe-muted);
+    min-width: 88px; font-size: 12px; text-align: right;
+  }
+</style>
+
+<script>
+  import { boot } from "../scripts/cmotion-viewer.ts";
+  import { saveOrShare } from "../scripts/save.ts";
+
+  const canvas = document.getElementById("cm-stage") as HTMLCanvasElement;
+  const srcEl = document.getElementById("cm-src") as HTMLTextAreaElement;
+  const statusEl = document.getElementById("cm-status") as HTMLElement;
+  const btnRender = document.getElementById("cm-btn-render") as HTMLButtonElement;
+  const btnPlay = document.getElementById("cm-btn-play") as HTMLButtonElement;
+  const btnPng = document.getElementById("cm-btn-png") as HTMLButtonElement;
+  const btnWebm = document.getElementById("cm-btn-webm") as HTMLButtonElement;
+  const btnBack = document.getElementById("cm-btn-back") as HTMLButtonElement;
+  const btnCode = document.getElementById("cm-btn-code") as HTMLButtonElement;
+  const layout = document.getElementById("cm-layout") as HTMLElement;
+  const scrub = document.getElementById("cm-scrub") as HTMLInputElement;
+  const tVal = document.getElementById("cm-tval") as HTMLElement;
+
+  // Deep link: /play/#source=<urlencoded .cm source> preloads the editor
+  // with that source. Used by the "Open in /play →" link on the homepage.
+  function preloadFromHash() {
+    const hash = location.hash.startsWith("#") ? location.hash.slice(1) : "";
+    if (!hash) return;
+    const params = new URLSearchParams(hash);
+    const src = params.get("source");
+    if (src) srcEl.value = src;
+  }
+  preloadFromHash();
+
+  function setStatus(msg: string, isErr = false) {
+    statusEl.textContent = msg;
+    statusEl.classList.toggle("err", isErr);
+  }
+  function formatTime(t: number, total: number) {
+    return `${t.toFixed(2)} / ${total.toFixed(2)}s`;
+  }
+
+  let view: Awaited<ReturnType<typeof boot>> | null = null;
+  let playing = false;
+  let playStart = 0;
+  let rafId = 0;
+
+  async function renderSource() {
+    if (!view) return;
+    btnRender.disabled = true;
+    const renderLabel = btnRender.textContent;
+    btnRender.textContent = "Rendering…";
+    setStatus("rendering…");
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+    const t0 = performance.now();
+    try {
+      view.load(srcEl.value);
+      const d = view.durationSeconds;
+      const ms = (performance.now() - t0).toFixed(0);
+      scrub.max = String(d);
+      scrub.value = "0";
+      tVal.textContent = formatTime(0, d);
+      setStatus(`rendered in ${ms}ms · interp v${view.versions.cmotion} · three.js r${view.versions.three} · duration ${d}s`);
+      btnPng.disabled = false;
+      btnWebm.disabled = false;
+    } catch (e: any) {
+      setStatus(e.message, true);
+      btnPng.disabled = true;
+      btnWebm.disabled = true;
+    } finally {
+      btnRender.disabled = false;
+      btnRender.textContent = renderLabel;
+    }
+  }
+
+  function tick() {
+    if (!view || !playing) return;
+    const elapsed = (performance.now() - playStart) / 1000;
+    const d = view.durationSeconds;
+    const t = elapsed % d;
+    view.seek(t);
+    scrub.value = String(t);
+    tVal.textContent = formatTime(t, d);
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function setPlaying(p: boolean) {
+    playing = p;
+    btnPlay.textContent = p ? "Pause" : "Play";
+    if (p) {
+      if (!view) return;
+      const startT = parseFloat(scrub.value);
+      playStart = performance.now() - startT * 1000;
+      rafId = requestAnimationFrame(tick);
+    } else {
+      cancelAnimationFrame(rafId);
+    }
+  }
+
+  function setCodeHidden(hidden: boolean) {
+    layout.classList.toggle("code-hidden", hidden);
+    btnCode.textContent = hidden ? "Show code" : "Hide code";
+    try { localStorage.setItem("cmotion-play:code-hidden", hidden ? "1" : "0"); } catch {}
+    if (view) requestAnimationFrame(() => view!.resize());
+  }
+  btnCode.addEventListener("click", () => {
+    setCodeHidden(!layout.classList.contains("code-hidden"));
+  });
+  window.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
+      e.preventDefault();
+      setCodeHidden(!layout.classList.contains("code-hidden"));
+    }
+  });
+  try {
+    if (localStorage.getItem("cmotion-play:code-hidden") === "1") setCodeHidden(true);
+  } catch {}
+
+  btnRender.addEventListener("click", () => {
+    setPlaying(false);
+    renderSource();
+  });
+  btnPlay.addEventListener("click", () => setPlaying(!playing));
+  btnBack.addEventListener("click", () => {
+    setPlaying(false);
+    scrub.value = "0";
+    if (view) {
+      view.seek(0);
+      tVal.textContent = formatTime(0, view.durationSeconds);
+    }
+  });
+  scrub.addEventListener("input", () => {
+    if (!view) return;
+    setPlaying(false);
+    const t = parseFloat(scrub.value);
+    view.seek(t);
+    tVal.textContent = formatTime(t, view.durationSeconds);
+  });
+  btnPng.addEventListener("click", async () => {
+    if (!view) return;
+    try {
+      const blob = await view.captureFrame();
+      if (!blob) throw new Error("canvas.toBlob returned no data");
+      const how = await saveOrShare(blob, `cmotion-${Date.now()}.png`);
+      setStatus(`PNG ${how} (${(blob.size / 1024).toFixed(1)} KB)`);
+    } catch (e: any) {
+      setStatus(`PNG: ${e.message}`, true);
+    }
+  });
+
+  let pendingClip: { blob: Blob; name: string; durationS: number; sizeKB: number } | null = null;
+  const btnWebmLabel = btnWebm.textContent || "Save video";
+
+  async function recordClip() {
+    if (!view) return;
+    btnWebm.disabled = true;
+    btnWebm.textContent = "recording…";
+    setStatus(`recording ${view.durationSeconds.toFixed(1)}s clip…`);
+    setPlaying(false);
+    try {
+      const { blob, ext } = await view.captureClip();
+      if (!blob.size) throw new Error("recording produced 0 bytes");
+      pendingClip = {
+        blob,
+        name: `cmotion-${Date.now()}.${ext}`,
+        durationS: view.durationSeconds,
+        sizeKB: blob.size / 1024,
+      };
+      btnWebm.textContent = `Save ${pendingClip.sizeKB.toFixed(0)} KB ${ext}`;
+      btnWebm.classList.remove("secondary");
+      setStatus(`recording done — click "${btnWebm.textContent}" to save`);
+    } catch (e: any) {
+      setStatus(`video: ${e.message}`, true);
+      btnWebm.textContent = btnWebmLabel;
+    } finally {
+      btnWebm.disabled = false;
+    }
+  }
+
+  async function saveClip() {
+    if (!pendingClip) return;
+    const { blob, name, durationS, sizeKB } = pendingClip;
+    const ext = name.slice(name.lastIndexOf(".") + 1);
+    btnWebm.disabled = true;
+    try {
+      const how = await saveOrShare(blob, name);
+      setStatus(`video ${how} (${sizeKB.toFixed(0)} KB · ${durationS.toFixed(1)}s · ${ext})`);
+    } catch (e: any) {
+      setStatus(`video: ${e.message}`, true);
+    } finally {
+      pendingClip = null;
+      btnWebm.textContent = btnWebmLabel;
+      btnWebm.classList.add("secondary");
+      btnWebm.disabled = false;
+    }
+  }
+
+  btnWebm.addEventListener("click", () => {
+    if (pendingClip) saveClip(); else recordClip();
+  });
+
+  try {
+    view = await boot(canvas);
+    renderSource();
+  } catch (e: any) {
+    setStatus(e.message, true);
+  }
+</script>
