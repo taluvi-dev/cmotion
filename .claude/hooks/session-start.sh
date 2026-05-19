@@ -38,11 +38,22 @@ fi
 echo "export PATH=\"$ZIG_DIR:\$PATH\"" >> "$CLAUDE_ENV_FILE"
 export PATH="$ZIG_DIR:$PATH"
 
-# Vendor the tree-sitter C runtime — fetch-deps.sh is itself idempotent.
+# Vendor native build deps (tree-sitter C runtime + stb_truetype + the
+# bundled DM Sans Bold TTF). fetch-deps.sh is idempotent.
 "$CLAUDE_PROJECT_DIR/apps/cli/scripts/fetch-deps.sh"
 
 # pnpm workspace deps (web build, tree-sitter generate). zig build itself
 # doesn't need these, but the wider monorepo does.
 cd "$CLAUDE_PROJECT_DIR" && pnpm install --frozen-lockfile
 
-echo "session-start: ready (zig $ZIG_VERSION, tree-sitter vendored, pnpm installed)"
+# Pre-build the WASM renderer so the browser editor (and the parity
+# test) can find it at apps/cli/zig-out/bin/cmotion-render.wasm
+# without a cold-cache wait on the first session command. Non-fatal:
+# the native build is still the primary deliverable; a broken WASM
+# step shouldn't stop the session from booting.
+echo "session-start: building WASM renderer artifact"
+(cd "$CLAUDE_PROJECT_DIR/apps/cli" && "$ZIG_BIN" build wasm) || {
+  echo "session-start: WARNING — zig build wasm failed (continuing without WASM artifact)" >&2
+}
+
+echo "session-start: ready (zig $ZIG_VERSION, tree-sitter vendored, pnpm installed, wasm built)"
