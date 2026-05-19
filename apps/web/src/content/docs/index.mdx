@@ -32,7 +32,7 @@ scene title(duration: Duration = 6s) -> Frame {
 
   let wobble = wave(amplitude: 8.6deg, period: 12s);
 
-  let glyph = extrude(text.glyph("C", font: "Inter Bold"), depth: 80px)
+  let glyph = extrude(text.glyph("C", font: "Inter Bold"), depth: 32px)
                 .material(fill: oklch(0.78, 0.20, hue),
                           metalness: 0.25,
                           roughness: 0.35)
@@ -58,7 +58,7 @@ A single program contains:
 
 - **Units across domains** (`1920px`, `6s`, `280deg`, `8.6deg`, `0.25`) — the type system enforces that a duration is a duration and a length is a length.
 - **Perceptual color** (`oklch(0.78, 0.20, hue)`) — animating only the hue gives a smooth color wheel with no muddy midpoints, because `oklch` / `oklab` / `srgb` are first-class color literals in the language.
-- **3D primitives** (`extrude(text.glyph("C"), depth: 80px)`) — `mesh3d` is part of the [stdlib](/language/stdlib/); 3D scenes project back to a 2D `Layer` via `render3d(...)` so they `compose` alongside 2D layers.
+- **3D primitives** (`extrude(text.glyph("C"), depth: 32px)`) — `mesh3d` is part of the [stdlib](/language/stdlib/); 3D scenes project back to a 2D `Layer` via `render3d(...)` so they `compose` alongside 2D layers.
 - **Composition** (`compose [bg, render3d(...)]`) — layered, typed, declarative.
 - **Animation as values** — `animate { ... } with { repeat: forever }` for keyframes and `wave(amplitude:, period:)` for continuous motion. Multiple independent animations drive different properties of the same mesh (`x` and `y` rotation, `scale`, `hue`) and loop on their own periods.
 
