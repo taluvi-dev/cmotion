@@ -59,7 +59,17 @@
 //! writes into it.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const value = @import("value.zig");
+const mesh_mod = @import("mesh.zig");
+
+/// True for the native build only. The 3D rasteriser needs libm
+/// (sqrt, sin, cos, tan, …) which the freestanding WASM target
+/// doesn't ship. The flat fallback continues to do for WASM until
+/// either we vendor math shims or move WASM to wasm32-wasi.
+const has_3d = !builtin.target.cpu.arch.isWasm();
+const render3d = if (has_3d) @import("render3d.zig") else void;
+const font_mod = if (has_3d) @import("font.zig") else void;
 
 pub const Framebuffer = struct {
     /// RGBA8, row-major, top-down. Size = width * height * 4.
@@ -114,11 +124,10 @@ pub fn renderTree(
 }
 
 /// Dispatch over the value tree. Compose and individual shape
-/// constructors paint; 3D wrappers descend to the inner shape
-/// (flat fallback — see paintWrapper); everything else (numbers,
-/// strings, lambdas, …) is silently ignored. `off` is the
-/// accumulated translation in canvas pixels; `style` is the inherited
-/// fill / material context.
+/// constructors paint; `render3d(...)` switches into the 3D
+/// rasteriser when available; the remaining 3D wrappers descend to
+/// the inner shape (flat fallback — see paintWrapper) when 3D
+/// isn't compiled in.
 fn paintValue(v: value.Value, fb: *Framebuffer, off: Offset, style: Style) void {
     switch (v) {
         .constructed => |c| {
@@ -130,6 +139,8 @@ fn paintValue(v: value.Value, fb: *Framebuffer, off: Offset, style: Style) void 
                 paintTranslate(c, fb, off, style);
             } else if (std.mem.eql(u8, c.name, "text.glyph")) {
                 paintTextGlyph(c, fb, off, style);
+            } else if (has_3d and std.mem.eql(u8, c.name, "render3d")) {
+                paintRender3D(c, fb, off, style);
             } else if (isFlatFallback(c.name)) {
                 paintWrapper(c, fb, off, style);
             }
@@ -412,6 +423,348 @@ fn paintWrapper(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Styl
         }
     }
     if (child) |ch| paintValue(ch, fb, off, new_style);
+}
+
+// ============================================================
+// 3D dispatch — only compiled into the native build.
+// ============================================================
+
+/// `render3d(scene, lights:?)` — promote a 3D scene into a 2D layer.
+/// Extracts the `lights:` array, walks the scene through wrapper
+/// nodes (`.rotate`, `.scale`, `translate`, `.material`, `extrude`)
+/// accumulating model transform + material, then rasterises the
+/// resulting mesh via `render3d.drawMesh`.
+///
+/// Allocations (the z-buffer, transformed vertex arrays, glyph
+/// outlines) are arena-rooted on a per-call arena so the renderer
+/// stays free of long-lived heap state.
+fn paintRender3D(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) void {
+    if (!has_3d) return;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var scene: ?value.Value = null;
+    var lights_v: ?value.Value = null;
+    for (c.fields) |f| {
+        if (f.name.len == 0) {
+            if (scene == null) scene = f.value;
+        } else if (std.mem.eql(u8, f.name, "lights")) {
+            lights_v = f.value;
+        }
+    }
+    const sc = scene orelse return;
+
+    const lights = parseLights(a, lights_v) catch return;
+
+    var rfb: render3d.Framebuffer = .{ .pixels = fb.pixels, .width = fb.width, .height = fb.height };
+    paint3DTree(a, sc, &rfb, mesh_mod.Mat4.identity(), style, lights, off) catch {
+        // Anything that fails (out of memory, mesh with degenerate
+        // triangulation, etc.) falls through silently — the bg
+        // layer is still on the framebuffer, which is preferable
+        // to a crash. Stage 2 will turn this into a diagnostic.
+    };
+}
+
+/// Walk a 3D scene tree, accumulating transforms / material until we
+/// hit a leaf that produces a mesh (today: `extrude(text.glyph(...),
+/// depth: ...)`). On the leaf, rasterise via render3d.
+fn paint3DTree(
+    arena: std.mem.Allocator,
+    v: value.Value,
+    fb: *render3d.Framebuffer,
+    transform: mesh_mod.Mat4,
+    style: Style,
+    lights: []const render3d.Light,
+    off: Offset,
+) !void {
+    if (v != .constructed) return;
+    const c = v.constructed;
+
+    if (std.mem.eql(u8, c.name, "rotate")) {
+        const new_transform = applyRotateArgs(c, transform);
+        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, off);
+        return;
+    }
+    if (std.mem.eql(u8, c.name, "scale")) {
+        const new_transform = applyScaleArgs(c, transform);
+        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, off);
+        return;
+    }
+    if (std.mem.eql(u8, c.name, "translate")) {
+        const new_transform = applyTranslateArgs(c, transform);
+        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, off);
+        return;
+    }
+    if (std.mem.eql(u8, c.name, "material")) {
+        // Material's `fill:` becomes the active style for the inner
+        // mesh's albedo. metalness/roughness/emissive are read but
+        // unused — they land with the PBR refinement commit.
+        var new_style = style;
+        for (c.fields) |f| {
+            if (std.mem.eql(u8, f.name, "fill")) new_style.fill = f.value;
+        }
+        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, transform, new_style, lights, off);
+        return;
+    }
+    if (std.mem.eql(u8, c.name, "extrude")) {
+        try drawExtrude(arena, c, fb, transform, style, lights, off);
+        return;
+    }
+    // Unknown wrapper / leaf in 3D context — fall through silently
+    // for now. A future Plan.md item: distinguish "leaf I don't know
+    // how to render as 3D" from "this should be flat 2D below me".
+}
+
+fn firstPositional(c: value.Constructed) ?value.Value {
+    for (c.fields) |f| if (f.name.len == 0) return f.value;
+    return null;
+}
+
+/// `rotate(child, x: A, y: B, z: C)` → premultiply rotations onto
+/// the current transform. Each axis defaults to 0; angles read as
+/// degrees if untyped (cmotion default), radians otherwise.
+fn applyRotateArgs(c: value.Constructed, transform: mesh_mod.Mat4) mesh_mod.Mat4 {
+    var t = transform;
+    for (c.fields) |f| {
+        const angle = readAngleRad(f.value) orelse continue;
+        if (std.mem.eql(u8, f.name, "x")) {
+            t = t.mul(mesh_mod.Mat4.rotationX(angle));
+        } else if (std.mem.eql(u8, f.name, "y")) {
+            t = t.mul(mesh_mod.Mat4.rotationY(angle));
+        } else if (std.mem.eql(u8, f.name, "z")) {
+            t = t.mul(mesh_mod.Mat4.rotationZ(angle));
+        }
+    }
+    return t;
+}
+
+/// `scale(child, factor)` or `scale(child, x: a, y: b, z: c)`.
+/// Single positional after the child is uniform scale; named axes
+/// scale per-axis. Missing axes default to 1.
+fn applyScaleArgs(c: value.Constructed, transform: mesh_mod.Mat4) mesh_mod.Mat4 {
+    var sx: f32 = 1;
+    var sy: f32 = 1;
+    var sz: f32 = 1;
+    var positional_idx: usize = 0;
+    for (c.fields) |f| {
+        if (f.name.len == 0) {
+            positional_idx += 1;
+            if (positional_idx == 1) continue; // first positional = the child
+            if (numberAsF32(f.value)) |n| {
+                sx = n;
+                sy = n;
+                sz = n;
+            }
+        } else if (numberAsF32(f.value)) |n| {
+            if (std.mem.eql(u8, f.name, "x")) sx = n;
+            if (std.mem.eql(u8, f.name, "y")) sy = n;
+            if (std.mem.eql(u8, f.name, "z")) sz = n;
+        }
+    }
+    return transform.mul(mesh_mod.Mat4.scaling(sx, sy, sz));
+}
+
+fn applyTranslateArgs(c: value.Constructed, transform: mesh_mod.Mat4) mesh_mod.Mat4 {
+    var tx: f32 = 0;
+    var ty: f32 = 0;
+    var tz: f32 = 0;
+    for (c.fields) |f| {
+        if (numberAsF32(f.value)) |n| {
+            if (std.mem.eql(u8, f.name, "x")) tx = n;
+            if (std.mem.eql(u8, f.name, "y")) ty = n;
+            if (std.mem.eql(u8, f.name, "z")) tz = n;
+        }
+    }
+    return transform.mul(mesh_mod.Mat4.translation(tx, ty, tz));
+}
+
+fn readAngleRad(v: value.Value) ?f32 {
+    if (v != .number) return null;
+    const n = v.number;
+    const val: f32 = @floatCast(n.value);
+    // Default unit interpretation: deg if untagged or .deg, rad otherwise.
+    const unit = n.unit orelse return val * std.math.pi / 180.0;
+    return switch (unit) {
+        .deg => val * std.math.pi / 180.0,
+        .rad => val,
+        else => val * std.math.pi / 180.0,
+    };
+}
+
+fn numberAsF32(v: value.Value) ?f32 {
+    if (v != .number) return null;
+    return @floatCast(v.number.value);
+}
+
+/// Build a mesh from `extrude(<leaf>, depth: N)` and rasterise it
+/// with the accumulated transform / style / lights.
+fn drawExtrude(
+    arena: std.mem.Allocator,
+    extrude: value.Constructed,
+    fb: *render3d.Framebuffer,
+    transform: mesh_mod.Mat4,
+    style: Style,
+    lights: []const render3d.Light,
+    off: Offset,
+) !void {
+    var leaf: ?value.Value = null;
+    var depth: f32 = 80;
+    for (extrude.fields) |f| {
+        if (f.name.len == 0) {
+            if (leaf == null) leaf = f.value;
+        } else if (std.mem.eql(u8, f.name, "depth")) {
+            if (numberAsF32(f.value)) |d| depth = d;
+        }
+    }
+    const inner = leaf orelse return;
+    const m = (try meshFromShape(arena, inner, depth)) orelse return;
+
+    // Centre the mesh on its own bounding-box centre, then apply the
+    // user transform, then apply the canvas-centre offset. This way
+    // the un-transformed glyph sits at the canvas centre and the
+    // user's `.rotate`/`.scale`/`translate` move it from there.
+    const centred = centreMesh(arena, m) catch return;
+
+    // Outer 2D `translate(...)` and the canvas centring are folded
+    // into one additional translation on the world transform. `off`
+    // is in screen pixels; the 3D pipeline's world space is also in
+    // pixels (we extruded glyphs at pixel-scale heights), so this is
+    // a direct mapping.
+    const world_offset = mesh_mod.Mat4.translation(@floatCast(off.x), @floatCast(off.y), 0);
+    const final_transform = world_offset.mul(transform);
+
+    const material: render3d.Material = .{
+        .albedo = if (style.fill) |fv| valueToRgba(fv) else .{ 220, 220, 220, 255 },
+    };
+
+    try render3d.drawMesh(arena, fb, centred, final_transform, .{}, material, lights);
+}
+
+/// Compute the mesh's bounding-box centre and subtract it from every
+/// vertex, returning a centred copy. The original isn't mutated.
+fn centreMesh(arena: std.mem.Allocator, m: mesh_mod.Mesh) !mesh_mod.Mesh {
+    if (m.positions.len == 0) return m;
+    var min_x: f32 = m.positions[0].x;
+    var max_x: f32 = min_x;
+    var min_y: f32 = m.positions[0].y;
+    var max_y: f32 = min_y;
+    var min_z: f32 = m.positions[0].z;
+    var max_z: f32 = min_z;
+    for (m.positions[1..]) |p| {
+        min_x = @min(min_x, p.x);
+        max_x = @max(max_x, p.x);
+        min_y = @min(min_y, p.y);
+        max_y = @max(max_y, p.y);
+        min_z = @min(min_z, p.z);
+        max_z = @max(max_z, p.z);
+    }
+    const cx = (min_x + max_x) * 0.5;
+    const cy = (min_y + max_y) * 0.5;
+    const cz = (min_z + max_z) * 0.5;
+
+    const new_positions = try arena.alloc(mesh_mod.Vec3, m.positions.len);
+    for (m.positions, 0..) |p, i| {
+        new_positions[i] = .{ .x = p.x - cx, .y = p.y - cy, .z = p.z - cz };
+    }
+    return .{
+        .positions = new_positions,
+        .normals = m.normals,
+        .indices = m.indices,
+    };
+}
+
+/// Build a mesh for the leaf shape inside an `extrude(...)`. Today
+/// only `text.glyph` is supported; rects / paths land later.
+fn meshFromShape(arena: std.mem.Allocator, leaf: value.Value, depth: f32) !?mesh_mod.Mesh {
+    if (leaf != .constructed) return null;
+    const c = leaf.constructed;
+    if (std.mem.eql(u8, c.name, "text.glyph")) {
+        var text_raw: []const u8 = "";
+        var size_px: f32 = 96;
+        for (c.fields) |f| {
+            if (f.name.len == 0 and f.value == .string) {
+                text_raw = f.value.string;
+            } else if (std.mem.eql(u8, f.name, "size")) {
+                if (numberAsF32(f.value)) |s| size_px = s;
+            }
+        }
+        const text = stripQuotes(text_raw);
+        if (text.len == 0) return null;
+        // For a multi-character run we'd extrude each glyph and
+        // concatenate; v0 sticks to single-codepoint marketing
+        // letters (the taste sample's "C") and extrudes only the
+        // first code point.
+        return try mesh_mod.extrudeGlyph(arena, text[0], size_px, depth);
+    }
+    return null;
+}
+
+/// Walk the `lights: [...]` array, parsing each entry into a render3d.Light.
+/// Recognises `ambient(intensity)` (positional or named) and
+/// `directional(from: vec3(x, y, z), intensity: N)`. Anything else is
+/// silently dropped (no lights at all if the array is empty).
+fn parseLights(arena: std.mem.Allocator, lights_v: ?value.Value) ![]const render3d.Light {
+    if (lights_v == null) return &.{};
+    if (lights_v.? != .array) return &.{};
+    const arr = lights_v.?.array;
+
+    var out = try std.array_list.Managed(render3d.Light).initCapacity(arena, arr.elems.len);
+    for (arr.elems) |elem| {
+        if (elem != .constructed) continue;
+        const lc = elem.constructed;
+        if (std.mem.eql(u8, lc.name, "ambient")) {
+            const intensity = readIntensityArg(lc) orelse 0.3;
+            try out.append(.{ .ambient = .{ .intensity = intensity } });
+        } else if (std.mem.eql(u8, lc.name, "directional")) {
+            var direction: mesh_mod.Vec3 = .{ .x = 0, .y = 0, .z = -1 };
+            var intensity: f32 = 1.0;
+            for (lc.fields) |f| {
+                if (std.mem.eql(u8, f.name, "from")) {
+                    if (readVec3(f.value)) |v| direction = v.scale(-1).normalise(); // point toward origin
+                } else if (std.mem.eql(u8, f.name, "intensity")) {
+                    if (numberAsF32(f.value)) |n| intensity = n;
+                }
+            }
+            try out.append(.{ .directional = .{ .direction = direction, .intensity = intensity } });
+        }
+    }
+    return try out.toOwnedSlice();
+}
+
+fn readIntensityArg(c: value.Constructed) ?f32 {
+    // Accept both positional (`ambient(0.35)`) and named (`ambient(intensity: 0.35)`).
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "intensity") or f.name.len == 0) {
+            if (numberAsF32(f.value)) |n| return n;
+        }
+    }
+    return null;
+}
+
+fn readVec3(v: value.Value) ?mesh_mod.Vec3 {
+    if (v != .constructed) return null;
+    const c = v.constructed;
+    if (!std.mem.eql(u8, c.name, "vec3")) return null;
+    var x: f32 = 0;
+    var y: f32 = 0;
+    var z: f32 = 0;
+    var pos: usize = 0;
+    for (c.fields) |f| {
+        const n = numberAsF32(f.value) orelse continue;
+        if (std.mem.eql(u8, f.name, "x")) {
+            x = n;
+        } else if (std.mem.eql(u8, f.name, "y")) {
+            y = n;
+        } else if (std.mem.eql(u8, f.name, "z")) {
+            z = n;
+        } else if (f.name.len == 0) {
+            if (pos == 0) x = n else if (pos == 1) y = n else if (pos == 2) z = n;
+            pos += 1;
+        }
+    }
+    return .{ .x = x, .y = y, .z = z };
 }
 
 fn numberAsPixels(v: value.Value) ?f64 {
@@ -1075,15 +1428,16 @@ test "renderTree: compose stacks layers — later wins" {
     try std.testing.expectEqual(@as(u8, 0), fb.pixels[i + 2]);
 }
 
-test "renderTree: 3D wrappers (render3d / extrude / rotate / scale) descend to the inner shape" {
+test "renderTree: 3D wrappers without `render3d` still flat-fallback to the inner shape" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    // The taste sample's shape: render3d ▸ scale ▸ rotate ▸ material ▸
-    // extrude ▸ <leaf>. Substitute a plain rect for the leaf so the
-    // renderer has something it knows how to paint, and confirm every
-    // wrapper transparently descends.
+    // Without an enclosing `render3d`, extrude/material/rotate/scale
+    // continue to flat-unwrap to their first positional child (the
+    // pre-3D-rasteriser behaviour). With a `render3d` on top, control
+    // flow shifts into the actual 3D pipeline — that's tested via the
+    // end-to-end taste-sample render, not here.
     const rect_fields = try a.alloc(value.Field, 3);
     rect_fields[0] = .{ .name = "width", .value = .{ .number = .{ .value = 4, .unit = .px } } };
     rect_fields[1] = .{ .name = "height", .value = .{ .number = .{ .value = 4, .unit = .px } } };
@@ -1098,7 +1452,7 @@ test "renderTree: 3D wrappers (render3d / extrude / rotate / scale) descend to t
         }
     };
     var tree = leaf;
-    inline for (.{ "extrude", "material", "rotate", "scale", "render3d" }) |name| {
+    inline for (.{ "extrude", "material", "rotate", "scale" }) |name| {
         tree = try stack.wrap(a, name, tree);
     }
 
