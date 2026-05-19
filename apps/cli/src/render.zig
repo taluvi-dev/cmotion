@@ -639,7 +639,8 @@ fn drawExtrude(
 ) !void {
     var leaf: ?value.Value = null;
     var depth: f32 = 80;
-    var bevel: ?f32 = null; // null = use the auto default
+    var bevel: ?f32 = null;
+    var bevel_segments: u32 = 4; // matches Three.js ExtrudeGeometry default
     for (extrude.fields) |f| {
         if (f.name.len == 0) {
             if (leaf == null) leaf = f.value;
@@ -647,17 +648,17 @@ fn drawExtrude(
             if (numberAsF32(f.value)) |d| depth = d;
         } else if (std.mem.eql(u8, f.name, "bevel")) {
             if (numberAsF32(f.value)) |b| bevel = b;
+        } else if (std.mem.eql(u8, f.name, "bevel_segments")) {
+            if (numberAsF32(f.value)) |s| bevel_segments = @intFromFloat(@max(1.0, s));
         }
     }
     const inner = leaf orelse return;
     // Default bevel: 10 % of depth (matching Three.js's
     // ScenePreview `bevelSize: 0.04` on `depth: 0.4`), with a
     // 1.5 px minimum so thin extrusions still have a visible
-    // bevel — at 16 px depth, 10 % would be 1.6 px, but for
-    // 8 px or thinner the floor kicks in. Users override via
-    // `extrude(..., bevel: <px>)`.
+    // bevel. Users override via `extrude(..., bevel: <px>)`.
     const eff_bevel: f32 = bevel orelse @max(depth * 0.10, 1.5);
-    const m = (try meshFromShape(arena, inner, depth, eff_bevel)) orelse return;
+    const m = (try meshFromShape(arena, inner, depth, eff_bevel, bevel_segments)) orelse return;
 
     // Centre the mesh on its own bounding-box centre, then apply the
     // user transform, then apply the canvas-centre offset. This way
@@ -741,7 +742,13 @@ fn centreMesh(arena: std.mem.Allocator, m: mesh_mod.Mesh) !mesh_mod.Mesh {
 
 /// Build a mesh for the leaf shape inside an `extrude(...)`. Today
 /// only `text.glyph` is supported; rects / paths land later.
-fn meshFromShape(arena: std.mem.Allocator, leaf: value.Value, depth: f32, bevel: f32) !?mesh_mod.Mesh {
+fn meshFromShape(
+    arena: std.mem.Allocator,
+    leaf: value.Value,
+    depth: f32,
+    bevel: f32,
+    bevel_segments: u32,
+) !?mesh_mod.Mesh {
     if (leaf != .constructed) return null;
     const c = leaf.constructed;
     if (std.mem.eql(u8, c.name, "text.glyph")) {
@@ -756,11 +763,7 @@ fn meshFromShape(arena: std.mem.Allocator, leaf: value.Value, depth: f32, bevel:
         }
         const text = stripQuotes(text_raw);
         if (text.len == 0) return null;
-        // For a multi-character run we'd extrude each glyph and
-        // concatenate; v0 sticks to single-codepoint marketing
-        // letters (the taste sample's "C") and extrudes only the
-        // first code point.
-        return try mesh_mod.extrudeGlyph(arena, text[0], size_px, depth, bevel);
+        return try mesh_mod.extrudeGlyph(arena, text[0], size_px, depth, bevel, bevel_segments);
     }
     return null;
 }
