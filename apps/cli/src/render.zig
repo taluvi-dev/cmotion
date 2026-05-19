@@ -97,13 +97,19 @@ const Offset = struct {
     }
 };
 
-/// Painting context inherited from outer wrappers. Currently just the
-/// active fill: `.material(child, fill: c)` sets it so that a child
-/// without its own `fill:` (e.g. `extrude(text.glyph(...))`) still
-/// picks up the colour the user asked for. As more material properties
-/// land (stroke, opacity, …) they'll thread through here too.
+/// Painting context inherited from outer wrappers. `fill:` flows
+/// through every paint path (2D and 3D); `metalness:` / `roughness:`
+/// only matter to the 3D rasteriser but live in the same Style so
+/// `.material(fill:, metalness:, roughness:)` has one source of
+/// truth. 2D paint functions silently ignore the 3D-only fields.
 const Style = struct {
     fill: ?value.Value = null,
+    /// PBR-style "how metal-ish is this surface". Defaults nil →
+    /// the renderer treats unset as 0 (pure dielectric).
+    metalness: ?f32 = null,
+    /// PBR-style "how rough is this surface". Defaults nil →
+    /// renderer treats unset as 1 (fully rough, essentially diffuse).
+    roughness: ?f32 = null,
 };
 
 /// Top-level entry point. Allocates a framebuffer in `arena` and paints
@@ -498,12 +504,19 @@ fn paint3DTree(
         return;
     }
     if (std.mem.eql(u8, c.name, "material")) {
-        // Material's `fill:` becomes the active style for the inner
-        // mesh's albedo. metalness/roughness/emissive are read but
-        // unused — they land with the PBR refinement commit.
+        // `.material(fill:, metalness:, roughness:)` becomes the
+        // active Style for the inner mesh's albedo + specular shape.
+        // `emissive:` is read but unused — needs an emission term in
+        // the shading equation, which a later commit adds.
         var new_style = style;
         for (c.fields) |f| {
-            if (std.mem.eql(u8, f.name, "fill")) new_style.fill = f.value;
+            if (std.mem.eql(u8, f.name, "fill")) {
+                new_style.fill = f.value;
+            } else if (std.mem.eql(u8, f.name, "metalness")) {
+                if (numberAsF32(f.value)) |n| new_style.metalness = n;
+            } else if (std.mem.eql(u8, f.name, "roughness")) {
+                if (numberAsF32(f.value)) |n| new_style.roughness = n;
+            }
         }
         if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, transform, new_style, lights, off);
         return;
@@ -637,6 +650,8 @@ fn drawExtrude(
 
     const material: render3d.Material = .{
         .albedo = if (style.fill) |fv| valueToRgba(fv) else .{ 220, 220, 220, 255 },
+        .metalness = style.metalness orelse 0.0,
+        .roughness = style.roughness orelse 1.0,
     };
 
     try render3d.drawMesh(arena, fb, centred, final_transform, .{}, material, lights);
