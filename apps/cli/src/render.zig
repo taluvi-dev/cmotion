@@ -1325,6 +1325,117 @@ fn deflateZlib(arena: std.mem.Allocator, input: []const u8, writer: *std.Io.Writ
     try writer.writeAll(&adler_bytes);
 }
 
+/// Streaming APNG writer. Builds an animated PNG (RFC unofficial,
+/// W3C "PNG Working Group" extension — supported by every modern
+/// browser and image viewer) by interleaving frame-control chunks
+/// (`fcTL`) with image data chunks (`IDAT` for frame 0, `fdAT`
+/// for subsequent frames). The base PNG is the first frame, so
+/// any non-APNG viewer falls back to a still image cleanly.
+///
+/// Usage:
+///   var aw = try ApngWriter.init(arena, writer, w, h, fps_num, fps_den, total_frames);
+///   for each frame: try aw.writeFrame(framebuffer);
+///   try aw.finish();
+///
+/// Each `writeFrame` filter + deflate-compresses the framebuffer
+/// independently — there's no inter-frame delta encoding (the
+/// PNG/APNG format doesn't support it). For static-background
+/// scenes the per-frame compression still benefits from Up-filter
+/// + LZ77 on the within-frame regularities, so file sizes stay
+/// reasonable (~1/10 the size of the raw RGBA payload).
+pub const ApngWriter = struct {
+    arena: std.mem.Allocator,
+    output: *std.Io.Writer,
+    width: u32,
+    height: u32,
+    fps_num: u16,
+    fps_den: u16,
+    seq: u32 = 0,
+    frame_idx: u32 = 0,
+
+    pub fn init(
+        arena: std.mem.Allocator,
+        output: *std.Io.Writer,
+        width: u32,
+        height: u32,
+        fps_num: u16,
+        fps_den: u16,
+        total_frames: u32,
+    ) !ApngWriter {
+        // PNG file signature.
+        try output.writeAll(&[_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
+
+        // IHDR — same shape as a static PNG (RGBA8, no interlace).
+        var ihdr: [13]u8 = undefined;
+        std.mem.writeInt(u32, ihdr[0..4], width, .big);
+        std.mem.writeInt(u32, ihdr[4..8], height, .big);
+        ihdr[8] = 8; // bit depth
+        ihdr[9] = 6; // RGBA
+        ihdr[10] = 0;
+        ihdr[11] = 0;
+        ihdr[12] = 0;
+        try writePngChunk(output, "IHDR", &ihdr);
+
+        // acTL — animation control. `num_plays = 0` is "loop forever".
+        var actl: [8]u8 = undefined;
+        std.mem.writeInt(u32, actl[0..4], total_frames, .big);
+        std.mem.writeInt(u32, actl[4..8], 0, .big);
+        try writePngChunk(output, "acTL", &actl);
+
+        return .{
+            .arena = arena,
+            .output = output,
+            .width = width,
+            .height = height,
+            .fps_num = fps_num,
+            .fps_den = fps_den,
+        };
+    }
+
+    pub fn writeFrame(self: *ApngWriter, fb: Framebuffer) !void {
+        // fcTL — frame control. Each frame: full-canvas, dispose
+        // NONE + blend SOURCE (frames are fully opaque replacements).
+        var fctl: [26]u8 = undefined;
+        std.mem.writeInt(u32, fctl[0..4], self.seq, .big);
+        std.mem.writeInt(u32, fctl[4..8], fb.width, .big);
+        std.mem.writeInt(u32, fctl[8..12], fb.height, .big);
+        std.mem.writeInt(u32, fctl[12..16], 0, .big); // x_offset
+        std.mem.writeInt(u32, fctl[16..20], 0, .big); // y_offset
+        std.mem.writeInt(u16, fctl[20..22], self.fps_num, .big);
+        std.mem.writeInt(u16, fctl[22..24], self.fps_den, .big);
+        fctl[24] = 0; // dispose_op: NONE
+        fctl[25] = 0; // blend_op: SOURCE
+        try writePngChunk(self.output, "fcTL", &fctl);
+        self.seq += 1;
+
+        // Filter + deflate-compress the frame.
+        const filtered = try filterFramebuffer(self.arena, fb);
+        var idat_buf = std.Io.Writer.Allocating.init(self.arena);
+        defer idat_buf.deinit();
+        try deflateZlib(self.arena, filtered, &idat_buf.writer);
+        const compressed = idat_buf.written();
+
+        if (self.frame_idx == 0) {
+            // First frame goes in IDAT (no sequence prefix). This
+            // makes the APNG fall back to a static PNG when viewed
+            // in a non-APNG viewer.
+            try writePngChunk(self.output, "IDAT", compressed);
+        } else {
+            // Subsequent frames go in fdAT with a sequence prefix.
+            const fdat = try self.arena.alloc(u8, 4 + compressed.len);
+            std.mem.writeInt(u32, fdat[0..4], self.seq, .big);
+            @memcpy(fdat[4..], compressed);
+            try writePngChunk(self.output, "fdAT", fdat);
+            self.seq += 1;
+        }
+        self.frame_idx += 1;
+    }
+
+    pub fn finish(self: *ApngWriter) !void {
+        try writePngChunk(self.output, "IEND", &.{});
+    }
+};
+
 fn writePngChunk(writer: anytype, chunk_type: []const u8, data: []const u8) !void {
     var len_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &len_bytes, @intCast(data.len), .big);
