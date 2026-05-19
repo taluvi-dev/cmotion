@@ -75,6 +75,53 @@ const entries = [_]Entry{
         \\every error node.
         ,
     },
+    .{
+        .code = "NAM003",
+        .title = "Unknown identifier",
+        .body =
+        \\A name was referenced that resolves to nothing in the current
+        \\scope chain (local lets, parameters, top-level declarations,
+        \\imported names). The check is suppressed when any `use foo.*`
+        \\wildcard import is present, since we don't yet know what names
+        \\that brings into scope — once module manifests land, NAM003
+        \\will fire through wildcards too.
+        \\
+        \\The repair is one of:
+        \\  - add a `let name = ...;` before the use site
+        \\  - bring the name into scope with `use mod.name;` or
+        \\    `use mod as alias;`
+        \\  - fix a typo
+        ,
+    },
+    .{
+        .code = "NAM005",
+        .title = "Duplicate top-level declaration",
+        .body =
+        \\Two top-level declarations resolve to the same local name. The
+        \\offending span points at the duplicate; the diagnostic's
+        \\`actual` field names the previous declaration's location.
+        \\Rename one of them, or remove the duplicate.
+        ,
+    },
+    .{
+        .code = "NAM006",
+        .title = "Duplicate parameter name",
+        .body =
+        \\A signature lists the same parameter name twice. Parameter
+        \\names must be unique within a single component / scene /
+        \\filter / lambda. Rename one of the parameters.
+        ,
+    },
+    .{
+        .code = "LWR000",
+        .title = "Lowering failed on a clean CST",
+        .body =
+        \\The tree-sitter parse produced no ERROR/MISSING nodes, but
+        \\src/lower.zig failed to map some node kind into the AST. This
+        \\means the lowering pass has a gap. The diagnostic's `message`
+        \\field names the Zig error variant that fired.
+        ,
+    },
 };
 
 pub fn run(ctx: Context, args: []const []const u8) !u8 {

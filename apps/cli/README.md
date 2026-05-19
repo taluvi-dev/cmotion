@@ -110,9 +110,10 @@ Per-subcommand extras:
 | Subcommand | Extra fields |
 | --- | --- |
 | `parse`   | `path`, `cst` (S-expression CST as a string), `ast` (typed tree; `null` when syntax errors prevented lowering) |
+| `check`   | `path`. The `diagnostics[]` carry the real findings (NAM003 / NAM005 / NAM006 today; TYP* / UNT* once the typechecker lands). Exits 0 on clean, 1 on any error diagnostic. |
 | `explain` | `code`, `title`, `body` |
 | `version` | `name`, `version` |
-| `check` / `fmt` | (stubs today; will land with the typechecker / formatter) |
+| `fmt`     | (stub today; will land with the formatter) |
 
 ### `cmo parse` AST shape
 
