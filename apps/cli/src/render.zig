@@ -624,15 +624,23 @@ fn drawExtrude(
 ) !void {
     var leaf: ?value.Value = null;
     var depth: f32 = 80;
+    var bevel: ?f32 = null; // null = use the auto default
     for (extrude.fields) |f| {
         if (f.name.len == 0) {
             if (leaf == null) leaf = f.value;
         } else if (std.mem.eql(u8, f.name, "depth")) {
             if (numberAsF32(f.value)) |d| depth = d;
+        } else if (std.mem.eql(u8, f.name, "bevel")) {
+            if (numberAsF32(f.value)) |b| bevel = b;
         }
     }
     const inner = leaf orelse return;
-    const m = (try meshFromShape(arena, inner, depth)) orelse return;
+    // Default bevel: ~4% of depth (small enough to not collapse
+    // typical glyph strokes, large enough to read as a rounded
+    // edge under any reasonable light angle). Users can override
+    // via `extrude(..., bevel: <px>)`.
+    const eff_bevel: f32 = bevel orelse (depth * 0.04);
+    const m = (try meshFromShape(arena, inner, depth, eff_bevel)) orelse return;
 
     // Centre the mesh on its own bounding-box centre, then apply the
     // user transform, then apply the canvas-centre offset. This way
@@ -706,7 +714,7 @@ fn centreMesh(arena: std.mem.Allocator, m: mesh_mod.Mesh) !mesh_mod.Mesh {
 
 /// Build a mesh for the leaf shape inside an `extrude(...)`. Today
 /// only `text.glyph` is supported; rects / paths land later.
-fn meshFromShape(arena: std.mem.Allocator, leaf: value.Value, depth: f32) !?mesh_mod.Mesh {
+fn meshFromShape(arena: std.mem.Allocator, leaf: value.Value, depth: f32, bevel: f32) !?mesh_mod.Mesh {
     if (leaf != .constructed) return null;
     const c = leaf.constructed;
     if (std.mem.eql(u8, c.name, "text.glyph")) {
@@ -725,7 +733,7 @@ fn meshFromShape(arena: std.mem.Allocator, leaf: value.Value, depth: f32) !?mesh
         // concatenate; v0 sticks to single-codepoint marketing
         // letters (the taste sample's "C") and extrudes only the
         // first code point.
-        return try mesh_mod.extrudeGlyph(arena, text[0], size_px, depth);
+        return try mesh_mod.extrudeGlyph(arena, text[0], size_px, depth, bevel);
     }
     return null;
 }
