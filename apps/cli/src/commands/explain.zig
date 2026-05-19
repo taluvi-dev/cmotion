@@ -313,6 +313,24 @@ const entries = [_]Entry{
         ,
     },
     .{
+        .code = "EVL004",
+        .title = "Missing required argument in a lambda call",
+        .body =
+        \\A lambda was called without a value for one of its parameters,
+        \\and the parameter has no default. cmotion lets you mix
+        \\positional and named arguments in a single call, so the
+        \\binding rule is: each parameter takes the first unconsumed
+        \\argument that either (a) is named with the parameter's name
+        \\or (b) is positional. Parameters with no matching argument
+        \\fall back to their default expression; parameters with no
+        \\default fire EVL004.
+        \\
+        \\Repair: pass the named argument (`f(x: 1)`), pass it
+        \\positionally (`f(1)`), or add a default to the parameter
+        \\definition (`|x: Number = 1|`).
+        ,
+    },
+    .{
         .code = "EVL003",
         .title = "Unresolved identifier at eval time",
         .body =
