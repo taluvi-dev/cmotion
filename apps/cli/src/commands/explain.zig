@@ -316,16 +316,17 @@ const entries = [_]Entry{
         .code = "EVL003",
         .title = "Unresolved identifier at eval time",
         .body =
-        \\A name was referenced that has no binding when the interpreter
-        \\reaches it. `cmo check` normally catches this as NAM003 first,
-        \\so EVL003 means either (a) check was skipped, or (b) a name
-        \\that was visible to check became invisible to eval (a known
-        \\limitation: today, scenes/components don't enter their bodies'
-        \\scopes for eval, so a top-level let referencing a scene-local
-        \\binding would surface here).
+        \\Reserved. Today the interpreter promotes every unresolved name
+        \\path (bare ident or dotted access chain rooted at an unbound
+        \\ident) into a zero-argument `Constructed` staging value, so
+        \\that programs with `use std.foo.*;` wildcards still evaluate
+        \\cleanly without module manifests. Real typos are caught
+        \\earlier by `cmo check` (NAM003).
         \\
-        \\Repair: declare the name with `let` or import it before this
-        \\use; or run `cmo check` first to see the matching NAM003.
+        \\Once modules land and the interpreter can distinguish a
+        \\stdlib reference from a typo, EVL003 will return for the
+        \\latter. Until then, run `cmo check` first if you want the
+        \\name-resolution view.
         ,
     },
 };

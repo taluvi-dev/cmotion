@@ -130,10 +130,32 @@ pub const Evaluator = struct {
                     .span = d.span,
                 });
             },
-            // The other top-level forms don't evaluate to a value today.
-            // We record nothing for them; future commits will let `cmo
-            // eval --scene <name>` invoke a scene body.
-            .import, .component, .scene, .filter, .@"export" => {},
+            .scene, .component, .filter => |cl| {
+                // Invoke the body when every parameter has a default —
+                // that's the only safe way to drive it from the top
+                // level without a user-supplied argument set. Components
+                // with required params get skipped silently for now;
+                // a future `cmo eval --scene name --args k=v` flag will
+                // let the caller supply them.
+                if (!allParamsHaveDefaults(cl.params)) continue;
+                const v = try self.invokeComponent(cl, &top);
+                try top.names.put(self.gpa, cl.name.name, v);
+                try bindings.append(self.gpa, .{
+                    .name = cl.name.name,
+                    .value = v,
+                    .span = cl.span,
+                });
+            },
+            .@"export" => |e| {
+                const v = try self.evalExpr(e.value.*, &top);
+                try top.names.put(self.gpa, e.name.name, v);
+                try bindings.append(self.gpa, .{
+                    .name = e.name.name,
+                    .value = v,
+                    .span = e.span,
+                });
+            },
+            .import => {},
         };
 
         const owned = try self.arena.alloc(Binding, bindings.items.len);
@@ -163,8 +185,143 @@ pub const Evaluator = struct {
             .field_access => |fa| try self.evalFieldAccess(fa, scope),
             .if_ => |i| try self.evalIf(i, scope),
             .match => |m| try self.evalMatch(m, scope),
+            .call => |c| try self.evalCall(c, scope),
+            .method_call => |mc| try self.evalMethodCall(mc, scope),
+            .animate => |a| try self.evalAnimate(a, scope),
+            .compose => |c| try self.evalCompose(c, scope),
             else => try self.unsupported(expr),
         };
+    }
+
+    //
+    // Calls + stdlib staging
+    //
+    // Today's policy: the v0 interpreter has no callable Value type.
+    // Every call expression therefore resolves to a `Value.constructed`
+    // staging record — the callee's syntactic name plus the evaluated
+    // arguments. This lets samples that lean on the stdlib (`rect(...)`,
+    // `vec3(...)`, `text.glyph(...)`, ...) evaluate cleanly without
+    // having to type every constructor up front. The renderer (stage 6)
+    // can decide which constructed names it understands; the rest stay
+    // as opaque records the interpreter has preserved verbatim.
+
+    fn evalCall(self: *Evaluator, c: ast.Call, scope: *Scope) EvalError!Value {
+        if (try self.constructorName(c.callee.*, scope)) |name| {
+            const fields = try self.evalArgs(c.args, scope, null);
+            return .{ .constructed = .{ .name = name, .fields = fields } };
+        }
+        // No syntactic-name path: try evaluating the callee to surface
+        // the underlying value, then complain that it's not callable.
+        const callee = try self.evalExpr(c.callee.*, scope);
+        try self.notCallable(c.span, callee);
+        return .nil;
+    }
+
+    fn evalMethodCall(self: *Evaluator, mc: ast.MethodCall, scope: *Scope) EvalError!Value {
+        // `text.glyph(...)` parses as a method_call but is really a
+        // namespace call — same shape as `text.glyph` were a single
+        // dotted name. Detect that by checking whether the receiver is
+        // itself a name path rooted at an unresolved ident; if so,
+        // treat the whole thing as `Constructed("text.glyph", args)`
+        // without evaluating the receiver. Otherwise it's a real method
+        // call: evaluate the receiver, prepend it as a positional `self`.
+        if (try self.constructorPath(mc.receiver.*, scope)) |root| {
+            const name = try std.fmt.allocPrint(self.arena, "{s}.{s}", .{ root, mc.name.name });
+            const fields = try self.evalArgs(mc.args, scope, null);
+            return .{ .constructed = .{ .name = name, .fields = fields } };
+        }
+        const receiver = try self.evalExpr(mc.receiver.*, scope);
+        const fields = try self.evalArgs(mc.args, scope, receiver);
+        return .{ .constructed = .{ .name = mc.name.name, .fields = fields } };
+    }
+
+    /// Evaluate a call's argument list into a flat `Field` slice. Positional
+    /// args use the empty string for the name (the staging convention).
+    /// `prepend_self` is non-null for method calls: that value becomes the
+    /// first positional field, before any source-level args.
+    fn evalArgs(
+        self: *Evaluator,
+        args: []const ast.Arg,
+        scope: *Scope,
+        prepend_self: ?Value,
+    ) EvalError![]const value.Field {
+        const extra: usize = if (prepend_self != null) 1 else 0;
+        const fields = try self.arena.alloc(value.Field, args.len + extra);
+        if (prepend_self) |s| {
+            fields[0] = .{ .name = "", .value = s };
+        }
+        for (args, 0..) |a, i| {
+            const v = try self.evalExpr(a.value.*, scope);
+            const name = if (a.name) |n| n.name else "";
+            fields[i + extra] = .{ .name = name, .value = v };
+        }
+        return fields;
+    }
+
+    /// If the callee expression looks like an unresolved name path (an
+    /// ident, or a chain of `.field` accesses rooted at an unresolved
+    /// ident), return the dotted path as the constructor name. Otherwise
+    /// return null — the caller will treat it as a real value-style call.
+    fn constructorName(self: *Evaluator, callee: ast.Expr, scope: *Scope) EvalError!?[]const u8 {
+        switch (callee) {
+            .ident => |id| {
+                if (scope.lookup(id.name) != null) return null;
+                return id.name;
+            },
+            .field_access => |fa| {
+                const root = try self.constructorPath(fa.receiver.*, scope) orelse return null;
+                return try std.fmt.allocPrint(self.arena, "{s}.{s}", .{ root, fa.name.name });
+            },
+            else => return null,
+        }
+    }
+
+    fn constructorPath(self: *Evaluator, expr: ast.Expr, scope: *Scope) EvalError!?[]const u8 {
+        switch (expr) {
+            .ident => |id| {
+                if (scope.lookup(id.name) != null) return null;
+                return id.name;
+            },
+            .field_access => |fa| {
+                const root = try self.constructorPath(fa.receiver.*, scope) orelse return null;
+                return try std.fmt.allocPrint(self.arena, "{s}.{s}", .{ root, fa.name.name });
+            },
+            else => return null,
+        }
+    }
+
+    fn evalAnimate(self: *Evaluator, a: ast.Animate, scope: *Scope) EvalError!Value {
+        // Encode keyframes as an array of records {at, value}. The opts
+        // (the `with { ... }` clause) become a single record value, or
+        // nil when absent. The result is a Constructed("animate", ...)
+        // — symmetric with how the renderer will see other staged calls.
+        const keyframe_elems = try self.arena.alloc(Value, a.keyframes.len);
+        for (a.keyframes, 0..) |kf, i| {
+            const kf_fields = try self.arena.alloc(value.Field, 2);
+            kf_fields[0] = .{ .name = "at", .value = try self.evalExpr(kf.at.*, scope) };
+            kf_fields[1] = .{ .name = "value", .value = try self.evalExpr(kf.value.*, scope) };
+            keyframe_elems[i] = .{ .record = .{ .fields = kf_fields } };
+        }
+        const opts_value: Value = if (a.opts) |inits| blk: {
+            const fs = try self.arena.alloc(value.Field, inits.len);
+            for (inits, 0..) |ri, i| fs[i] = .{
+                .name = ri.name.name,
+                .value = try self.evalExpr(ri.value.*, scope),
+            };
+            break :blk .{ .record = .{ .fields = fs } };
+        } else .nil;
+        const fields = try self.arena.alloc(value.Field, 2);
+        fields[0] = .{ .name = "keyframes", .value = .{ .array = .{ .elems = keyframe_elems } } };
+        fields[1] = .{ .name = "opts", .value = opts_value };
+        return .{ .constructed = .{ .name = "animate", .fields = fields } };
+    }
+
+    fn evalCompose(self: *Evaluator, c: ast.Compose, scope: *Scope) EvalError!Value {
+        const elems = try self.arena.alloc(Value, c.layers.len);
+        for (c.layers, 0..) |layer, i| elems[i] = try self.evalExpr(layer, scope);
+        const fields = try self.arena.alloc(value.Field, 1);
+        fields[0] = .{ .name = "layers", .value = .{ .array = .{ .elems = elems } } };
+        return .{ .constructed = .{ .name = "compose", .fields = fields } };
     }
 
     fn evalArray(self: *Evaluator, a: ast.ArrayExpr, scope: *Scope) EvalError!Value {
@@ -222,6 +379,15 @@ pub const Evaluator = struct {
     }
 
     fn evalFieldAccess(self: *Evaluator, fa: ast.FieldAccess, scope: *Scope) EvalError!Value {
+        // If the receiver is a chain of dotted names rooted at an
+        // unresolved ident (e.g. `easing.out_cubic`), the whole thing
+        // is a namespace reference, not a record access — return a
+        // zero-arg Constructed staging value so the renderer still
+        // sees the name.
+        if (try self.constructorPath(fa.receiver.*, scope)) |root| {
+            const name = try std.fmt.allocPrint(self.arena, "{s}.{s}", .{ root, fa.name.name });
+            return .{ .constructed = .{ .name = name, .fields = &.{} } };
+        }
         const receiver = try self.evalExpr(fa.receiver.*, scope);
         switch (receiver) {
             .record => |rec| {
@@ -277,6 +443,25 @@ pub const Evaluator = struct {
         return .nil;
     }
 
+    /// Invoke a scene/component/filter at the top level with every
+    /// parameter bound to its default value. The body is a `Block`;
+    /// we evaluate it in a fresh scope that chains to the top-level
+    /// scope `parent`.
+    fn invokeComponent(
+        self: *Evaluator,
+        decl: ast.ComponentLike,
+        parent: *Scope,
+    ) EvalError!Value {
+        var params_scope = Scope{ .parent = parent };
+        defer params_scope.names.deinit(self.gpa);
+        for (decl.params) |p| {
+            const default = p.default orelse continue;
+            const v = try self.evalExpr(default.*, parent);
+            try params_scope.names.put(self.gpa, p.name.name, v);
+        }
+        return self.evalBlock(decl.body, &params_scope);
+    }
+
     fn evalBlock(self: *Evaluator, block: ast.Block, parent: *Scope) EvalError!Value {
         var local = Scope{ .parent = parent };
         defer local.names.deinit(self.gpa);
@@ -289,32 +474,14 @@ pub const Evaluator = struct {
 
     fn evalIdent(self: *Evaluator, id: ast.Ident, scope: *Scope) Value {
         if (scope.lookup(id.name)) |v| return v;
-        // EVL003 — unresolved at eval time. `cmo check` normally catches
-        // this as NAM003 first; we still surface it from eval so the
-        // pipelines stay independent.
-        const loc = id.span.location(self.source);
-        const msg = std.fmt.allocPrint(
-            self.arena,
-            "name '{s}' is not bound at eval time",
-            .{id.name},
-        ) catch return .nil;
-        self.diagnostics.append(self.gpa, .{
-            .code = "EVL003",
-            .message = msg,
-            .span = .{
-                .path = self.path,
-                .line = loc.line,
-                .column = loc.column,
-                .length = id.span.end - id.span.start,
-            },
-            .help = "declare the name with `let` or import it before this use",
-            .fix_safety = .@"requires-human-review",
-            .repair = .{
-                .id = "bind-or-import-name",
-                .summary = "Add a `let` or `use` that introduces this name into the current scope.",
-            },
-        }) catch {};
-        return .nil;
+        // Unresolved bare ident: promote to a zero-arg `Constructed`
+        // staging value. Without module manifests we can't tell a real
+        // typo from a name brought in by `use std.foo.*;`, so the
+        // interpreter defers that judgement to `cmo check` (NAM003).
+        // EVL003 stays reserved in the explain table for when modules
+        // land and we can tell the two apart.
+        _ = self;
+        return .{ .constructed = .{ .name = id.name, .fields = &.{} } };
     }
 
     fn evalLiteral(self: *Evaluator, lit: ast.Literal, scope: *Scope) EvalError!Value {
@@ -330,37 +497,36 @@ pub const Evaluator = struct {
         return switch (c) {
             .hex => |h| .{ .color = .{ .hex = .{ .digits = h.digits } } },
             .oklch => |v| .{ .color = .{ .oklch = .{
-                .l = try self.evalNumberArg(v.l.*, scope, "oklch.l"),
-                .c = try self.evalNumberArg(v.c.*, scope, "oklch.c"),
-                .h = try self.evalNumberArg(v.h.*, scope, "oklch.h"),
+                .l = try self.evalToBoxedValue(v.l.*, scope),
+                .c = try self.evalToBoxedValue(v.c.*, scope),
+                .h = try self.evalToBoxedValue(v.h.*, scope),
             } } },
             .oklab => |v| .{ .color = .{ .oklab = .{
-                .l = try self.evalNumberArg(v.l.*, scope, "oklab.l"),
-                .a = try self.evalNumberArg(v.a.*, scope, "oklab.a"),
-                .b = try self.evalNumberArg(v.b.*, scope, "oklab.b"),
+                .l = try self.evalToBoxedValue(v.l.*, scope),
+                .a = try self.evalToBoxedValue(v.a.*, scope),
+                .b = try self.evalToBoxedValue(v.b.*, scope),
             } } },
             .srgb => |v| .{ .color = .{ .srgb = .{
-                .r = try self.evalNumberArg(v.r.*, scope, "srgb.r"),
-                .g = try self.evalNumberArg(v.g.*, scope, "srgb.g"),
-                .b = try self.evalNumberArg(v.b.*, scope, "srgb.b"),
+                .r = try self.evalToBoxedValue(v.r.*, scope),
+                .g = try self.evalToBoxedValue(v.g.*, scope),
+                .b = try self.evalToBoxedValue(v.b.*, scope),
             } } },
         };
     }
 
-    fn evalNumberArg(
+    /// Evaluate `expr` in `scope` and store the resulting `Value` in the
+    /// arena, returning a pointer to it. Used for value positions that
+    /// the AST models with `*const Expr` and that we need to expose as
+    /// `*const Value` on the runtime side (e.g. color components).
+    fn evalToBoxedValue(
         self: *Evaluator,
         expr: ast.Expr,
         scope: *Scope,
-        what: []const u8,
-    ) EvalError!value.Number {
+    ) EvalError!*const Value {
         const v = try self.evalExpr(expr, scope);
-        return switch (v) {
-            .number => |n| n,
-            else => blk: {
-                try self.typeError(expr.span(), what, "number", v);
-                break :blk .{ .value = 0, .unit = null };
-            },
-        };
+        const slot = try self.arena.create(Value);
+        slot.* = v;
+        return slot;
     }
 
     fn evalUnary(self: *Evaluator, u: ast.Unary, scope: *Scope) EvalError!Value {
@@ -569,6 +735,32 @@ pub const Evaluator = struct {
         });
     }
 
+    fn notCallable(self: *Evaluator, span: ast.Span, callee: Value) EvalError!void {
+        const loc = span.location(self.source);
+        const tag = @tagName(@as(std.meta.Tag(Value), callee));
+        const msg = try std.fmt.allocPrint(
+            self.arena,
+            "value of kind '{s}' is not callable",
+            .{tag},
+        );
+        try self.diagnostics.append(self.gpa, .{
+            .code = "EVL002",
+            .message = msg,
+            .span = .{
+                .path = self.path,
+                .line = loc.line,
+                .column = loc.column,
+                .length = span.end - span.start,
+            },
+            .help = "the v0 interpreter has no callable Value type; only syntactic name paths (e.g. `rect(...)`, `text.glyph(...)`) become staged constructor records",
+            .fix_safety = .@"requires-human-review",
+            .repair = .{
+                .id = "use-named-constructor",
+                .summary = "Replace the call with a named constructor, or wait for closure support in a later commit.",
+            },
+        });
+    }
+
     fn noMatchingArm(self: *Evaluator, span: ast.Span, subject: Value) EvalError!void {
         const loc = span.location(self.source);
         const tag = @tagName(@as(std.meta.Tag(Value), subject));
@@ -682,6 +874,11 @@ fn boolOrError(
             break :blk null;
         },
     };
+}
+
+fn allParamsHaveDefaults(params: []const ast.Param) bool {
+    for (params) |p| if (p.default == null) return false;
+    return true;
 }
 
 fn unitsMatch(a: ?ast.Unit, b: ?ast.Unit) bool {
@@ -819,13 +1016,14 @@ test "eval: ident lookup across let bindings" {
     try std.testing.expectEqual(@as(f64, 15), r.program.bindings[1].value.number.value);
 }
 
-test "eval: unresolved ident emits EVL003" {
-    var r = try evalSource("let x = nope;");
+test "eval: unresolved ident becomes a staging Constructed value" {
+    var r = try evalSource("let x = forever;");
     defer r.arena.deinit();
     defer std.testing.allocator.free(r.diagnostics);
 
-    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
-    try std.testing.expectEqualStrings("EVL003", r.diagnostics[0].code);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqualStrings("forever", r.program.bindings[0].value.constructed.name);
+    try std.testing.expectEqual(@as(usize, 0), r.program.bindings[0].value.constructed.fields.len);
 }
 
 test "eval: color literal — hex preserved verbatim" {
@@ -844,9 +1042,9 @@ test "eval: color literal — oklch evaluates its components" {
 
     try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
     const c = r.program.bindings[0].value.color.oklch;
-    try std.testing.expectApproxEqAbs(@as(f64, 0.10), c.l.value, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.04), c.c.value, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 280), c.h.value, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.10), c.l.number.value, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.04), c.c.number.value, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 280), c.h.number.value, 1e-9);
 }
 
 test "eval: block-with-let introduces a local scope" {
@@ -874,13 +1072,180 @@ test "eval: comparison + boolean logic" {
     try std.testing.expectEqual(true, r.program.bindings[0].value.@"bool");
 }
 
-test "eval: function call emits EVL001 (not yet supported)" {
-    var r = try evalSource("let f = rect(width: 100px);");
+test "eval: bare call becomes a staged Constructed value" {
+    var r = try evalSource("let r = rect(width: 100px, height: 50px);");
     defer r.arena.deinit();
     defer std.testing.allocator.free(r.diagnostics);
 
-    try std.testing.expect(r.diagnostics.len >= 1);
-    try std.testing.expectEqualStrings("EVL001", r.diagnostics[0].code);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    const c = r.program.bindings[0].value.constructed;
+    try std.testing.expectEqualStrings("rect", c.name);
+    try std.testing.expectEqual(@as(usize, 2), c.fields.len);
+    try std.testing.expectEqualStrings("width", c.fields[0].name);
+    try std.testing.expectEqual(ast.Unit.px, c.fields[0].value.number.unit.?);
+}
+
+test "eval: namespace path becomes a dotted constructor name" {
+    var r = try evalSource("let g = text.glyph(\"C\");");
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqualStrings("text.glyph", r.program.bindings[0].value.constructed.name);
+}
+
+test "eval: method chain stacks Constructed values" {
+    var r = try evalSource(
+        \\let glyph = extrude("C").material(fill: #ff0000).rotate(y: 90deg);
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    const outer = r.program.bindings[0].value.constructed;
+    try std.testing.expectEqualStrings("rotate", outer.name);
+    // First field is the implicit positional receiver — itself a
+    // Constructed("material", ...) wrapping Constructed("extrude", ...).
+    const material = outer.fields[0].value.constructed;
+    try std.testing.expectEqualStrings("material", material.name);
+    const extrude = material.fields[0].value.constructed;
+    try std.testing.expectEqualStrings("extrude", extrude.name);
+}
+
+test "eval: animate syntactic form becomes Constructed(\"animate\", ...)" {
+    var r = try evalSource(
+        \\let rot = animate { 0s => 0deg, 6s => 360deg } with { repeat: forever };
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    const c = r.program.bindings[0].value.constructed;
+    try std.testing.expectEqualStrings("animate", c.name);
+    try std.testing.expectEqualStrings("keyframes", c.fields[0].name);
+    try std.testing.expectEqual(@as(usize, 2), c.fields[0].value.array.elems.len);
+    try std.testing.expectEqualStrings("opts", c.fields[1].name);
+}
+
+test "eval: compose syntactic form becomes Constructed(\"compose\", layers)" {
+    var r = try evalSource(
+        \\let frame = compose [
+        \\  rect(width: 100px),
+        \\  rect(width: 200px),
+        \\];
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    const c = r.program.bindings[0].value.constructed;
+    try std.testing.expectEqualStrings("compose", c.name);
+    try std.testing.expectEqual(@as(usize, 2), c.fields[0].value.array.elems.len);
+}
+
+test "eval: calling a bound value emits EVL002 (not callable)" {
+    var r = try evalSource(
+        \\let n = 1;
+        \\let oops = n(2);
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
+    try std.testing.expectEqualStrings("EVL002", r.diagnostics[0].code);
+}
+
+test "eval: scene with all-default params is invoked at top level" {
+    var r = try evalSource(
+        \\scene title(duration: Duration = 6s) -> Frame {
+        \\  let bg = rect(width: 1920px, height: 1080px);
+        \\  compose [bg]
+        \\}
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), r.program.bindings.len);
+    try std.testing.expectEqualStrings("title", r.program.bindings[0].name);
+    try std.testing.expectEqualStrings("compose", r.program.bindings[0].value.constructed.name);
+}
+
+test "eval: scene with a required param is skipped" {
+    var r = try evalSource(
+        \\scene title(label: String) -> Frame {
+        \\  compose [rect(width: 100px)]
+        \\}
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 0), r.program.bindings.len);
+}
+
+test "eval: animated color component evaluates without complaint" {
+    var r = try evalSource(
+        \\let hue = animate { 0s => 280deg, 4s => 640deg };
+        \\let c = oklch(0.5, 0.2, hue);
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    const c = r.program.bindings[1].value.color.oklch;
+    try std.testing.expectEqualStrings("animate", c.h.constructed.name);
+}
+
+test "eval: taste sample from index.mdx evaluates to a Frame with no diagnostics" {
+    const taste =
+        \\use std.shapes.*;
+        \\use std.mesh3d.*;
+        \\use std.text;
+        \\use std.lighting.*;
+        \\use std.scene3d.*;
+        \\use std.anim.*;
+        \\
+        \\scene title(duration: Duration = 6s) -> Frame {
+        \\  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
+        \\
+        \\  let rot   = animate { 0s => 0deg,   6s => 360deg } with { repeat: forever };
+        \\  let hue   = animate { 0s => 280deg, 4s => 640deg } with { repeat: forever };
+        \\  let pulse = animate {
+        \\                0s    => 1.00,
+        \\                500ms => 1.06,
+        \\                1s    => 1.00,
+        \\              } with { easing: easing.out_cubic, repeat: forever };
+        \\
+        \\  let wobble = wave(amplitude: 8.6deg, period: 12s);
+        \\
+        \\  let glyph = extrude(text.glyph("C", font: "Inter Bold"), depth: 80px)
+        \\                .material(fill: oklch(0.78, 0.20, hue),
+        \\                          metalness: 0.25,
+        \\                          roughness: 0.35)
+        \\                .rotate(x: wobble, y: rot)
+        \\                .scale(pulse);
+        \\
+        \\  let lights = [
+        \\    ambient(0.35),
+        \\    directional(from: vec3(3, 4, 5),    intensity: 1.6),
+        \\    directional(from: vec3(-4, -2, -3), intensity: 0.9),
+        \\  ];
+        \\
+        \\  compose [
+        \\    bg,
+        \\    render3d(glyph, lights: lights),
+        \\  ]
+        \\}
+    ;
+    var r = try evalSource(taste);
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), r.program.bindings.len);
+    try std.testing.expectEqualStrings("title", r.program.bindings[0].name);
+    try std.testing.expectEqualStrings("compose", r.program.bindings[0].value.constructed.name);
 }
 
 test "eval: array literal" {
