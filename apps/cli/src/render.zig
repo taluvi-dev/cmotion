@@ -127,6 +127,8 @@ fn paintValue(v: value.Value, fb: *Framebuffer, off: Offset, style: Style) void 
                 paintRect(c, fb, off, style);
             } else if (std.mem.eql(u8, c.name, "translate")) {
                 paintTranslate(c, fb, off, style);
+            } else if (std.mem.eql(u8, c.name, "text.glyph")) {
+                paintTextGlyph(c, fb, off, style);
             } else if (isFlatFallback(c.name)) {
                 paintWrapper(c, fb, off, style);
             }
@@ -151,6 +153,70 @@ fn isFlatFallback(name: []const u8) bool {
         or std.mem.eql(u8, name, "material")
         or std.mem.eql(u8, name, "rotate")
         or std.mem.eql(u8, name, "scale");
+}
+
+/// `text.glyph(string, font?, size?)` — low-fi block-letter renderer.
+/// Each character is a 5×7 bit grid scaled to roughly `size` pixels
+/// tall (default 96px); the bitmap font covers uppercase A–Z, digits,
+/// space, `.,:-!?` and a placeholder box for anything else. The
+/// `font:` arg is read but unused (the renderer ships exactly one
+/// font); real TTF rasterization is a later slice.
+fn paintTextGlyph(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) void {
+    var text_raw: []const u8 = "";
+    var size_px: f64 = 96;
+    for (c.fields) |f| {
+        if (f.name.len == 0) {
+            if (text_raw.len == 0 and f.value == .string) text_raw = f.value.string;
+        } else if (std.mem.eql(u8, f.name, "size")) {
+            if (numberAsPixels(f.value)) |s| size_px = s;
+        }
+    }
+    const text = stripQuotes(text_raw);
+    if (text.len == 0) return;
+
+    // The bitmap font is 5×7; pick an integer pixel size for each cell
+    // so straight strokes stay crisp. A cell of 0 collapses the glyph
+    // entirely — clamp to at least 1.
+    const cell_i: i64 = @max(1, @as(i64, @intFromFloat(@round(size_px / 7))));
+    const cell: f64 = @floatFromInt(cell_i);
+    const glyph_w = 5 * cell;
+    const glyph_h = 7 * cell;
+    const advance = 6 * cell; // one-cell gap between glyphs
+    const total_w: f64 = if (text.len == 0)
+        0
+    else
+        advance * @as(f64, @floatFromInt(text.len - 1)) + glyph_w;
+
+    const cx = @as(f64, @floatFromInt(fb.width)) / 2.0 + off.x;
+    const cy = @as(f64, @floatFromInt(fb.height)) / 2.0 + off.y;
+    var origin_x = cx - total_w / 2.0;
+    const origin_y = cy - glyph_h / 2.0;
+
+    // `text.glyph` doesn't take its own fill; pick up the inherited
+    // material colour (or white if none).
+    const rgba: [4]u8 = if (style.fill) |fv| valueToRgba(fv) else .{ 255, 255, 255, 255 };
+
+    for (text) |ch| {
+        const bits = lookupGlyph(ch);
+        var row: u3 = 0;
+        while (row < 7) : (row += 1) {
+            var col: u3 = 0;
+            while (col < 5) : (col += 1) {
+                const set = (bits[row] >> (4 - col)) & 1 == 1;
+                if (set) {
+                    const px = origin_x + @as(f64, @floatFromInt(col)) * cell;
+                    const py = origin_y + @as(f64, @floatFromInt(row)) * cell;
+                    fillRect(fb, px, py, cell, cell, rgba);
+                }
+            }
+        }
+        origin_x += advance;
+    }
+}
+
+fn stripQuotes(s: []const u8) []const u8 {
+    if (s.len >= 2 and s[0] == '"' and s[s.len - 1] == '"') return s[1 .. s.len - 1];
+    return s;
 }
 
 fn paintCompose(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) void {
@@ -409,6 +475,71 @@ fn srgbEncode(linear: f64) u8 {
     else
         1.055 * std.math.pow(f64, x, 1.0 / 2.4) - 0.055;
     return @intFromFloat(@round(std.math.clamp(gamma, 0.0, 1.0) * 255.0));
+}
+
+// -------- bitmap font --------
+//
+// A 5-wide × 7-tall bitmap glyph for each supported character. Each
+// row is a u8 whose low five bits are the column pixels, MSB-leftmost
+// (bit 4 = leftmost pixel). The set covers what the taste sample and
+// most short labels need: uppercase A-Z, digits 0-9, space, and the
+// punctuation that shows up in marketing copy. Unknown characters
+// fall back to a filled box so the gap is visible rather than silent.
+//
+// This is the minimum viable text path. The real one is a TTF / OTF
+// rasteriser (see Plan.md priority 1.c → real fonts); this lets the
+// taste sample read as a glyph today without dragging in a font.
+
+const Glyph = [7]u8;
+
+fn lookupGlyph(c: u8) Glyph {
+    return switch (c) {
+        'A' => .{ 0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001 },
+        'B' => .{ 0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110 },
+        'C' => .{ 0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110 },
+        'D' => .{ 0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110 },
+        'E' => .{ 0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111 },
+        'F' => .{ 0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000 },
+        'G' => .{ 0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110 },
+        'H' => .{ 0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001 },
+        'I' => .{ 0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110 },
+        'J' => .{ 0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100 },
+        'K' => .{ 0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001 },
+        'L' => .{ 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111 },
+        'M' => .{ 0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001 },
+        'N' => .{ 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001 },
+        'O' => .{ 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110 },
+        'P' => .{ 0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000 },
+        'Q' => .{ 0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101 },
+        'R' => .{ 0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001 },
+        'S' => .{ 0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110 },
+        'T' => .{ 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100 },
+        'U' => .{ 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110 },
+        'V' => .{ 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100 },
+        'W' => .{ 0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010 },
+        'X' => .{ 0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001 },
+        'Y' => .{ 0b10001, 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100 },
+        'Z' => .{ 0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111 },
+        '0' => .{ 0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110 },
+        '1' => .{ 0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110 },
+        '2' => .{ 0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111 },
+        '3' => .{ 0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110 },
+        '4' => .{ 0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010 },
+        '5' => .{ 0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110 },
+        '6' => .{ 0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110 },
+        '7' => .{ 0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000 },
+        '8' => .{ 0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110 },
+        '9' => .{ 0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100 },
+        ' ' => .{ 0, 0, 0, 0, 0, 0, 0 },
+        '.' => .{ 0, 0, 0, 0, 0, 0b00110, 0b00110 },
+        ',' => .{ 0, 0, 0, 0, 0b00110, 0b00110, 0b00100 },
+        ':' => .{ 0, 0b00110, 0b00110, 0, 0b00110, 0b00110, 0 },
+        '-' => .{ 0, 0, 0, 0b11111, 0, 0, 0 },
+        '!' => .{ 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0, 0b00100 },
+        '?' => .{ 0b01110, 0b10001, 0b00010, 0b00100, 0b00100, 0, 0b00100 },
+        // Unknown: filled 5×7 box. Visible, makes the gap easy to spot.
+        else => .{ 0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111, 0b11111 },
+    };
 }
 
 /// Write the framebuffer as a PNG. RGBA8, no interlacing, stored
@@ -749,6 +880,87 @@ test "renderTree: an inner `fill:` beats the outer material `fill:`" {
     try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 0]);
     try std.testing.expectEqual(@as(u8, 255), fb.pixels[center + 1]);
     try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 2]);
+}
+
+test "renderTree: text.glyph(\"C\") paints non-empty pixels at canvas centre" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // 64×64 canvas, default 96px → cell ≈ 14px. The "C" bitmap's
+    // top-left bit is OFF (the curve), but the cell at (col 1, row 0)
+    // is ON. Easier: count non-zero pixels and expect more than zero.
+    const fields = try a.alloc(value.Field, 1);
+    fields[0] = .{ .name = "", .value = .{ .string = "\"C\"" } };
+    const tree: value.Value = .{ .constructed = .{ .name = "text.glyph", .fields = fields } };
+
+    const fb = try renderTree(a, tree, 128, 128);
+    var any: usize = 0;
+    var i: usize = 3;
+    while (i < fb.pixels.len) : (i += 4) {
+        if (fb.pixels[i] != 0) any += 1;
+    }
+    try std.testing.expect(any > 100);
+}
+
+test "renderTree: text.glyph honours `size:` to scale the bitmap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const small_fields = try a.alloc(value.Field, 2);
+    small_fields[0] = .{ .name = "", .value = .{ .string = "\"O\"" } };
+    small_fields[1] = .{ .name = "size", .value = .{ .number = .{ .value = 14, .unit = .px } } };
+    const small_tree: value.Value = .{ .constructed = .{ .name = "text.glyph", .fields = small_fields } };
+
+    const big_fields = try a.alloc(value.Field, 2);
+    big_fields[0] = .{ .name = "", .value = .{ .string = "\"O\"" } };
+    big_fields[1] = .{ .name = "size", .value = .{ .number = .{ .value = 70, .unit = .px } } };
+    const big_tree: value.Value = .{ .constructed = .{ .name = "text.glyph", .fields = big_fields } };
+
+    const small = try renderTree(a, small_tree, 128, 128);
+    const big = try renderTree(a, big_tree, 128, 128);
+
+    var small_count: usize = 0;
+    var big_count: usize = 0;
+    var i: usize = 3;
+    while (i < small.pixels.len) : (i += 4) {
+        if (small.pixels[i] != 0) small_count += 1;
+        if (big.pixels[i] != 0) big_count += 1;
+    }
+    try std.testing.expect(big_count > small_count * 4);
+}
+
+test "renderTree: text.glyph picks up the inherited material `fill:`" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // material(text.glyph("X"), fill: #00ff00) — the painted pixels
+    // should land in the green range.
+    const glyph_fields = try a.alloc(value.Field, 1);
+    glyph_fields[0] = .{ .name = "", .value = .{ .string = "\"X\"" } };
+    const glyph: value.Value = .{ .constructed = .{ .name = "text.glyph", .fields = glyph_fields } };
+
+    const mat_fields = try a.alloc(value.Field, 2);
+    mat_fields[0] = .{ .name = "", .value = glyph };
+    mat_fields[1] = .{ .name = "fill", .value = .{ .color = .{ .hex = .{ .digits = "00ff00" } } } };
+    const tree: value.Value = .{ .constructed = .{ .name = "material", .fields = mat_fields } };
+
+    const fb = try renderTree(a, tree, 128, 128);
+    // Find any painted pixel and check it's green, not white.
+    var i: usize = 3;
+    var found = false;
+    while (i < fb.pixels.len) : (i += 4) {
+        if (fb.pixels[i] != 0) {
+            try std.testing.expectEqual(@as(u8, 0), fb.pixels[i - 3]);
+            try std.testing.expectEqual(@as(u8, 255), fb.pixels[i - 2]);
+            try std.testing.expectEqual(@as(u8, 0), fb.pixels[i - 1]);
+            found = true;
+            break;
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "oklch: known sanity values land in plausible sRGB range" {
