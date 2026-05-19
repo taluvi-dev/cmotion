@@ -49,55 +49,219 @@ actually next, not the multi-year shape above.
 
 ## What just shipped on this branch (`claude/continue-plan-md-4Ms7e`)
 
-Six commits, all green (76/76 native tests + WASM-vs-native pixel
-parity). The renderer reads as the taste sample *structurally* but
-not yet *visually* — see "Why this isn't done yet" below.
+Fourteen commits, all green (91/91 native tests + WASM-vs-native
+pixel parity). **The visual-fidelity arc is done**: the taste
+sample on cmotion.org renders end-to-end through `cmo render` as
+a 3D-extruded, lit, rotating, wobbling, pulsing letter in the
+warm material colour, at the level of the example. The full
+alphabet extrudes correctly — letters with interior holes (B / D
+/ O / P / Q / R) bridge through the hole-bridging path in
+`mesh.zig`.
 
 ```
 .cm source → parse → lower → eval → sample(t) → render → png / wasm
                                                               │
-                                                              ├── native CLI (link in cmotion binary)
+                                                              ├── native CLI (cmotion binary, ~16 MB)
                                                               └── cmotion-render.wasm (18.7 KB, freestanding)
 ```
 
 Commits, in order:
 
-1. **Place shapes by canvas centre with `at:` and `translate(...)`.**
-   Centered-by-default convention; `rect(at: vec2(...))` shifts the
-   centre; `translate(shape, x:, y:)` (also the `.translate(...)`
-   method-chain form) wraps a child. (0,0) = canvas centre, +x right,
-   +y down. `fillRect` moved to f64 coords + internal clamping so
-   negative / off-canvas positions work.
-2. **Drop the 3D wrappers through to a flat fallback.** `render3d`,
-   `extrude`, `material`, `rotate`, `scale` are no-op wrappers in v0
-   that paint their first positional child flat. `Style` accumulator
-   propagates `material.fill:` to fill-less inner shapes; an inner
-   `fill:` still wins. **None of the 3D semantics are honoured today
-   — this is the gap we're filling next.**
-3. **Paint `text.glyph` as block-letter bitmap text.** 5×7 bitmap
-   font (A-Z, 0-9, basics) scaled to `size:` (default 96px). Picks up
-   the inherited material colour. Placeholder until real TTF lands.
-4. **Wire `oklab(...)` and `srgb(...)` colour literals.** Both routed
-   through the same Ottosson matrices oklch already uses; srgb reads
-   channels in 0..1.
-5. **Real deflate for PNG — Up filter + fixed-Huffman + LZ77.**
-   Taste-sample PNG dropped from 230 KB to 2.6 KB. Hand-rolled
-   because Zig 0.15.1's `std.compress.flate.Compress` is broken
-   (`bit_writer` field referenced but missing, `Container.writeFooter`
-   missing). Round-trip test through stdlib `Decompress` validates
-   the bit stream.
-6. **Build the renderer as WASM, prove byte-parity with native.**
-   Second compilation target via `zig build wasm` →
-   `cmotion-render.wasm` (~18.7 KB at ReleaseSmall, wasm32-freestanding,
-   no libc). `zig build test-parity` renders the same fixture both
-   ways under Node and asserts byte-equality across all 320×180×3
-   pixel channels. Session-start hook pre-builds the WASM artifact.
+1. **`at:` + `translate(...)` for shape positioning.** Centred-by-
+   default; (0,0) = canvas centre, +x right, +y down. `fillRect`
+   moved to f64 coords + internal clamping so off-canvas /
+   negative / fractional positions work cleanly.
+2. **3D wrappers → flat fallback.** Earlier no-op behaviour for
+   `render3d` / `extrude` / `material` / `rotate` / `scale` — kept
+   as the fallback when there's no `render3d` above; replaced as
+   the primary 3D path in commit 11.
+3. **Block-letter `text.glyph`.** 5×7 bitmap font as placeholder,
+   replaced by TTF outlines in commit 9.
+4. **`oklab(...)` / `srgb(...)` colour literals** wired through
+   the Ottosson matrices.
+5. **Real deflate for PNG** — Up filter + fixed-Huffman + LZ77.
+   230 KB → 2.6 KB for the taste sample. Hand-rolled because
+   Zig 0.15.1's `std.compress.flate.Compress` is broken
+   (`bit_writer`, `Container.writeFooter` reference removed
+   fields). Round-trip validated via stdlib `Decompress`.
+6. **WASM build target + byte-parity test.** `zig build wasm`
+   emits `cmotion-render.wasm` (~18.7 KB at ReleaseSmall,
+   wasm32-freestanding, no libc). `zig build test-parity` renders
+   the same fixture both ways under Node and asserts byte
+   equality across all 320×180×3 pixel channels. Session-start
+   hook pre-builds the WASM artifact.
+7. **Plan.md refocused** on visual fidelity, end-state stack
+   documented (Zig → SDL3 → Dawn/WebGPU → custom 2D renderer →
+   HarfBuzz → FreeType/stb_truetype).
+8. **Sampler completeness** — `easing.<curve>` actually applied
+   to the interpolation fraction (cubic / quad in/out/in_out),
+   `wave(amplitude, period)` resolved to `amplitude · sin(2π · t
+   / period)`. Animations now sample to the right numbers; the
+   renderer is free to consume them.
+9. **TTF font** via `stb_truetype` + DM Sans Bold (OFL 1.1,
+   vendored from googlefonts/dm-fonts). `font.zig` wraps stb's
+   FFI. The bundled font is `@embedFile`'d at compile time via
+   `addAnonymousImport` indirection.
+10. **3D primitives** — `Vec3`, `Mat4` (translation, scaling,
+    rotationX/Y/Z, right-handed perspective, mul, mulPoint,
+    mulDirection), `Mesh { positions, normals, indices }`,
+    ear-clipping triangulation, `extrudeOutline(outline, depth)`.
+11. **3D rasteriser** — `render3d.zig`. Pineda-style triangle
+    rasterisation, z-buffer, per-fragment Lambertian shading
+    against ambient + multiple directionals. `render.zig`
+    learns to dispatch `render3d(scene, lights:)` into the 3D
+    path; `paint3DTree` walks scene wrappers accumulating model
+    transform + style; `extrude` builds a centred mesh and
+    rasterises. Lights parsed from the value tree; angles read
+    with cmotion's `deg` / `rad` unit convention.
+12. **Material refinement** — `metalness` + `roughness` honoured
+    via a Blinn-Phong specular with a PBR-style F0 mix (dielectric
+    4% white vs metal-tinted albedo) and roughness-to-shininess
+    mapping `2^(11·(1−r)) + 2`. The taste sample's
+    `metalness: 0.25, roughness: 0.35` produce visible tinted
+    highlights on lit faces.
+13. **2× supersampling** for the 3D rasteriser. Allocates a 2×
+    hi-res framebuffer, nearest-up the current `fb` into it, runs
+    the rasteriser there, box-filter-downsamples back. Smooths
+    the jaggy silhouette edges; ~4× the rasteriser cost (still
+    well under 100 ms for the taste sample).
+14. **Hole bridging** — letters with interior holes (B / D / O /
+    P / Q / R) extrude through `earClipWithHoles` /
+    `extrudeContours`. Each hole's rightmost vertex bridges via
+    +x ray-cast to the closest outer edge; hole side walls invert
+    naturally from the CW-normalised winding.
 
-The WASM build only exports `render_taste(w, h, out)` against a
-hand-built scene today — the full `render_cm(source, t, w, h, out)`
-that takes `.cm` source is blocked on cross-compiling tree-sitter +
-the parser to WASM, and on a couple of POSIX shims. **That work is
-deferred** — see "Don't" below.
+## Where we are visually
+
+The taste sample renders structurally at the level of the
+cmotion.org example: 3D-extruded letter, lit-correctly-in-theory,
+rotating, wobbling, pulsing, with material colour shifted by the
+hue animation. The full alphabet extrudes cleanly including
+letters with interior holes.
+
+**But the result doesn't yet read as Three.js-level quality.** The
+visible gap, in order of impact:
+
+- **Sharp 90° edges between front face and side walls.** No
+  bevel. The letter reads as a flat plate cut from cardboard, not
+  a solid 3D object. Three.js TextGeometry defaults to a small
+  bevel for exactly this reason.
+- **Flat-shaded faces.** One normal per face means each face
+  appears as a single uniform colour — the two directional lights
+  shift overall brightness but produce no visible gradient
+  *across* a face. Smooth normals on curved side walls would
+  remove the faceted-curve artifact and let lighting actually
+  read.
+- **No real PBR.** Blinn-Phong with metalness/roughness produces
+  metals-vs-plastics distinction but lacks the "depth" of GGX +
+  Schlick Fresnel + environment-lit ambient. Three.js's
+  MeshStandardMaterial does all three.
+- **No tone mapping.** Direct linear → sRGB flattens highlights.
+  Three.js defaults to ACES Filmic since r147.
+- **No shadow casting / environment reflection.** Lower impact
+  for hero-letter scenes but visible difference on close
+  inspection.
+
+`cmo render --at 0s` shows the front face of the warm C;
+`--at 1.5s` is 90° y-rotation (edge-on, proves depth + rotation);
+`--at 3s` is 180° viewed-from-behind. Hue animation shifts the
+material colour across frames; `pulse` (with `easing.out_cubic`)
+and `wobble` (a sine `wave`) both register. Output ~5 KB PNG at
+320×180, ~90 KB at 1920×1080. ~80 ms per frame at default size
+with 2× supersampling, ~2.5 s at HD.
+
+What's *not* shipped yet, in order of likely-future-impact:
+
+- **Bevels on extrude edges.** Single biggest visual jump. Adds
+  a bevel-segment ring between front cap and side wall (with
+  smooth normals); same at the back. ~200 LOC.
+- **Smooth normals on curved side walls.** Each outline-segment
+  edge gets a normal averaged with its neighbours. ~30 LOC; gets
+  rid of the faceted-curve appearance.
+- **Real GGX + Fresnel + cheap IBL ambient.** Replaces the
+  Blinn-Phong specular with proper microfacet model; ambient
+  becomes a hemispheric gradient (sky-cool above, ground-warm
+  below) instead of a flat pedestal. ~150 LOC.
+- **Animation playback as a video.** `cmo render --at <t>`
+  produces one frame; there's no `cmo bounce --fps 60 --out
+  scene.mp4` yet. Frame loop is trivial; muxing PNG → MP4 needs
+  ffmpeg as an external process today, WebCodecs in the browser
+  later. Audio is a separate workstream.
+- **Browser editor / `/play` page.** The WASM artifact exists and
+  passes parity, but only exports `render_taste()` against a
+  hand-built scene. Full `render_cm(source, t, w, h, out)` is
+  blocked on tree-sitter cross-compiling to WASM (`lib.c` uses
+  `fdopen`, needs a stub or wasm32-wasi target).
+- **Real fonts beyond DM Sans Bold.** The bundled TTF is one
+  font hardcoded; no font selection from the `font:` arg.
+
+## What to pick up — next active arc
+
+Three quality-focused commits in order of visual impact, then the
+video / browser tracks:
+
+### 1. Bevels — geometric edge softening
+
+For each outline vertex, compute the inset position (moved inward
+by `bevel_radius` along the angle bisector). Between the inset
+and the original outline, generate `bevel_segments` rings whose z
+slopes from `+half` (front cap) to `+half − bevel_radius` (where
+the side wall begins). Normals interpolate from +z to the wall
+outward direction. Same at the back. Front / back caps now
+triangulate the *inset* polygon, not the original.
+
+Default bevel: 6 % of depth, 4 segments. Configurable via
+`extrude(..., bevel: <px>, bevel_segments: N)` once we extend the
+stdlib spec. Toggle off via `bevel: 0px` for the old sharp look.
+
+### 2. Smooth normals on curved side walls
+
+Per side-wall vertex, store the average of the current outline
+edge's normal and its neighbour's normal. Tiny algorithmic
+change in `extrudeContours`; no new data structures. Curved
+letters' side walls go from faceted to smooth.
+
+### 3. Real GGX + hemispheric ambient
+
+Replace the Blinn-Phong specular term with the GGX/Trowbridge-
+Reitz normal distribution + Smith geometric attenuation +
+Schlick Fresnel. Replace the flat ambient pedestal with a
+two-colour hemispheric gradient (sky-colour from +y, ground-
+colour from −y) — cheap IBL approximation that doesn't need an
+HDR environment map.
+
+### 4. Video bounce (deferred)
+
+After the quality work lands. `cmo bounce --fps 60 --out
+scene.mp4 src/scene.cm`: wraps the existing
+sample-and-render loop, writes PNG sequence to a tmp dir, shells
+to ffmpeg for muxing. `--frames-dir` for the PNG-only path.
+Audio mux via `--audio scene.wav` deferred until `std.audio`
+lands.
+
+### 5. Browser editor (further deferred)
+
+Cross-compile tree-sitter to WASM, expose `render_cm(source, t,
+w, h, out)`, wire `/play` page in `apps/web`. ~600 LOC + build
+gymnastics. The motion-graphics editor surface the user has
+named as the primary product target.
+
+## What's deferred
+
+Same list as before, lightly trimmed:
+
+- **AI-assisted editing UX** — explicitly out of scope.
+- **WebGPU realtime preview / SDL3 / Dawn** — optional separate
+  track. No urgency since the browser editor will use its own
+  WebGPU when that lands.
+- **Audio runtime (`std.audio`)** — separate workstream; bounce
+  can accept an externally-provided audio file as v0.
+- **Letters with hole-bridge edge cases** — current bridging is
+  rightmost-x ray-cast, no full visibility test. Most glyphs
+  work; if a marketing scene with stacked holes (like several
+  zeroes) shows artefacts, add proper visibility.
+- **MSAA** (per-fragment coverage masks) — same quality as 2×
+  supersampling at half the cost. Optional polish.
 
 ## Why this isn't done yet — the visual gap
 
