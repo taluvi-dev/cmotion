@@ -11,9 +11,26 @@ This repository is a **monorepo** managed with [pnpm workspaces](https://pnpm.io
 ```
 cmotion/
 ├── apps/
-│   └── web/          # cmotion.org — Astro site
-└── packages/         # shared libraries (future)
+│   ├── web/          # cmotion.org — Astro site
+│   └── cli/          # the `cmotion` toolchain, in Zig
+└── packages/
+    └── tree-sitter-cmotion/   # grammar that backs `cmo parse`
 ```
+
+## CLI
+
+The toolchain binary is `cmotion`. The installer also creates a short `cmo`
+alias when that name is free on your `PATH`, so day-to-day commands look
+like:
+
+```sh
+cmo parse src/main.cm
+cmo --json check src/main.cm
+cmo explain CLI001
+```
+
+See `apps/cli/README.md` for build and install instructions, and for the
+diagnostic packet shape (modeled on Vercel Zero's `--json` contract).
 
 ## Getting started
 
@@ -49,7 +66,7 @@ one starts.
       determinism partition of stdlib. Lives as a separate document, not in
       BNF.
 - [ ] **3. Minimal stdlib** — `rect`, `image`, `mesh3d`, `compose`, `animate`,
-      `oklch`, `transport`, audio analyzers.
+      `oklch`, `vec2`, `vec3`, `transport`, audio analyzers.
 - [ ] **4. Reference interpreter in Rust** — walks the AST directly, no
       codegen. Lets us exercise the type system and stdlib without committing
       to WASM yet.

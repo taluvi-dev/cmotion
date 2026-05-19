@@ -9,7 +9,7 @@ The language and toolchain are being built in stages, from the parser up to real
 
 1. **Tree-sitter grammar** — parser, syntax highlighting, AST. *In progress.*
 2. **Type system spec** — units, asset types, function types, and the determinism partition of stdlib. Lives as a separate document, not in BNF.
-3. **Minimal stdlib** — `rect`, `image`, `mesh3d`, `compose`, `animate`, `oklch`, `transport`, audio analyzers.
+3. **Minimal stdlib** — `rect`, `image`, `mesh3d`, `compose`, `animate`, `oklch`, `vec2`, `vec3`, `transport`, audio analyzers.
 4. **Reference interpreter** — walks the AST directly, no codegen. Exercises the type system and stdlib without committing to WASM yet.
 5. **WASM component codegen** — once the language and stdlib are stable, this is mostly mechanical.
 6. **CanvasKit backend** — deterministic offline render.
