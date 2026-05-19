@@ -39,7 +39,7 @@ how much trust to extend to the repair:
 | `LWR*` | CST → AST lowering | implemented |
 | `NAM*` | Name resolution | implemented |
 | `TYP*` | Type checker | partial (TYP002 only) |
-| `UNT*` | Unit checker | partial (UNT001 only) |
+| `UNT*` | Unit checker | partial (UNT001, UNT002) |
 | `TIM*` | Timeline (negative duration, out-of-range keyframe) | reserved |
 | `ANM*` | Animate / keyframe rules | reserved |
 | `COL*` | Color space | reserved |
@@ -255,10 +255,39 @@ let count: Number  = 5ms        // UNT001: Number expects unitless, got 5ms (Tim
 let timeout: Duration = 500ms   // OK
 ```
 
-Silent when the literal has no unit at all (`let x: Duration = 42`) —
-that case is a future `UNT002` (missing required unit).
+If the literal has **no unit at all** (`let x: Duration = 42`), see
+`UNT002` below.
 
 - **Repair:** `align-unit-with-type`.
+- **Fix safety:** `local-edit`.
+
+### `UNT002` — Missing required unit
+
+An annotated number-family `let`, `param`, or `export` was assigned a
+unitless number literal where a unit is required (the annotation pins
+a non-`Number` unit category). The diagnostic's `repair.summary` names
+the canonical unit for the category so an agent can fix it in one edit:
+
+```cm
+let timeout: Duration = 42     // UNT002: requires a Time unit (suggested: '42s')
+let angle: Angle = 90          // UNT002: requires an Angle unit (suggested: '90deg')
+let count: Number = 42         // OK — Number requires an unmarked literal
+```
+
+Canonical units used in the suggestion:
+
+| Annotation category | Suggested unit |
+|---|---|
+| `Duration` / `Time` | `s` |
+| `Angle` | `deg` |
+| `Length` / `Pixels` | `px` |
+| `Percent` | `%` |
+| `Frequency` | `hz` |
+| `Tempo` | `bpm` |
+| `Bars` | `bars` |
+| `Beats` | `beats` |
+
+- **Repair:** `add-required-unit`.
 - **Fix safety:** `local-edit`.
 
 ---

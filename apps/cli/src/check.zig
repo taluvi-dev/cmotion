@@ -17,8 +17,12 @@
 //!   - UNT001: unit-category mismatch within the number family. Fires
 //!     when both sides are number-side AND the annotation pins a unit
 //!     category (Duration -> time, Angle -> angle, ...) AND the literal
-//!     carries a unit whose category doesn't match. Silent when the
-//!     literal is unitless (that's a future UNT002).
+//!     carries a unit whose category doesn't match.
+//!   - UNT002: missing required unit. Fires when the annotation pins a
+//!     non-`.none` unit category AND the literal has no unit suffix
+//!     at all (`let timeout: Duration = 42`). The repair names the
+//!     canonical unit for the category so an agent can fix it in one
+//!     edit (`42` -> `42s` for Duration).
 //!
 //! Out of scope (for now): unit-category matching (UNT* codes), generic
 //! types, function types, real inference, forward-reference rules in
@@ -166,6 +170,22 @@ fn unitName(u: ast.Unit) []const u8 {
         .px => "px",
         .percent => "%",
         .bpm => "bpm",
+        .bars => "bars",
+        .beats => "beats",
+    };
+}
+
+/// Canonical unit per category, used to suggest a concrete repair for
+/// UNT002. Pick the one a working designer reaches for first.
+fn defaultUnitFor(c: UnitCategory) ?[]const u8 {
+    return switch (c) {
+        .none => null,
+        .time => "s",
+        .angle => "deg",
+        .length => "px",
+        .percent => "%",
+        .frequency => "hz",
+        .tempo => "bpm",
         .bars => "bars",
         .beats => "beats",
     };
@@ -351,10 +371,28 @@ pub const Checker = struct {
 
     fn checkUnitAnnotation(self: *Checker, simple: ast.SimpleType, number: ast.NumberLit) !void {
         const expected_unit = nameToUnitCategory(simple.name.name) orelse return;
-        const lit_unit = number.unit orelse return; // unitless literal: defer to UNT002
-        const actual_unit = unitCategory(lit_unit);
-        if (actual_unit == expected_unit) return;
 
+        if (number.unit) |lit_unit| {
+            const actual_unit = unitCategory(lit_unit);
+            if (actual_unit == expected_unit) return;
+            try self.emitUnt001(simple, number, lit_unit, actual_unit, expected_unit);
+            return;
+        }
+
+        // Unitless literal. OK when the annotation also expects unitless
+        // (Number / Int / Float); otherwise it's UNT002.
+        if (expected_unit == .none) return;
+        try self.emitUnt002(simple, number, expected_unit);
+    }
+
+    fn emitUnt001(
+        self: *Checker,
+        simple: ast.SimpleType,
+        number: ast.NumberLit,
+        lit_unit: ast.Unit,
+        actual_unit: UnitCategory,
+        expected_unit: UnitCategory,
+    ) !void {
         const loc = number.span.location(self.source);
         try self.diagnostics.append(self.allocator, .{
             .code = "UNT001",
@@ -388,6 +426,50 @@ pub const Checker = struct {
             .repair = .{
                 .id = "align-unit-with-type",
                 .summary = "Use a literal whose unit lives in the annotated category.",
+            },
+        });
+    }
+
+    fn emitUnt002(
+        self: *Checker,
+        simple: ast.SimpleType,
+        number: ast.NumberLit,
+        expected_unit: UnitCategory,
+    ) !void {
+        const loc = number.span.location(self.source);
+        const canonical = defaultUnitFor(expected_unit) orelse "<unit>";
+        try self.diagnostics.append(self.allocator, .{
+            .code = "UNT002",
+            .message = try std.fmt.allocPrint(
+                self.allocator,
+                "missing unit: '{s}' requires a {s} unit (e.g. '{s}{s}')",
+                .{ simple.name.name, unitCategoryName(expected_unit), number.text, canonical },
+            ),
+            .span = .{
+                .path = self.path,
+                .line = loc.line,
+                .column = loc.column,
+                .length = number.span.end - number.span.start,
+            },
+            .expected = try std.fmt.allocPrint(
+                self.allocator,
+                "a {s} literal (annotated as {s})",
+                .{ unitCategoryName(expected_unit), simple.name.name },
+            ),
+            .actual = "a unitless literal",
+            .help = try std.fmt.allocPrint(
+                self.allocator,
+                "add a unit suffix from the {s} category (suggested: '{s}')",
+                .{ unitCategoryName(expected_unit), canonical },
+            ),
+            .fix_safety = .@"local-edit",
+            .repair = .{
+                .id = "add-required-unit",
+                .summary = try std.fmt.allocPrint(
+                    self.allocator,
+                    "Append a unit suffix from the {s} category (suggested: '{s}{s}').",
+                    .{ unitCategoryName(expected_unit), number.text, canonical },
+                ),
             },
         });
     }

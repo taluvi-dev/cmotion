@@ -175,8 +175,33 @@ const entries = [_]Entry{
         \\Duration expects a Time-category literal (s/ms/us/ns), and
         \\`6deg` is in the Angle category.
         \\
-        \\Silent when the literal has no unit at all (`let x: Duration =
-        \\42`) — that's a future UNT002 (missing required unit).
+        \\If the literal has NO unit at all (`let x: Duration = 42`),
+        \\see UNT002 (missing required unit) instead.
+        ,
+    },
+    .{
+        .code = "UNT002",
+        .title = "Missing required unit",
+        .body =
+        \\An annotated number-family `let`, `param`, or `export` was
+        \\assigned a unitless number literal where a unit is required.
+        \\The repair summary names the canonical unit for the annotated
+        \\category so an agent can fix it in one edit (`42` -> `42s` for
+        \\Duration, `42` -> `42deg` for Angle, and so on).
+        \\
+        \\Canonical units (also used in the repair suggestion):
+        \\
+        \\  Duration / Time   -> 's'
+        \\  Angle             -> 'deg'
+        \\  Length / Pixels   -> 'px'
+        \\  Percent           -> '%'
+        \\  Frequency         -> 'hz'
+        \\  Tempo             -> 'bpm'
+        \\  Bars              -> 'bars'
+        \\  Beats             -> 'beats'
+        \\
+        \\Silent for `Number` / `Int` / `Float` annotations, which
+        \\actually require an unmarked literal.
         ,
     },
 };
