@@ -69,6 +69,124 @@ pub const Mesh = struct {
     indices: []const u32,
 };
 
+/// 4×4 matrix, row-major. Stored as a flat array of 16 floats so the
+/// rasteriser can `@memcpy` it onto a uniform without reshuffling.
+/// Access via `at(row, col)`.
+pub const Mat4 = struct {
+    m: [16]f32,
+
+    pub fn at(self: Mat4, row: usize, col: usize) f32 {
+        return self.m[row * 4 + col];
+    }
+
+    pub fn identity() Mat4 {
+        var r: Mat4 = .{ .m = @splat(0) };
+        r.m[0] = 1;
+        r.m[5] = 1;
+        r.m[10] = 1;
+        r.m[15] = 1;
+        return r;
+    }
+
+    pub fn translation(x: f32, y: f32, z: f32) Mat4 {
+        var r = identity();
+        r.m[3] = x;
+        r.m[7] = y;
+        r.m[11] = z;
+        return r;
+    }
+
+    pub fn scaling(sx: f32, sy: f32, sz: f32) Mat4 {
+        var r: Mat4 = .{ .m = @splat(0) };
+        r.m[0] = sx;
+        r.m[5] = sy;
+        r.m[10] = sz;
+        r.m[15] = 1;
+        return r;
+    }
+
+    pub fn rotationX(angle_rad: f32) Mat4 {
+        const c_ = @cos(angle_rad);
+        const s_ = @sin(angle_rad);
+        var r = identity();
+        r.m[5] = c_;
+        r.m[6] = -s_;
+        r.m[9] = s_;
+        r.m[10] = c_;
+        return r;
+    }
+
+    pub fn rotationY(angle_rad: f32) Mat4 {
+        const c_ = @cos(angle_rad);
+        const s_ = @sin(angle_rad);
+        var r = identity();
+        r.m[0] = c_;
+        r.m[2] = s_;
+        r.m[8] = -s_;
+        r.m[10] = c_;
+        return r;
+    }
+
+    pub fn rotationZ(angle_rad: f32) Mat4 {
+        const c_ = @cos(angle_rad);
+        const s_ = @sin(angle_rad);
+        var r = identity();
+        r.m[0] = c_;
+        r.m[1] = -s_;
+        r.m[4] = s_;
+        r.m[5] = c_;
+        return r;
+    }
+
+    /// Right-handed perspective projection. fov is in radians.
+    pub fn perspective(fov_rad: f32, aspect: f32, near: f32, far: f32) Mat4 {
+        const f = 1.0 / @tan(fov_rad * 0.5);
+        var r: Mat4 = .{ .m = @splat(0) };
+        r.m[0] = f / aspect;
+        r.m[5] = f;
+        r.m[10] = (far + near) / (near - far);
+        r.m[11] = (2.0 * far * near) / (near - far);
+        r.m[14] = -1;
+        return r;
+    }
+
+    pub fn mul(a: Mat4, b: Mat4) Mat4 {
+        var r: Mat4 = .{ .m = @splat(0) };
+        inline for (0..4) |i| {
+            inline for (0..4) |j| {
+                var sum: f32 = 0;
+                inline for (0..4) |k| sum += a.m[i * 4 + k] * b.m[k * 4 + j];
+                r.m[i * 4 + j] = sum;
+            }
+        }
+        return r;
+    }
+
+    /// Transform a 3D point with implicit w=1. Returns the (x/w, y/w,
+    /// z/w) after the perspective divide; callers needing the w
+    /// component (e.g. for clip-space culling) use `mulVec4`.
+    pub fn mulPoint(self: Mat4, p: Vec3) Vec3 {
+        const x = self.m[0] * p.x + self.m[1] * p.y + self.m[2] * p.z + self.m[3];
+        const y = self.m[4] * p.x + self.m[5] * p.y + self.m[6] * p.z + self.m[7];
+        const z = self.m[8] * p.x + self.m[9] * p.y + self.m[10] * p.z + self.m[11];
+        const w = self.m[12] * p.x + self.m[13] * p.y + self.m[14] * p.z + self.m[15];
+        if (w == 0) return .{ .x = x, .y = y, .z = z };
+        return .{ .x = x / w, .y = y / w, .z = z / w };
+    }
+
+    /// Transform a 3D direction (no translation, w=0). Used for
+    /// normals — assumes the transform is rigid (rotation + uniform
+    /// scale at most); non-uniform scale would need the inverse-
+    /// transpose path, which we don't take in v0.
+    pub fn mulDirection(self: Mat4, v: Vec3) Vec3 {
+        return .{
+            .x = self.m[0] * v.x + self.m[1] * v.y + self.m[2] * v.z,
+            .y = self.m[4] * v.x + self.m[5] * v.y + self.m[6] * v.z,
+            .z = self.m[8] * v.x + self.m[9] * v.y + self.m[10] * v.z,
+        };
+    }
+};
+
 /// Triangulate a simple polygon by ear-clipping. Input must be a
 /// single closed contour (no holes) wound counter-clockwise (CCW)
 /// when viewed from +z; a CW-wound contour gets reversed
@@ -284,7 +402,12 @@ pub fn extrudeGlyph(
     if (contours.len == 0) return null;
     // For now, extrude only the outer contour. Letters with holes
     // (B, D, O, P, Q, R) will render filled until hole bridging lands.
-    return try extrudeOutline(arena, contours[0], depth);
+    // Convert from font.Vec2 to mesh.Vec2 — they're the same shape
+    // but distinct types so neither module has to depend on the other.
+    const fc = contours[0];
+    const outline = try arena.alloc(Vec2, fc.len);
+    for (fc, 0..) |p, i| outline[i] = .{ .x = p.x, .y = p.y };
+    return try extrudeOutline(arena, outline, depth);
 }
 
 //
