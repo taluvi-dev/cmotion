@@ -170,6 +170,17 @@ scene title(duration: Duration = 6s) -> Frame {
       const scrub = document.getElementById("scrub") as HTMLInputElement;
       const tVal = document.getElementById("tval") as HTMLElement;
 
+      // Deep link: /play/#source=<urlencoded .cm source> preloads the editor
+      // with that source. Used by the "Edit it →" link on the homepage.
+      function preloadFromHash() {
+        const hash = location.hash.startsWith("#") ? location.hash.slice(1) : "";
+        if (!hash) return;
+        const params = new URLSearchParams(hash);
+        const src = params.get("source");
+        if (src) srcEl.value = src;
+      }
+      preloadFromHash();
+
       function setStatus(msg: string, isErr = false) {
         statusEl.textContent = msg;
         statusEl.classList.toggle("err", isErr);
