@@ -207,6 +207,7 @@ re-run.
 | `UNT*` | Unit checker (`ms` vs `bpm` vs `px` etc.) | live |
 | `FMT*` | Formatter | live |
 | `EVL*` | Reference interpreter (stage 4) | live (v0) |
+| `REN*` | Software renderer | live (v0) |
 | `TIM*` | Timeline (negative duration, out-of-range keyframe) | reserved |
 | `ANM*` | Animate / keyframe rules | reserved |
 | `COL*` | Color space | reserved |
