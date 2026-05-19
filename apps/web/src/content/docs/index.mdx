@@ -1,0 +1,71 @@
+---
+title: cmotion
+description: A typed DSL for video, motion, and animation. Same source, deterministic offline render and realtime GPU preview.
+---
+
+import ScenePreview from '../../components/ScenePreview.astro';
+
+cmotion is a small, statically-typed programming language for video, motion graphics, and animation. The same source program renders identically as a deterministic offline frame sequence and as a realtime GPU preview.
+
+It is **infrastructure**, not a product — hosts embed it.
+
+## A taste
+
+```rust
+use std.shapes.*;
+use std.mesh3d.*;
+use std.text;
+use std.lighting.*;
+use std.scene3d.*;
+use std.anim.*;
+
+scene title(duration: 6s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
+
+  let rot   = animate { 0s => 0deg,   6s => 360deg } with { repeat: forever };
+  let hue   = animate { 0s => 280deg, 4s => 640deg } with { repeat: forever };
+  let pulse = animate {
+                0s    => 1.00,
+                500ms => 1.06,
+                1s    => 1.00,
+              } with { easing: easing.out_cubic, repeat: forever };
+
+  let wobble = wave(amplitude: 8.6deg, period: 12s);
+
+  let glyph = extrude(text.glyph("C", font: "Inter Bold"), depth: 80px)
+                .material(fill: oklch(0.78, 0.20, hue),
+                          metalness: 0.25,
+                          roughness: 0.35)
+                .rotate(x: wobble, y: rot)
+                .scale(pulse);
+
+  let lights = [
+    ambient(0.35),
+    directional(from: (3, 4, 5),    intensity: 1.6),
+    directional(from: (-4, -2, -3), intensity: 0.9),
+  ];
+
+  compose [
+    bg,
+    render3d(glyph, lights: lights),
+  ]
+}
+```
+
+<ScenePreview />
+
+A single program contains:
+
+- **Units across domains** (`1920px`, `6s`, `280deg`, `8.6deg`, `0.25`) — the type system enforces that a duration is a duration and a length is a length.
+- **Perceptual color** (`oklch(0.78, 0.20, hue)`) — animating only the hue gives a smooth color wheel with no muddy midpoints, because `oklch` / `oklab` / `srgb` are first-class color literals in the language.
+- **3D primitives** (`extrude(text.glyph("C"), depth: 80px)`) — `mesh3d` is part of the [stdlib](/language/stdlib/); 3D scenes project back to a 2D `Layer` via `render3d(...)` so they `compose` alongside 2D layers.
+- **Composition** (`compose [bg, render3d(...)]`) — layered, typed, declarative.
+- **Animation as values** — `animate { ... } with { repeat: forever }` for keyframes and `wave(amplitude:, period:)` for continuous motion. Multiple independent animations drive different properties of the same mesh (`x` and `y` rotation, `scale`, `hue`) and loop on their own periods.
+
+## What this site is
+
+This is the language and toolchain reference. It is being built in public, in stages — see the [Roadmap](/roadmap/). The [Grammar](/language/grammar/) is the first thing locked.
+
+## Status
+
+cmotion is **pre-release**. The grammar spec is at v0.2; no compiler exists yet. The first milestone is the tree-sitter parser.

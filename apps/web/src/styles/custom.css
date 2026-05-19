@@ -1,0 +1,98 @@
+/* cmotion site — white, black text, no color. cmajor.dev feel. */
+
+:root {
+	--sl-font:
+		ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+		Arial, sans-serif;
+	--sl-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco,
+		Consolas, "Liberation Mono", "Courier New", monospace;
+
+	/* Force light theme palette everywhere — pure black on pure white. */
+	--sl-color-white: #000;
+	--sl-color-gray-1: #111;
+	--sl-color-gray-2: #333;
+	--sl-color-gray-3: #555;
+	--sl-color-gray-4: #777;
+	--sl-color-gray-5: #aaa;
+	--sl-color-gray-6: #d8d8d8;
+	--sl-color-gray-7: #efefef;
+	--sl-color-black: #fff;
+
+	--sl-color-accent-low: #f4f4f4;
+	--sl-color-accent: #000;
+	--sl-color-accent-high: #000;
+
+	--sl-color-text: #000;
+	--sl-color-text-accent: #000;
+	--sl-color-text-invert: #fff;
+
+	--sl-color-bg: #fff;
+	--sl-color-bg-nav: #fff;
+	--sl-color-bg-sidebar: #fff;
+	--sl-color-bg-inline-code: #f4f4f4;
+	--sl-color-bg-accent: #000;
+
+	--sl-color-hairline-light: #ececec;
+	--sl-color-hairline: #e2e2e2;
+	--sl-color-hairline-shade: #d0d0d0;
+}
+
+/* Use the same palette in "dark" mode — site is white-only by design. */
+:root[data-theme='dark'] {
+	--sl-color-white: #000;
+	--sl-color-gray-1: #111;
+	--sl-color-gray-2: #333;
+	--sl-color-gray-3: #555;
+	--sl-color-gray-4: #777;
+	--sl-color-gray-5: #aaa;
+	--sl-color-gray-6: #d8d8d8;
+	--sl-color-gray-7: #efefef;
+	--sl-color-black: #fff;
+
+	--sl-color-accent-low: #f4f4f4;
+	--sl-color-accent: #000;
+	--sl-color-accent-high: #000;
+
+	--sl-color-text: #000;
+	--sl-color-text-accent: #000;
+	--sl-color-text-invert: #fff;
+
+	--sl-color-bg: #fff;
+	--sl-color-bg-nav: #fff;
+	--sl-color-bg-sidebar: #fff;
+	--sl-color-bg-inline-code: #f4f4f4;
+	--sl-color-bg-accent: #000;
+
+	--sl-color-hairline-light: #ececec;
+	--sl-color-hairline: #e2e2e2;
+	--sl-color-hairline-shade: #d0d0d0;
+}
+
+/* Tighten the look. */
+.site-title {
+	font-weight: 700;
+	letter-spacing: -0.01em;
+}
+
+main h1 {
+	font-weight: 700;
+	letter-spacing: -0.02em;
+}
+
+main h2,
+main h3 {
+	font-weight: 600;
+	letter-spacing: -0.01em;
+}
+
+/* Code blocks — keep them readable and quiet. */
+.expressive-code,
+pre {
+	border-radius: 4px;
+}
+
+/* Hide the theme toggle — single-mode site. */
+starlight-theme-select,
+:root .sl-flex.social-icons + starlight-theme-select {
+	display: none !important;
+}

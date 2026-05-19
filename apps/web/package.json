@@ -1,0 +1,22 @@
+{
+  "name": "@cmotion/web",
+  "type": "module",
+  "private": true,
+  "version": "0.0.0",
+  "description": "cmotion.org — site and docs for the cmotion DSL",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro",
+    "check": "astro check"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.39.2",
+    "@types/three": "^0.184.1",
+    "astro": "^6.3.1",
+    "sharp": "^0.34.5",
+    "three": "^0.184.0"
+  }
+}
