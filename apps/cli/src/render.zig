@@ -16,10 +16,17 @@
 //! Honoured:
 //!   - `compose [layers]` — paints layers back-to-front (later layers
 //!     on top), each onto the same canvas.
-//!   - `rect(width, height, fill)` — fills an axis-aligned rectangle
-//!     anchored at the canvas's top-left. Named args only; positional
-//!     are ignored. Lengths are taken in pixel units (a `1920px` rect
-//!     fills a 1920×1080 canvas exactly).
+//!   - `rect(width, height, fill, at?)` — fills an axis-aligned
+//!     rectangle. The rect is centered at the canvas center by default;
+//!     `at: vec2(x, y)` offsets that center in pixel units (positive x
+//!     right, positive y down). Lengths are taken in pixel units (a
+//!     `1920px` rect on a 1920×1080 canvas covers it exactly when
+//!     centered). Named args only; positional are ignored.
+//!   - `translate(shape, x:, y:)` — paints `shape` with its coordinates
+//!     shifted by (x, y) pixels. Composes with `at:` and with outer
+//!     translates; method-chain form (`rect(...).translate(x:, y:)`)
+//!     stages as the same `Constructed("translate", …)` shape and works
+//!     identically.
 //!   - Color: `#rrggbb` hex (with or without alpha), and `oklch(l, c, h)`
 //!     — converted to sRGB through standard oklab → linear-sRGB →
 //!     gamma matrices. Animated channels are expected to already be
@@ -29,10 +36,18 @@
 //!   - 3D content (`extrude`, `render3d`, lights, materials, ...). The
 //!     glyph in cmotion.org's taste sample renders as nothing — only
 //!     the background rect is visible.
-//!   - `rect` positioning (no `at:` / `translate(...)` yet). Every rect
-//!     paints from the top-left.
 //!   - srgb()/oklab() color literals — not yet wired through.
 //!   - Stroke, gradients, blur, filters. Future renderer slices.
+//!
+//! Coordinate system
+//! =================
+//! The position pipeline is centered-by-default: (0, 0) names the
+//! canvas center, +x is right, +y is down. This matches the
+//! motion-graphics convention (After Effects / Motion anchor at
+//! shape center, position relative to canvas), at the cost of
+//! disagreeing with CSS / SVG (top-left, +y down). Internal pixel
+//! buffers stay top-down row-major — only the *user-facing*
+//! coordinate origin is centered.
 //!
 //! Memory
 //! ======
@@ -59,6 +74,18 @@ pub const RenderError = error{OutOfMemory};
 pub const default_width: u32 = 320;
 pub const default_height: u32 = 180;
 
+/// Translation accumulated as we descend the tree. `translate(...)`
+/// adds to it; `paintRect` reads it (plus the rect's own `at:`) to
+/// compute its centre on the canvas.
+const Offset = struct {
+    x: f64 = 0,
+    y: f64 = 0,
+
+    fn plus(self: Offset, other: Offset) Offset {
+        return .{ .x = self.x + other.x, .y = self.y + other.y };
+    }
+};
+
 /// Top-level entry point. Allocates a framebuffer in `arena` and paints
 /// `tree` onto it. The caller picks the canvas size — typically passed
 /// from CLI flags. `tree` is expected to be the output of `sampler.sampleAt`
@@ -72,20 +99,23 @@ pub fn renderTree(
     const pixels = try arena.alloc(u8, @as(usize, width) * @as(usize, height) * 4);
     @memset(pixels, 0);
     var fb: Framebuffer = .{ .pixels = pixels, .width = width, .height = height };
-    paintValue(tree, &fb);
+    paintValue(tree, &fb, .{});
     return fb;
 }
 
 /// Dispatch over the value tree. Compose and individual shape
 /// constructors paint; everything else (numbers, strings, lambdas, ...
-/// at the root or nested) is silently ignored.
-fn paintValue(v: value.Value, fb: *Framebuffer) void {
+/// at the root or nested) is silently ignored. `off` is the accumulated
+/// translation in canvas pixels.
+fn paintValue(v: value.Value, fb: *Framebuffer, off: Offset) void {
     switch (v) {
         .constructed => |c| {
             if (std.mem.eql(u8, c.name, "compose")) {
-                paintCompose(c, fb);
+                paintCompose(c, fb, off);
             } else if (std.mem.eql(u8, c.name, "rect")) {
-                paintRect(c, fb);
+                paintRect(c, fb, off);
+            } else if (std.mem.eql(u8, c.name, "translate")) {
+                paintTranslate(c, fb, off);
             }
             // Anything else (render3d, extrude, vec3, ...) is a no-op
             // in v0. Stage 6/7 will pick these up.
@@ -98,20 +128,21 @@ fn paintValue(v: value.Value, fb: *Framebuffer) void {
     }
 }
 
-fn paintCompose(c: value.Constructed, fb: *Framebuffer) void {
+fn paintCompose(c: value.Constructed, fb: *Framebuffer, off: Offset) void {
     for (c.fields) |f| {
         if (!std.mem.eql(u8, f.name, "layers")) continue;
         switch (f.value) {
-            .array => |arr| for (arr.elems) |elem| paintValue(elem, fb),
+            .array => |arr| for (arr.elems) |elem| paintValue(elem, fb, off),
             else => {},
         }
     }
 }
 
-fn paintRect(c: value.Constructed, fb: *Framebuffer) void {
-    var w: u32 = fb.width;
-    var h: u32 = fb.height;
+fn paintRect(c: value.Constructed, fb: *Framebuffer, off: Offset) void {
+    var w: f64 = @floatFromInt(fb.width);
+    var h: f64 = @floatFromInt(fb.height);
     var fill: ?value.Value = null;
+    var at: Offset = .{};
     for (c.fields) |f| {
         if (std.mem.eql(u8, f.name, "width")) {
             if (numberAsPixels(f.value)) |px| w = px;
@@ -119,29 +150,90 @@ fn paintRect(c: value.Constructed, fb: *Framebuffer) void {
             if (numberAsPixels(f.value)) |px| h = px;
         } else if (std.mem.eql(u8, f.name, "fill")) {
             fill = f.value;
+        } else if (std.mem.eql(u8, f.name, "at")) {
+            if (valueAsOffset(f.value)) |a| at = a;
         }
     }
     const rgba: [4]u8 = if (fill) |fv| valueToRgba(fv) else .{ 255, 255, 255, 255 };
-    fillRect(fb, 0, 0, w, h, rgba);
+
+    // Centered-by-default: the rect's geometric centre lands at the
+    // canvas centre, shifted by the accumulated translate and the
+    // rect's own `at:` offset.
+    const cx = @as(f64, @floatFromInt(fb.width)) / 2.0 + off.x + at.x;
+    const cy = @as(f64, @floatFromInt(fb.height)) / 2.0 + off.y + at.y;
+    fillRect(fb, cx - w / 2.0, cy - h / 2.0, w, h, rgba);
 }
 
-fn numberAsPixels(v: value.Value) ?u32 {
+/// `translate(shape, x:, y:)` — paint the wrapped shape with the
+/// accumulated offset shifted by (x, y). The shape is the first
+/// positional field (from a method-chain receiver `rect(...).translate(...)`
+/// or a direct call `translate(rect(...), x:, y:)`); named-only forms
+/// without a shape are a no-op.
+fn paintTranslate(c: value.Constructed, fb: *Framebuffer, off: Offset) void {
+    var dx: f64 = 0;
+    var dy: f64 = 0;
+    var child: ?value.Value = null;
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "x")) {
+            if (numberAsPixels(f.value)) |px| dx = px;
+        } else if (std.mem.eql(u8, f.name, "y")) {
+            if (numberAsPixels(f.value)) |px| dy = px;
+        } else if (f.name.len == 0 and child == null) {
+            child = f.value;
+        }
+    }
+    if (child) |ch| paintValue(ch, fb, off.plus(.{ .x = dx, .y = dy }));
+}
+
+fn numberAsPixels(v: value.Value) ?f64 {
     if (v != .number) return null;
-    const n = v.number.value;
-    if (n < 0) return null;
-    if (n > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return null;
-    return @intFromFloat(n);
+    return v.number.value;
 }
 
-fn fillRect(fb: *Framebuffer, x: u32, y: u32, w: u32, h: u32, rgba: [4]u8) void {
-    const x_end = @min(x + w, fb.width);
-    const y_end = @min(y + h, fb.height);
-    if (x >= fb.width or y >= fb.height) return;
-    var row = y;
-    while (row < y_end) : (row += 1) {
-        var col = x;
-        while (col < x_end) : (col += 1) {
-            const i = (@as(usize, row) * fb.width + col) * 4;
+/// Read a `vec2(...)` value as an (x, y) offset in pixels. Accepts
+/// both positional (`vec2(100, 50)`) and named (`vec2(x: 100, y: 50)`)
+/// forms; missing components default to 0. Any other shape returns
+/// null so the caller falls back to the default offset.
+fn valueAsOffset(v: value.Value) ?Offset {
+    if (v != .constructed) return null;
+    const c = v.constructed;
+    if (!std.mem.eql(u8, c.name, "vec2")) return null;
+    var x: f64 = 0;
+    var y: f64 = 0;
+    var pos: usize = 0;
+    for (c.fields) |f| {
+        const n = numberAsPixels(f.value) orelse continue;
+        if (std.mem.eql(u8, f.name, "x")) {
+            x = n;
+        } else if (std.mem.eql(u8, f.name, "y")) {
+            y = n;
+        } else if (f.name.len == 0) {
+            if (pos == 0) x = n else if (pos == 1) y = n;
+            pos += 1;
+        }
+    }
+    return .{ .x = x, .y = y };
+}
+
+/// Fill an axis-aligned rectangle [x0, x0+w) × [y0, y0+h) with `rgba`,
+/// clipping to the framebuffer bounds. Coordinates are in canvas
+/// pixels and may be fractional or outside the canvas — the
+/// rasteriser floors/ceils to the nearest integer pixel grid and
+/// clamps before drawing.
+fn fillRect(fb: *Framebuffer, x0: f64, y0: f64, w: f64, h: f64, rgba: [4]u8) void {
+    if (w <= 0 or h <= 0) return;
+    const fb_w: i64 = @intCast(fb.width);
+    const fb_h: i64 = @intCast(fb.height);
+    const xs = @max(0, @as(i64, @intFromFloat(@floor(x0))));
+    const ys = @max(0, @as(i64, @intFromFloat(@floor(y0))));
+    const xe = @min(fb_w, @as(i64, @intFromFloat(@ceil(x0 + w))));
+    const ye = @min(fb_h, @as(i64, @intFromFloat(@ceil(y0 + h))));
+    if (xs >= xe or ys >= ye) return;
+    var row: i64 = ys;
+    while (row < ye) : (row += 1) {
+        var col: i64 = xs;
+        while (col < xe) : (col += 1) {
+            const i = (@as(usize, @intCast(row)) * fb.width + @as(usize, @intCast(col))) * 4;
             // Source-over compositing: rgba on top of fb pixel.
             const sa = @as(f32, @floatFromInt(rgba[3])) / 255.0;
             const ia = 1.0 - sa;
@@ -404,11 +496,13 @@ test "fillRect: a single rect paints inside its bounds and not outside" {
     try std.testing.expectEqual(@as(u8, 0), fb.pixels[(4 * 16 + 4) * 4 + 0]);
 }
 
-test "renderTree: a single rect with hex fill produces the right pixels" {
+test "renderTree: a single rect is centered on the canvas by default" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
+    // 8×8 rect on a 16×16 canvas → spans rows 4-11, cols 4-11 (inclusive),
+    // leaving the corners untouched.
     const rect_fields = try a.alloc(value.Field, 3);
     rect_fields[0] = .{ .name = "width", .value = .{ .number = .{ .value = 8, .unit = .px } } };
     rect_fields[1] = .{ .name = "height", .value = .{ .number = .{ .value = 8, .unit = .px } } };
@@ -416,10 +510,71 @@ test "renderTree: a single rect with hex fill produces the right pixels" {
     const tree: value.Value = .{ .constructed = .{ .name = "rect", .fields = rect_fields } };
 
     const fb = try renderTree(a, tree, 16, 16);
-    try std.testing.expectEqual(@as(u8, 255), fb.pixels[0]);
-    try std.testing.expectEqual(@as(u8, 0), fb.pixels[1]);
-    try std.testing.expectEqual(@as(u8, 0), fb.pixels[2]);
-    try std.testing.expectEqual(@as(u8, 255), fb.pixels[3]);
+    // Centre pixel is filled.
+    const c = (8 * 16 + 8) * 4;
+    try std.testing.expectEqual(@as(u8, 255), fb.pixels[c + 0]);
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[c + 1]);
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[c + 2]);
+    // Top-left corner is untouched (alpha 0).
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[3]);
+}
+
+test "renderTree: rect honours `at: vec2(x, y)` to shift its centre" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // 4×4 rect on a 16×16 canvas, shifted (+4, +4) from centre →
+    // centre lands at (12, 12), so the rect spans rows 10-13 cols 10-13.
+    const vec_fields = try a.alloc(value.Field, 2);
+    vec_fields[0] = .{ .name = "", .value = .{ .number = .{ .value = 4, .unit = null } } };
+    vec_fields[1] = .{ .name = "", .value = .{ .number = .{ .value = 4, .unit = null } } };
+    const vec: value.Value = .{ .constructed = .{ .name = "vec2", .fields = vec_fields } };
+
+    const rect_fields = try a.alloc(value.Field, 4);
+    rect_fields[0] = .{ .name = "width", .value = .{ .number = .{ .value = 4, .unit = .px } } };
+    rect_fields[1] = .{ .name = "height", .value = .{ .number = .{ .value = 4, .unit = .px } } };
+    rect_fields[2] = .{ .name = "fill", .value = .{ .color = .{ .hex = .{ .digits = "00ff00" } } } };
+    rect_fields[3] = .{ .name = "at", .value = vec };
+    const tree: value.Value = .{ .constructed = .{ .name = "rect", .fields = rect_fields } };
+
+    const fb = try renderTree(a, tree, 16, 16);
+    // Inside the shifted rect.
+    const inside = (11 * 16 + 11) * 4;
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[inside + 0]);
+    try std.testing.expectEqual(@as(u8, 255), fb.pixels[inside + 1]);
+    // Canvas centre (8, 8) is now outside the rect.
+    const center = (8 * 16 + 8) * 4;
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 3]);
+}
+
+test "renderTree: translate(shape, x:, y:) shifts the wrapped shape" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // A centered 4×4 rect wrapped in translate(x: -4, y: -4) lands at
+    // canvas-centre minus 4 → centre at (4, 4), spans rows 2-5 cols 2-5.
+    const rect_fields = try a.alloc(value.Field, 3);
+    rect_fields[0] = .{ .name = "width", .value = .{ .number = .{ .value = 4, .unit = .px } } };
+    rect_fields[1] = .{ .name = "height", .value = .{ .number = .{ .value = 4, .unit = .px } } };
+    rect_fields[2] = .{ .name = "fill", .value = .{ .color = .{ .hex = .{ .digits = "0000ff" } } } };
+    const inner: value.Value = .{ .constructed = .{ .name = "rect", .fields = rect_fields } };
+
+    const tr_fields = try a.alloc(value.Field, 3);
+    tr_fields[0] = .{ .name = "", .value = inner }; // method-chain receiver
+    tr_fields[1] = .{ .name = "x", .value = .{ .number = .{ .value = -4, .unit = .px } } };
+    tr_fields[2] = .{ .name = "y", .value = .{ .number = .{ .value = -4, .unit = .px } } };
+    const tree: value.Value = .{ .constructed = .{ .name = "translate", .fields = tr_fields } };
+
+    const fb = try renderTree(a, tree, 16, 16);
+    const inside = (3 * 16 + 3) * 4;
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[inside + 0]);
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[inside + 1]);
+    try std.testing.expectEqual(@as(u8, 255), fb.pixels[inside + 2]);
+    // Canvas centre is now untouched.
+    const center = (8 * 16 + 8) * 4;
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 3]);
 }
 
 test "renderTree: compose stacks layers — later wins" {
@@ -446,11 +601,14 @@ test "renderTree: compose stacks layers — later wins" {
     const tree: value.Value = .{ .constructed = .{ .name = "compose", .fields = compose_fields } };
 
     const fb = try renderTree(a, tree, 8, 8);
-    // Top-left: green (fg on top)
-    try std.testing.expectEqual(@as(u8, 0), fb.pixels[0]);
-    try std.testing.expectEqual(@as(u8, 255), fb.pixels[1]);
-    try std.testing.expectEqual(@as(u8, 0), fb.pixels[2]);
-    // Bottom-right (outside fg, inside bg): red
+    // Both rects centre on (4, 4). The fg 4×4 covers rows 2-5 cols 2-5;
+    // the bg 8×8 covers the whole canvas. So the canvas centre is green,
+    // and a corner is red.
+    const center = (4 * 8 + 4) * 4;
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 0]);
+    try std.testing.expectEqual(@as(u8, 255), fb.pixels[center + 1]);
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 2]);
+    // Bottom-right corner is bg only.
     const i = (7 * 8 + 7) * 4;
     try std.testing.expectEqual(@as(u8, 255), fb.pixels[i + 0]);
     try std.testing.expectEqual(@as(u8, 0), fb.pixels[i + 1]);
