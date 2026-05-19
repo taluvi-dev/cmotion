@@ -16,8 +16,11 @@ that aren't always obvious from the source.
 - `apps/cli/` — the `cmotion` (`cmo`) binary, written in Zig 0.15.1. The
   only execution surface today. Parses, type-checks (narrowly), and
   formats `.cm` files.
-- `apps/web/` — cmotion.org, an Astro static site. Pure docs. The
-  `ScenePreview` is hand-rolled Three.js, not driven by cmotion code.
+- `apps/web/` — cmotion.org, an Astro static site. Docs + an unlinked
+  `/play` editor. The homepage `ScenePreview` is driven by
+  `cmotion-render.wasm` (the same interpreter `cmo open` and `/play`
+  use); a Three.js translator in `src/scripts/cmotion-viewer.ts`
+  consumes the JSON value tree the WASM emits.
 - `packages/tree-sitter-cmotion/` — the grammar (`grammar.js`) and its
   generated `parser.c`, `grammar.json`, `node-types.json`. Per the
   tree-sitter convention, the generated files are committed.
