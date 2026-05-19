@@ -1,207 +1,164 @@
 ---
-// ScenePreview.astro
-// Live in-browser preview of the cmotion sample on this page.
-// The compiler doesn't exist yet, so this is plain JS+Three.js reproducing what
-// the WGSL backend will eventually render — same shape, same color cycle,
-// same easing, same timing.
+// ScenePreview.astro — live preview of the homepage sample, driven by the
+// real cmotion interpreter (cmotion-render.wasm) instead of a hand-rolled
+// Three.js reproduction. Same source the docs print above; the WASM emits
+// a JSON value tree per frame, the viewer translates it into Three.js
+// objects. If this preview drifts from the code block, the renderer is
+// what's right.
 ---
 
 <figure class="scene-preview">
-	<canvas data-scene-preview width="1920" height="1080" aria-label="Live preview of the sample scene"></canvas>
-	<figcaption>Live preview of the sample above.</figcaption>
+  <div class="frame">
+    <canvas data-scene-preview aria-label="Live preview of the sample scene"></canvas>
+  </div>
+  <figcaption>
+    <span>Live preview — rendered by the cmotion interpreter running in your browser. <a href="/play/">Edit it →</a></span>
+    <button type="button" data-scene-render>Render</button>
+  </figcaption>
 </figure>
 
 <style>
-	.scene-preview {
-		margin: 1.5rem 0 2rem;
-	}
-	.scene-preview canvas {
-		width: 100%;
-		height: auto;
-		display: block;
-		border-radius: 4px;
-		border: 1px solid var(--sl-color-hairline);
-		background: #000;
-	}
-	.scene-preview figcaption {
-		font-size: 0.85rem;
-		color: var(--sl-color-gray-3);
-		margin-top: 0.5rem;
-		font-style: italic;
-	}
+  .scene-preview { margin: 1.5rem 0 2rem; }
+  .scene-preview .frame {
+    aspect-ratio: 16 / 9;
+    border-radius: 4px;
+    border: 1px solid var(--sl-color-hairline);
+    background: #000;
+    overflow: hidden;
+    position: relative;
+  }
+  .scene-preview canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .scene-preview figcaption {
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    font-size: 0.85rem;
+    color: var(--sl-color-gray-3);
+    margin-top: 0.5rem;
+    font-style: italic;
+  }
+  .scene-preview figcaption button {
+    font: inherit; font-style: normal; font-weight: 600;
+    padding: 4px 12px; border-radius: 4px;
+    background: var(--sl-color-gray-1, #000);
+    color: var(--sl-color-bg, #fff);
+    border: 0; cursor: pointer;
+  }
+  .scene-preview figcaption button:disabled { opacity: 0.4; cursor: progress; }
 </style>
 
 <script>
-	import * as THREE from 'three';
+  import { boot } from "../scripts/cmotion-viewer.ts";
 
-	// Convert OKLCH → linear-light sRGB (approx, good enough for screen).
-	// Uses Björn Ottosson's published OKLab → linear sRGB conversion, then we
-	// hand the linear values to Three.js as a Color (since we set the renderer's
-	// output color space to sRGB, it does the gamma encoding for us).
-	function oklchToLinearRgb(L: number, C: number, hDeg: number): [number, number, number] {
-		const h = (hDeg * Math.PI) / 180;
-		const a = C * Math.cos(h);
-		const b = C * Math.sin(h);
+  // Source must match the code block above on the page. Keep them in sync.
+  const HOMEPAGE_SOURCE = `use std.shapes.*;
+use std.mesh3d.*;
+use std.text;
+use std.lighting.*;
+use std.scene3d.*;
+use std.anim.*;
 
-		const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
-		const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
-		const s_ = L - 0.0894841775 * a - 1.291485548 * b;
+scene title(duration: Duration = 6s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
 
-		const lc = l_ * l_ * l_;
-		const mc = m_ * m_ * m_;
-		const sc = s_ * s_ * s_;
+  let rot   = animate { 0s => 0deg,   6s => 360deg } with { repeat: forever };
+  let hue   = animate { 0s => 280deg, 4s => 640deg } with { repeat: forever };
+  let pulse = animate {
+                0s    => 1.00,
+                500ms => 1.06,
+                1s    => 1.00,
+              } with { easing: easing.out_cubic, repeat: forever };
 
-		let r = +4.0767416621 * lc - 3.3077115913 * mc + 0.2309699292 * sc;
-		let g = -1.2684380046 * lc + 2.6097574011 * mc - 0.3413193965 * sc;
-		let bl = -0.0041960863 * lc - 0.7034186147 * mc + 1.707614701 * sc;
+  let wobble = wave(amplitude: 8.6deg, period: 12s);
 
-		// Clip to [0, 1] gamut. (Naive clip; good enough for the demo.)
-		return [
-			Math.max(0, Math.min(1, r)),
-			Math.max(0, Math.min(1, g)),
-			Math.max(0, Math.min(1, bl)),
-		];
-	}
+  let glyph = extrude(text.glyph("C", font: "Inter Bold"), depth: 16px)
+                .material(fill: oklch(0.78, 0.20, hue),
+                          metalness: 0.25,
+                          roughness: 0.35,
+                          emissive: oklch(0.65, 0.18, hue),
+                          emissive_intensity: 0.6)
+                .rotate(x: wobble, y: rot)
+                .scale(pulse);
 
-	function setOklch(color: THREE.Color, L: number, C: number, hDeg: number) {
-		const [r, g, b] = oklchToLinearRgb(L, C, hDeg);
-		color.setRGB(r, g, b, THREE.LinearSRGBColorSpace);
-	}
+  let lights = [
+    ambient(0.35),
+    directional(from: vec3(3, 4, 5),    intensity: 1.6),
+    directional(from: vec3(-4, -2, -3), intensity: 0.9),
+  ];
 
-	// Build a 2D "C" shape (open ring with a wedge cut on the right).
-	function buildCShape(): THREE.Shape {
-		const outer = 1.0;
-		const inner = 0.6;
-		const openHalfAngle = (Math.PI / 180) * 32; // wedge cut: ~64° opening
-		const start = -Math.PI + openHalfAngle;
-		const end = Math.PI - openHalfAngle;
+  compose [
+    bg,
+    render3d(glyph, lights: lights),
+  ]
+}
+`;
 
-		const shape = new THREE.Shape();
-		// Outer arc (counter-clockwise from bottom-right around to top-right)
-		shape.absarc(0, 0, outer, start, end, false);
-		// Line across to inner arc
-		shape.lineTo(inner * Math.cos(end), inner * Math.sin(end));
-		// Inner arc back
-		shape.absarc(0, 0, inner, end, start, true);
-		// Close
-		shape.lineTo(outer * Math.cos(start), outer * Math.sin(start));
-		return shape;
-	}
+  async function mount(canvas: HTMLCanvasElement) {
+    const figcaption = canvas.closest("figure")?.querySelector("figcaption") ?? null;
+    const btnRender = figcaption?.querySelector<HTMLButtonElement>("button[data-scene-render]") ?? null;
 
-	// out_cubic easing
-	const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
-	// Triangle pulse 0 → 1 → 0 over [0,1], each half eased out_cubic.
-	function pulseEnv(tNorm: number): number {
-		if (tNorm < 0.5) return easeOutCubic(tNorm / 0.5);
-		return easeOutCubic((1 - tNorm) / 0.5);
-	}
+    let view: Awaited<ReturnType<typeof boot>>;
+    try {
+      view = await boot(canvas);
+      view.load(HOMEPAGE_SOURCE);
+    } catch (e) {
+      console.error("[cmotion homepage preview]", e);
+      return;
+    }
 
-	function mount(canvas: HTMLCanvasElement) {
-		const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
-		renderer.outputColorSpace = THREE.SRGBColorSpace;
-		renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // Only render when the canvas is on screen; idle when scrolled away.
+    let visible = true;
+    const io = new IntersectionObserver(
+      (entries) => { for (const e of entries) visible = e.isIntersecting; },
+      { threshold: 0 },
+    );
+    io.observe(canvas);
 
-		const W = canvas.width;
-		const H = canvas.height;
-		const aspect = W / H;
-		renderer.setSize(W, H, false);
+    let running = true;
+    let raf = 0;
+    let start = performance.now();
+    function frame(now: number) {
+      if (!running) return;
+      if (visible) {
+        const t = ((now - start) / 1000) % view.durationSeconds;
+        view.seek(t);
+      }
+      raf = requestAnimationFrame(frame);
+    }
+    raf = requestAnimationFrame(frame);
 
-		const scene = new THREE.Scene();
-		const bg = new THREE.Color();
-		setOklch(bg, 0.10, 0.04, 280);
-		scene.background = bg;
+    // Click "Render" → re-parse the source and restart the loop at t=0.
+    // Re-parsing exercises the interpreter freshly; useful if the user wants
+    // to confirm the preview is genuinely WASM-driven.
+    if (btnRender) {
+      btnRender.addEventListener("click", () => {
+        btnRender.disabled = true;
+        try {
+          view.load(HOMEPAGE_SOURCE);
+          start = performance.now();
+        } finally {
+          btnRender.disabled = false;
+        }
+      });
+    }
 
-		const camera = new THREE.PerspectiveCamera(28, aspect, 0.1, 100);
-		camera.position.set(0, 0, 6);
-		camera.lookAt(0, 0, 0);
+    // Astro view transitions: dispose on navigation to avoid leaking the WASM
+    // module + WebGL context.
+    document.addEventListener(
+      "astro:before-swap",
+      () => {
+        running = false;
+        cancelAnimationFrame(raf);
+        io.disconnect();
+        view.destroy();
+      },
+      { once: true },
+    );
+  }
 
-		// Lights — rim + key + soft fill
-		scene.add(new THREE.AmbientLight(0xffffff, 0.35));
-		const key = new THREE.DirectionalLight(0xffffff, 1.6);
-		key.position.set(3, 4, 5);
-		scene.add(key);
-		const rim = new THREE.DirectionalLight(0xffffff, 0.9);
-		rim.position.set(-4, -2, -3);
-		scene.add(rim);
-
-		// Extruded "C" mesh
-		const shape = buildCShape();
-		const geo = new THREE.ExtrudeGeometry(shape, {
-			depth: 0.4,
-			bevelEnabled: true,
-			bevelThickness: 0.04,
-			bevelSize: 0.04,
-			bevelSegments: 4,
-			curveSegments: 64,
-		});
-		geo.center();
-
-		const mat = new THREE.MeshStandardMaterial({
-			color: 0xffffff,
-			metalness: 0.25,
-			roughness: 0.35,
-			emissive: 0x000000,
-			emissiveIntensity: 0.6,
-		});
-		setOklch(mat.color, 0.78, 0.20, 280);
-
-		const mesh = new THREE.Mesh(geo, mat);
-		scene.add(mesh);
-
-		// Pause when off-screen
-		let visible = true;
-		const io = new IntersectionObserver(
-			(entries) => {
-				for (const e of entries) visible = e.isIntersecting;
-			},
-			{ threshold: 0 },
-		);
-		io.observe(canvas);
-
-		let running = true;
-		const start = performance.now();
-		const HUE_PERIOD_MS = 4000; // full color cycle
-		const ROT_PERIOD_MS = 6000; // one Y rotation
-		const PULSE_PERIOD_MS = 1000;
-
-		function frame(now: number) {
-			if (!running) return;
-			if (visible) {
-				const t = now - start;
-				const hue = 280 + (360 * t) / HUE_PERIOD_MS;
-				setOklch(mat.color, 0.78, 0.20, hue);
-
-				// emissive: dimmer copy of the color, gives a soft glow under the lights
-				const [r, g, b] = oklchToLinearRgb(0.65, 0.18, hue);
-				mat.emissive.setRGB(r, g, b, THREE.LinearSRGBColorSpace);
-
-				mesh.rotation.y = (2 * Math.PI * t) / ROT_PERIOD_MS;
-				mesh.rotation.x = Math.sin((Math.PI * 2 * t) / (ROT_PERIOD_MS * 2)) * 0.15;
-
-				const pulseT = (t % PULSE_PERIOD_MS) / PULSE_PERIOD_MS;
-				const s = 1.0 + 0.06 * pulseEnv(pulseT);
-				mesh.scale.set(s, s, s);
-
-				renderer.render(scene, camera);
-			}
-			requestAnimationFrame(frame);
-		}
-		requestAnimationFrame(frame);
-
-		document.addEventListener(
-			'astro:before-swap',
-			() => {
-				running = false;
-				io.disconnect();
-				renderer.dispose();
-				geo.dispose();
-				mat.dispose();
-			},
-			{ once: true },
-		);
-	}
-
-	for (const c of document.querySelectorAll<HTMLCanvasElement>('canvas[data-scene-preview]')) {
-		mount(c);
-	}
+  for (const c of document.querySelectorAll<HTMLCanvasElement>("canvas[data-scene-preview]")) {
+    mount(c);
+  }
 </script>
