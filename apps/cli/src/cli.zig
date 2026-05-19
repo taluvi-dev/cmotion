@@ -170,7 +170,7 @@ fn printUsage(w: *Writer) !void {
         \\COMMANDS
         \\    cmo parse <file>        Parse a .cm source file and print its AST
         \\    cmo check <file>        Type-check a .cm source file
-        \\    cmo fmt <file>          Format a .cm source file
+        \\    cmo fmt <file>          Format a .cm source file (use --write / --check)
         \\    cmo explain <code>      Show the long-form explanation for a diagnostic code
         \\    cmo version             Print the cmotion version
         \\    cmo help                Show this message
