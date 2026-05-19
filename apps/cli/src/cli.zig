@@ -1,5 +1,6 @@
 const std = @import("std");
 const diag = @import("diagnostics.zig");
+const timing = @import("timing.zig");
 
 const parse_cmd = @import("commands/parse.zig");
 const check_cmd = @import("commands/check.zig");
@@ -28,17 +29,39 @@ pub const Context = struct {
     options: Options,
     stdout: *Writer,
     stderr: *Writer,
+    timing: *timing.Timing,
 
+    /// Emit a packet (just diagnostics, no extra envelope fields). Always
+    /// appends the timing footer.
     pub fn emit(self: Context, packet: diag.Packet) !void {
         if (self.options.json) {
-            try diag.writeJson(self.stdout, packet);
+            try self.openJsonEnvelope(packet.ok, packet.diagnostics);
+            try self.closeJsonEnvelope();
         } else {
             try diag.writeText(self.stdout, packet);
+            try self.timing.writeText(self.stdout);
         }
     }
 
     pub fn emitError(self: Context, d: diag.Diagnostic) !void {
         try self.emit(.{ .ok = false, .diagnostics = &.{d} });
+    }
+
+    /// Begin a JSON envelope with shared {schemaVersion, ok, diagnostics}.
+    /// Caller writes their own comma-prefixed fields, then calls
+    /// closeJsonEnvelope to append `,"timing":{...}` and the closing brace.
+    pub fn openJsonEnvelope(
+        self: Context,
+        ok: bool,
+        diagnostics: []const diag.Diagnostic,
+    ) !void {
+        try diag.writeJsonHeader(self.stdout, ok, diagnostics);
+    }
+
+    pub fn closeJsonEnvelope(self: Context) !void {
+        try self.stdout.writeAll(",\"timing\":");
+        try self.timing.writeJson(self.stdout);
+        try diag.writeJsonFooter(self.stdout);
     }
 };
 
@@ -47,6 +70,7 @@ pub fn run(
     args: [][:0]u8,
     stdout: *Writer,
     stderr: *Writer,
+    t: *timing.Timing,
 ) !u8 {
     var options: Options = .{};
     var positional: std.ArrayListUnmanaged([]const u8) = .{};
@@ -73,10 +97,12 @@ pub fn run(
         .options = options,
         .stdout = stdout,
         .stderr = stderr,
+        .timing = t,
     };
 
     if (positional.items.len == 0) {
         try printUsage(ctx.stdout);
+        try t.writeText(ctx.stdout);
         return 0;
     }
 
@@ -100,6 +126,7 @@ pub fn run(
     return switch (cmd) {
         .help => blk: {
             try printUsage(ctx.stdout);
+            try t.writeText(ctx.stdout);
             break :blk @as(u8, 0);
         },
         .version => version_cmd.run(ctx, rest),

@@ -121,6 +121,7 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
     } else {
         try diag.writeText(ctx.stdout, .{ .ok = !has_error, .diagnostics = diags.items });
         try emitSExpr(ctx, root);
+        try ctx.timing.writeText(ctx.stdout);
     }
 
     return if (has_error) 1 else 0;
@@ -144,7 +145,7 @@ fn emitJsonEnvelope(
 ) !void {
     _ = source;
     const w = ctx.stdout;
-    try diag.writeJsonHeader(w, ok, diagnostics);
+    try ctx.openJsonEnvelope(ok, diagnostics);
 
     try w.writeAll(",\"path\":");
     try diag.writeJsonString(w, path);
@@ -164,5 +165,5 @@ fn emitJsonEnvelope(
         try w.writeAll("null");
     }
 
-    try diag.writeJsonFooter(w);
+    try ctx.closeJsonEnvelope();
 }

@@ -109,18 +109,17 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
 
     const w = ctx.stdout;
     if (ctx.options.json) {
-        // Single envelope: shared header (with empty diagnostics) +
-        // command-specific fields + shared footer.
-        try diag.writeJsonHeader(w, true, &.{});
+        try ctx.openJsonEnvelope(true, &.{});
         try w.writeAll(",\"code\":");
         try diag.writeJsonString(w, entry.code);
         try w.writeAll(",\"title\":");
         try diag.writeJsonString(w, entry.title);
         try w.writeAll(",\"body\":");
         try diag.writeJsonString(w, entry.body);
-        try diag.writeJsonFooter(w);
+        try ctx.closeJsonEnvelope();
     } else {
         try w.print("{s}: {s}\n\n{s}\n", .{ entry.code, entry.title, entry.body });
+        try ctx.timing.writeText(w);
     }
     return 0;
 }
