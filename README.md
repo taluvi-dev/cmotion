@@ -30,8 +30,8 @@ pnpm check          # run type checks across the workspace
 
 ### `apps/web` — cmotion.org
 
-The marketing site and (eventually) documentation for cmotion, built with
-SvelteKit. To work on it directly:
+The marketing site and (eventually) documentation for cmotion, built with Astro.
+To work on it directly:
 
 ```bash
 cd apps/web
