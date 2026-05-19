@@ -51,6 +51,18 @@ pub const Material = struct {
     /// rough (broad, almost-imperceptible specular). The taste sample
     /// uses 0.35 — slightly rough metal-ish surface.
     roughness: f32 = 1.0,
+    /// Self-illuminating colour added on top of the lit result. Lets
+    /// surfaces facing away from every light still read with material
+    /// colour instead of going pitch black (or, in our case, looking
+    /// "transparent" against a dark background). Three.js's
+    /// MeshStandardMaterial calls this `emissive`.
+    emissive: [4]u8 = .{ 0, 0, 0, 255 },
+    /// Multiplier on `emissive` — separated so a scene can keep a
+    /// constant emissive *colour* (often tied to the hue animation)
+    /// while dialling the intensity independently. Three.js's
+    /// `emissiveIntensity` defaults to 1; the taste sample renders
+    /// at 0.6.
+    emissive_intensity: f32 = 1.0,
 };
 
 pub const Framebuffer = struct {
@@ -527,6 +539,20 @@ fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
             },
         }
     }
+
+    // Emissive — added after the lighting loop so it's
+    // unaffected by view / normal / light direction. A face
+    // pointing away from every light still reads with the
+    // emissive colour; that's the "self-glow" that keeps the C
+    // looking solid rather than transparent against the dark
+    // background.
+    const emissive: Vec3F = .{
+        srgbDecode(material.emissive[0]),
+        srgbDecode(material.emissive[1]),
+        srgbDecode(material.emissive[2]),
+    };
+    const emit_i: Vec3F = @splat(material.emissive_intensity);
+    lit += emissive * emit_i;
 
     return .{
         finaliseChannel(lit[0]),

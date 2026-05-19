@@ -110,6 +110,12 @@ const Style = struct {
     /// PBR-style "how rough is this surface". Defaults nil →
     /// renderer treats unset as 1 (fully rough, essentially diffuse).
     roughness: ?f32 = null,
+    /// Self-illuminating colour added after lighting. Lets faces
+    /// facing away from every light still read as the material
+    /// rather than going pitch-black. `null` = no emission.
+    emissive: ?value.Value = null,
+    /// Multiplier on `emissive`. `null` defaults to 1.0.
+    emissive_intensity: ?f32 = null,
 };
 
 /// Top-level entry point. Allocates a framebuffer in `arena` and paints
@@ -509,10 +515,9 @@ fn paint3DTree(
         return;
     }
     if (std.mem.eql(u8, c.name, "material")) {
-        // `.material(fill:, metalness:, roughness:)` becomes the
-        // active Style for the inner mesh's albedo + specular shape.
-        // `emissive:` is read but unused — needs an emission term in
-        // the shading equation, which a later commit adds.
+        // `.material(fill:, metalness:, roughness:, emissive:,
+        // emissive_intensity:)` becomes the active Style for the
+        // inner mesh.
         var new_style = style;
         for (c.fields) |f| {
             if (std.mem.eql(u8, f.name, "fill")) {
@@ -521,6 +526,10 @@ fn paint3DTree(
                 if (numberAsF32(f.value)) |n| new_style.metalness = n;
             } else if (std.mem.eql(u8, f.name, "roughness")) {
                 if (numberAsF32(f.value)) |n| new_style.roughness = n;
+            } else if (std.mem.eql(u8, f.name, "emissive")) {
+                new_style.emissive = f.value;
+            } else if (std.mem.eql(u8, f.name, "emissive_intensity")) {
+                if (numberAsF32(f.value)) |n| new_style.emissive_intensity = n;
             }
         }
         if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, transform, new_style, lights, camera, off);
@@ -641,11 +650,13 @@ fn drawExtrude(
         }
     }
     const inner = leaf orelse return;
-    // Default bevel: ~4% of depth (small enough to not collapse
-    // typical glyph strokes, large enough to read as a rounded
-    // edge under any reasonable light angle). Users can override
-    // via `extrude(..., bevel: <px>)`.
-    const eff_bevel: f32 = bevel orelse (depth * 0.04);
+    // Default bevel: 10 % of depth (matching Three.js's
+    // ScenePreview `bevelSize: 0.04` on `depth: 0.4`), with a
+    // 1.5 px minimum so thin extrusions still have a visible
+    // bevel — at 16 px depth, 10 % would be 1.6 px, but for
+    // 8 px or thinner the floor kicks in. Users override via
+    // `extrude(..., bevel: <px>)`.
+    const eff_bevel: f32 = bevel orelse @max(depth * 0.10, 1.5);
     const m = (try meshFromShape(arena, inner, depth, eff_bevel)) orelse return;
 
     // Centre the mesh on its own bounding-box centre, then apply the
@@ -666,6 +677,8 @@ fn drawExtrude(
         .albedo = if (style.fill) |fv| valueToRgba(fv) else .{ 220, 220, 220, 255 },
         .metalness = style.metalness orelse 0.0,
         .roughness = style.roughness orelse 1.0,
+        .emissive = if (style.emissive) |ev| valueToRgba(ev) else .{ 0, 0, 0, 255 },
+        .emissive_intensity = style.emissive_intensity orelse 1.0,
     };
 
     // 2× supersampling smooths the rasteriser's hard silhouette
