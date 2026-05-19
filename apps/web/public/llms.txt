@@ -1,0 +1,19 @@
+# cmotion
+
+> A typed DSL for video, motion, and animation. Same source, deterministic offline render and realtime GPU preview.
+
+cmotion is a small, statically-typed programming language for video, motion graphics, and animation. It is infrastructure — hosts embed it. The language is being built in public, in stages, with the grammar locked first and the implementation following.
+
+## Docs
+
+- [Overview](https://cmotion.org/): pitch, code sample, status.
+- [Roadmap](https://cmotion.org/roadmap/): the 7 stages from grammar to GPU.
+- [Grammar](https://cmotion.org/language/grammar/): EBNF spec, v0.2.
+- [Type system](https://cmotion.org/language/types/): units, asset types, determinism partition.
+- [Stdlib](https://cmotion.org/language/stdlib/): shapes, composition, animation, color, transport, audio.
+- [Reference interpreter](https://cmotion.org/impl/interpreter/): the executable spec.
+- [Backends](https://cmotion.org/impl/backends/): WASM components, CanvasKit, WGSL.
+
+## Source
+
+- GitHub: https://github.com/taluvi-dev/cmotion
