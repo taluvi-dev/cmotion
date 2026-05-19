@@ -7,6 +7,7 @@ const check_cmd = @import("commands/check.zig");
 const fmt_cmd = @import("commands/fmt.zig");
 const eval_cmd = @import("commands/eval.zig");
 const render_cmd = @import("commands/render.zig");
+const bounce_cmd = @import("commands/bounce.zig");
 const explain_cmd = @import("commands/explain.zig");
 const version_cmd = @import("commands/version.zig");
 
@@ -25,6 +26,7 @@ pub const Command = enum {
     fmt,
     eval,
     render,
+    bounce,
     explain,
 };
 
@@ -139,6 +141,7 @@ pub fn run(
         .fmt => fmt_cmd.run(ctx, rest),
         .eval => eval_cmd.run(ctx, rest),
         .render => render_cmd.run(ctx, rest),
+        .bounce => bounce_cmd.run(ctx, rest),
         .explain => explain_cmd.run(ctx, rest),
     };
 }
@@ -158,6 +161,7 @@ fn parseCommand(s: []const u8) ?Command {
         .{ .name = "format", .cmd = .fmt },
         .{ .name = "eval", .cmd = .eval },
         .{ .name = "render", .cmd = .render },
+        .{ .name = "bounce", .cmd = .bounce },
         .{ .name = "explain", .cmd = .explain },
     };
     for (entries) |e| if (std.mem.eql(u8, s, e.name)) return e.cmd;
@@ -181,6 +185,7 @@ fn printUsage(w: *Writer) !void {
         \\    cmo fmt <file>          Format a .cm source file (use --write / --check)
         \\    cmo eval [--at <t>] <file>  Evaluate top-level lets; `--at` samples the stream
         \\    cmo render [opts] <file>    Render to a PPM image (--at, --out, --width, --height)
+        \\    cmo bounce [opts] <file>    Render to an animated PNG (--fps, --duration, --out, --width, --height)
         \\    cmo explain <code>      Show the long-form explanation for a diagnostic code
         \\    cmo version             Print the cmotion version
         \\    cmo help                Show this message
