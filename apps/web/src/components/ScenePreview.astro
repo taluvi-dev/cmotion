@@ -95,6 +95,17 @@ scene title(duration: Duration = 6s) -> Frame {
 }
 `;
 
+  // Encode source for /play. URL hash so it's not sent server-side and
+  // refresh-safe. btoa would mangle non-ASCII; use encodeURIComponent.
+  function editLinkFor(source: string): string {
+    return `/play/#source=${encodeURIComponent(source)}`;
+  }
+
+  // Wire up every "Edit it →" link on the page to carry the homepage source.
+  for (const a of document.querySelectorAll<HTMLAnchorElement>('a[href="/play/"]')) {
+    a.href = editLinkFor(HOMEPAGE_SOURCE);
+  }
+
   async function mount(canvas: HTMLCanvasElement) {
     const figcaption = canvas.closest("figure")?.querySelector("figcaption") ?? null;
     const btnRender = figcaption?.querySelector<HTMLButtonElement>("button[data-scene-render]") ?? null;
