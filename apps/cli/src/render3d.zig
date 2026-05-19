@@ -75,6 +75,15 @@ pub const Camera = struct {
 /// translate from the value tree's wrappers). Lights are evaluated
 /// in world space. Allocates an arena-rooted z-buffer for the
 /// frame's duration; caller's arena owns it.
+///
+/// Parallelism: horizontal-band partitioning. The framebuffer is
+/// sliced into N equal-row bands (N = host CPU count, capped at
+/// 16). Each band runs in its own thread; the thread iterates
+/// every triangle but only rasterises the rows that fall inside
+/// its band. No shared writes — each band owns its rows of the
+/// framebuffer and z-buffer — so the inner loop stays atomic-free.
+/// Per-frame thread spawn cost is ~0.1 ms which is negligible
+/// against the rasteriser's milliseconds-to-seconds workload.
 pub fn drawMesh(
     arena: std.mem.Allocator,
     fb: *Framebuffer,
@@ -117,22 +126,84 @@ pub fn drawMesh(
         world_normal[v] = model.mulDirection(mesh.normals[v]).normalise();
     }
 
+    // Partition the framebuffer into row bands, one per worker.
+    const max_threads = 16;
+    const cpu_count = std.Thread.getCpuCount() catch 1;
+    const num_threads_raw = @min(cpu_count, max_threads);
+    // For tiny canvases / tiny meshes, threading overhead exceeds
+    // the work. Single-thread under a workload threshold.
+    const workload = @as(usize, fb.width) * fb.height * (mesh.indices.len / 3);
+    const num_threads = if (workload < 200_000) 1 else num_threads_raw;
+
+    if (num_threads <= 1) {
+        // Single-threaded fast path — skips the spawn overhead.
+        rasteriseBand(.{
+            .fb = fb,
+            .zbuf = zbuf,
+            .screen = screen,
+            .normals = world_normal,
+            .indices = mesh.indices,
+            .material = material,
+            .lights = lights,
+            .y_start = 0,
+            .y_end = fb.height,
+        });
+        return;
+    }
+
+    var threads: [max_threads]std.Thread = undefined;
+    const band_h = fb.height / num_threads;
+    var t: usize = 0;
+    while (t < num_threads) : (t += 1) {
+        const y_start: u32 = @intCast(t * band_h);
+        const y_end: u32 = if (t == num_threads - 1) fb.height else @intCast((t + 1) * band_h);
+        threads[t] = try std.Thread.spawn(.{}, rasteriseBand, .{BandArgs{
+            .fb = fb,
+            .zbuf = zbuf,
+            .screen = screen,
+            .normals = world_normal,
+            .indices = mesh.indices,
+            .material = material,
+            .lights = lights,
+            .y_start = y_start,
+            .y_end = y_end,
+        }});
+    }
+    t = 0;
+    while (t < num_threads) : (t += 1) threads[t].join();
+}
+
+const BandArgs = struct {
+    fb: *Framebuffer,
+    zbuf: []f32,
+    screen: []const Vec3,
+    normals: []const Vec3,
+    indices: []const u32,
+    material: Material,
+    lights: []const Light,
+    y_start: u32,
+    y_end: u32,
+};
+
+fn rasteriseBand(args: BandArgs) void {
     var i: usize = 0;
-    while (i < mesh.indices.len) : (i += 3) {
-        const ia = mesh.indices[i];
-        const ib = mesh.indices[i + 1];
-        const ic = mesh.indices[i + 2];
-        rasteriseTriangle(
-            fb,
-            zbuf,
-            screen[ia],
-            screen[ib],
-            screen[ic],
-            world_normal[ia],
-            world_normal[ib],
-            world_normal[ic],
-            material,
-            lights,
+    while (i < args.indices.len) : (i += 3) {
+        const ia = args.indices[i];
+        const ib = args.indices[i + 1];
+        const ic = args.indices[i + 2];
+        rasteriseTriangleClipped(
+            args.fb,
+            args.zbuf,
+            args.screen[ia],
+            args.screen[ib],
+            args.screen[ic],
+            args.normals[ia],
+            args.normals[ib],
+            args.normals[ic],
+            args.material,
+            args.lights,
+            args.y_start,
+            args.y_end,
         );
     }
 }
@@ -223,10 +294,13 @@ fn boxFilterDownsample(src: *Framebuffer, dst: *Framebuffer, factor: u32) void {
     }
 }
 
-/// Rasterise a single triangle. `a/b/c` are screen-space coords
-/// (x, y in pixels, z in NDC). Normals are world-space; lighting
-/// happens per-fragment after barycentric interpolation.
-fn rasteriseTriangle(
+/// Rasterise a single triangle, clipped to a horizontal band
+/// `[y_start, y_end)`. `a/b/c` are screen-space coords (x, y in
+/// pixels, z in NDC). Normals are world-space; lighting happens
+/// per-fragment after barycentric interpolation. The band clip
+/// is what makes `drawMesh` thread-safe: each worker is given a
+/// disjoint y range and never writes outside it.
+fn rasteriseTriangleClipped(
     fb: *Framebuffer,
     zbuf: []f32,
     a: Vec3,
@@ -237,6 +311,8 @@ fn rasteriseTriangle(
     nc: Vec3,
     material: Material,
     lights: []const Light,
+    y_start: u32,
+    y_end: u32,
 ) void {
     // Signed twice-area; the absolute value normalises barycentrics
     // and the sign tells us back-face winding. We don't cull back
@@ -250,8 +326,11 @@ fn rasteriseTriangle(
 
     const min_x = @max(0, @as(i32, @intFromFloat(@floor(@min(@min(a.x, b.x), c.x)))));
     const max_x = @min(@as(i32, @intCast(fb.width)) - 1, @as(i32, @intFromFloat(@ceil(@max(@max(a.x, b.x), c.x)))));
-    const min_y = @max(0, @as(i32, @intFromFloat(@floor(@min(@min(a.y, b.y), c.y)))));
-    const max_y = @min(@as(i32, @intCast(fb.height)) - 1, @as(i32, @intFromFloat(@ceil(@max(@max(a.y, b.y), c.y)))));
+    var min_y = @max(0, @as(i32, @intFromFloat(@floor(@min(@min(a.y, b.y), c.y)))));
+    var max_y = @min(@as(i32, @intCast(fb.height)) - 1, @as(i32, @intFromFloat(@ceil(@max(@max(a.y, b.y), c.y)))));
+    // Band clip — entirely outside this worker's slice → skip.
+    min_y = @max(min_y, @as(i32, @intCast(y_start)));
+    max_y = @min(max_y, @as(i32, @intCast(y_end)) - 1);
     if (min_x > max_x or min_y > max_y) return;
 
     var py: i32 = min_y;
