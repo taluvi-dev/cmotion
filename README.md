@@ -9,7 +9,7 @@ This repository is a **monorepo** managed with [pnpm workspaces](https://pnpm.io
 ```
 cmotion/
 ├── apps/
-│   └── web/          # cmotion.org — SvelteKit site
+│   └── web/          # cmotion.org — Astro site
 └── packages/         # shared libraries (future)
 ```
 
