@@ -453,19 +453,23 @@ fn paintRender3D(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Sty
 
     var scene: ?value.Value = null;
     var lights_v: ?value.Value = null;
+    var camera_v: ?value.Value = null;
     for (c.fields) |f| {
         if (f.name.len == 0) {
             if (scene == null) scene = f.value;
         } else if (std.mem.eql(u8, f.name, "lights")) {
             lights_v = f.value;
+        } else if (std.mem.eql(u8, f.name, "camera")) {
+            camera_v = f.value;
         }
     }
     const sc = scene orelse return;
 
     const lights = parseLights(a, lights_v) catch return;
+    const camera = parseCamera(camera_v);
 
     var rfb: render3d.Framebuffer = .{ .pixels = fb.pixels, .width = fb.width, .height = fb.height };
-    paint3DTree(a, sc, &rfb, mesh_mod.Mat4.identity(), style, lights, off) catch {
+    paint3DTree(a, sc, &rfb, mesh_mod.Mat4.identity(), style, lights, camera, off) catch {
         // Anything that fails (out of memory, mesh with degenerate
         // triangulation, etc.) falls through silently — the bg
         // layer is still on the framebuffer, which is preferable
@@ -483,6 +487,7 @@ fn paint3DTree(
     transform: mesh_mod.Mat4,
     style: Style,
     lights: []const render3d.Light,
+    camera: render3d.Camera,
     off: Offset,
 ) !void {
     if (v != .constructed) return;
@@ -490,17 +495,17 @@ fn paint3DTree(
 
     if (std.mem.eql(u8, c.name, "rotate")) {
         const new_transform = applyRotateArgs(c, transform);
-        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, off);
+        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, camera, off);
         return;
     }
     if (std.mem.eql(u8, c.name, "scale")) {
         const new_transform = applyScaleArgs(c, transform);
-        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, off);
+        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, camera, off);
         return;
     }
     if (std.mem.eql(u8, c.name, "translate")) {
         const new_transform = applyTranslateArgs(c, transform);
-        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, off);
+        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, camera, off);
         return;
     }
     if (std.mem.eql(u8, c.name, "material")) {
@@ -518,11 +523,11 @@ fn paint3DTree(
                 if (numberAsF32(f.value)) |n| new_style.roughness = n;
             }
         }
-        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, transform, new_style, lights, off);
+        if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, transform, new_style, lights, camera, off);
         return;
     }
     if (std.mem.eql(u8, c.name, "extrude")) {
-        try drawExtrude(arena, c, fb, transform, style, lights, off);
+        try drawExtrude(arena, c, fb, transform, style, lights, camera, off);
         return;
     }
     // Unknown wrapper / leaf in 3D context — fall through silently
@@ -620,6 +625,7 @@ fn drawExtrude(
     transform: mesh_mod.Mat4,
     style: Style,
     lights: []const render3d.Light,
+    camera: render3d.Camera,
     off: Offset,
 ) !void {
     var leaf: ?value.Value = null;
@@ -680,7 +686,7 @@ fn drawExtrude(
         fb,
         centred,
         final_transform,
-        .{},
+        camera,
         material,
         lights,
         supersample_factor,
@@ -750,6 +756,30 @@ fn meshFromShape(arena: std.mem.Allocator, leaf: value.Value, depth: f32, bevel:
 /// Recognises `ambient(intensity)` (positional or named) and
 /// `directional(from: vec3(x, y, z), intensity: N)`. Anything else is
 /// silently dropped (no lights at all if the array is empty).
+/// Parse `camera(fov:, distance:, near:, far:)` into a `render3d.Camera`.
+/// Missing fields keep the engine default. Recognises angle units
+/// (deg / rad) on `fov:` so `camera(fov: 28deg)` works as expected.
+/// Unknown / non-camera input returns the default camera.
+fn parseCamera(camera_v: ?value.Value) render3d.Camera {
+    var cam = render3d.Camera{};
+    const v = camera_v orelse return cam;
+    if (v != .constructed) return cam;
+    const c = v.constructed;
+    if (!std.mem.eql(u8, c.name, "camera")) return cam;
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "fov")) {
+            if (readAngleRad(f.value)) |rad| cam.fov_rad = rad;
+        } else if (std.mem.eql(u8, f.name, "distance")) {
+            if (numberAsF32(f.value)) |d| cam.distance = d;
+        } else if (std.mem.eql(u8, f.name, "near")) {
+            if (numberAsF32(f.value)) |n| cam.near = n;
+        } else if (std.mem.eql(u8, f.name, "far")) {
+            if (numberAsF32(f.value)) |fa| cam.far = fa;
+        }
+    }
+    return cam;
+}
+
 fn parseLights(arena: std.mem.Allocator, lights_v: ?value.Value) ![]const render3d.Light {
     if (lights_v == null) return &.{};
     if (lights_v.? != .array) return &.{};
