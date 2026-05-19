@@ -44,4 +44,7 @@ test {
     _ = @import("eval.zig");
     _ = @import("sampler.zig");
     _ = @import("render.zig");
+    _ = @import("font.zig");
+    _ = @import("mesh.zig");
+    _ = @import("render3d.zig");
 }

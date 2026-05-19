@@ -1,0 +1,14 @@
+// Mirror of `wasm_entry.zig`'s `buildTasteSample` — same scene
+// described in source so the native parser/eval/render path can be
+// compared byte-for-byte against the WASM render_taste export.
+//
+// Bg + fg geometry and colours must stay in sync with the WASM
+// helper for the parity test to pass.
+
+use std.shapes.*;
+
+scene parity() -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
+  let fg = rect(width: 96px,   height: 96px,   fill: #ff3399);
+  compose [bg, fg]
+}
