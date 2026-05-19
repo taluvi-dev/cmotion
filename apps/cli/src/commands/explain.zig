@@ -105,6 +105,27 @@ const entries = [_]Entry{
         ,
     },
     .{
+        .code = "NAM004",
+        .title = "Forward reference within a block",
+        .body =
+        \\A name was referenced before its `let` declaration in the same
+        \\block. Block lets are lexically scoped — they're visible only
+        \\to code that appears after their declaration. The diagnostic's
+        \\`actual` field names the line and column where the binding
+        \\actually lives so an agent can choose between two repairs:
+        \\
+        \\  - move the declaration above the use (when the order is the
+        \\    only issue), or
+        \\  - hoist the declaration to an enclosing scope (when several
+        \\    lets need to see it)
+        \\
+        \\Distinct from NAM003 (unknown identifier): if the name is
+        \\never declared anywhere in the block, you get NAM003 instead.
+        \\Self-reference (`let x = x + 1`) is also NAM003 — the name
+        \\doesn't exist yet at that point even though it will.
+        ,
+    },
+    .{
         .code = "NAM005",
         .title = "Duplicate top-level declaration",
         .body =
