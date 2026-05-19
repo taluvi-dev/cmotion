@@ -456,16 +456,21 @@ fn acesFilmic(x: f32) f32 {
     return std.math.clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
-/// Procedural environment sampled by direction. The same sky/ground
-/// gradient the ambient pass uses, generalised so reflections of
-/// the env can show up on the surface of metals — that's what
-/// turns "lit metal" into "metallic-looking surface that reflects
-/// its world." Three lobes: a slightly-tinted zenith blue, a
-/// neutral horizon white-ish, a warm earthy nadir. No HDR yet —
-/// values stay in [0, 1] linear.
+/// Procedural environment sampled by direction. Three smooth
+/// lobes (zenith / horizon / nadir) plus a directional "sun" — a
+/// localized bright spot that, when sampled along a reflection
+/// vector, produces the sharp specular highlight characteristic
+/// of HDR-lit metal. The sun is mildly HDR (peak intensity ~5)
+/// so the ACES tone-mapper can preserve a bright but
+/// non-clipping highlight.
+///
+/// Sky / horizon / ground colours pick an "outdoor overcast"
+/// register — pleasant on metal without dominating the diffuse.
+/// Sun direction picks an upper-right angle that lines up with
+/// the taste sample's main directional light (vec3(3, 4, 5)) so
+/// the reflected sun catches the same face of the geometry the
+/// direct light hits.
 fn sampleEnvironment(direction: Vec3) [3]f32 {
-    // Sky / horizon / ground colours. Picked to read as "outdoor
-    // overcast" — pleasant on metal without dominating diffuse.
     const sky: [3]f32 = .{ 0.62, 0.71, 0.86 };
     const horizon: [3]f32 = .{ 0.82, 0.81, 0.78 };
     const ground: [3]f32 = .{ 0.30, 0.25, 0.20 };
@@ -473,14 +478,33 @@ fn sampleEnvironment(direction: Vec3) [3]f32 {
     const y = std.math.clamp(direction.y, -1.0, 1.0);
     var out: [3]f32 = .{ 0, 0, 0 };
     if (y >= 0) {
-        // Upper hemisphere: lerp horizon → sky as we look up.
-        const t = std.math.pow(f32, y, 0.6); // soft falloff for a more believable haze line
+        const t = std.math.pow(f32, y, 0.6);
         inline for (0..3) |k| out[k] = std.math.lerp(horizon[k], sky[k], t);
     } else {
-        // Lower hemisphere: lerp horizon → ground as we look down.
         const t = std.math.pow(f32, -y, 0.6);
         inline for (0..3) |k| out[k] = std.math.lerp(horizon[k], ground[k], t);
     }
+
+    // Add the sun. Direction normalized once at compile time via
+    // explicit math; magnitude of vec3(3, 4, 5) is sqrt(50) so the
+    // unit components are (3/√50, 4/√50, 5/√50).
+    const inv_root50: f32 = 0.1414213562; // 1/√50
+    const sun_dir = Vec3{
+        .x = 3.0 * inv_root50,
+        .y = 4.0 * inv_root50,
+        .z = 5.0 * inv_root50,
+    };
+    const cos_to_sun = std.math.clamp(direction.dot(sun_dir), 0.0, 1.0);
+    // Tight cone: pow=512 narrows the visible disk to ~3° wide
+    // (analogous to the real sun's angular size). Peak intensity
+    // 5.0 sits above [0,1] so the ACES tonemap registers it as
+    // a bright-but-not-clipped highlight.
+    const sun_peak: f32 = 5.0;
+    const sun_falloff = std.math.pow(f32, cos_to_sun, 512.0);
+    // Warm sun colour — very slightly biased toward yellow.
+    const sun_color: [3]f32 = .{ 1.0, 0.95, 0.85 };
+    inline for (0..3) |k| out[k] += sun_color[k] * sun_peak * sun_falloff;
+
     return out;
 }
 
