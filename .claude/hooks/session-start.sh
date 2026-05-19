@@ -38,7 +38,8 @@ fi
 echo "export PATH=\"$ZIG_DIR:\$PATH\"" >> "$CLAUDE_ENV_FILE"
 export PATH="$ZIG_DIR:$PATH"
 
-# Vendor the tree-sitter C runtime — fetch-deps.sh is itself idempotent.
+# Vendor native build deps (tree-sitter C runtime + stb_truetype + the
+# bundled DM Sans Bold TTF). fetch-deps.sh is idempotent.
 "$CLAUDE_PROJECT_DIR/apps/cli/scripts/fetch-deps.sh"
 
 # pnpm workspace deps (web build, tree-sitter generate). zig build itself
