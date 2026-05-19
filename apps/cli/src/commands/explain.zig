@@ -283,6 +283,51 @@ const entries = [_]Entry{
         \\diff against the source if you need to see what would change).
         ,
     },
+    .{
+        .code = "EVL001",
+        .title = "Expression form not yet supported by the interpreter",
+        .body =
+        \\The reference interpreter is stage 4 of the cmotion roadmap and
+        \\lands in slices. The v0 cut covers literals, identifiers,
+        \\paren, unary, binary, blocks-with-let, and color literals —
+        \\everything else (function calls, method calls, if/else, match,
+        \\animate, compose, lambdas, scenes, ...) is on the way but not
+        \\wired through eval yet. The diagnostic span points at the
+        \\offending sub-expression; the surrounding let evaluates to
+        \\`nil` so the rest of the program still runs.
+        ,
+    },
+    .{
+        .code = "EVL002",
+        .title = "Type mismatch during evaluation",
+        .body =
+        \\An operator or constructor received a value of the wrong kind
+        \\(e.g. boolean `&&` applied to a number, arithmetic applied to
+        \\a string, a color component that didn't reduce to a number).
+        \\The narrow `cmo check` pass catches most of these as TYP002
+        \\before eval runs; EVL002 is the runtime backstop.
+        \\
+        \\Unit mismatches inside arithmetic (`3px + 4s`) also surface
+        \\under this code today. Once the stage-2 unit algebra lands,
+        \\those will move to `UNT*` instead.
+        ,
+    },
+    .{
+        .code = "EVL003",
+        .title = "Unresolved identifier at eval time",
+        .body =
+        \\A name was referenced that has no binding when the interpreter
+        \\reaches it. `cmo check` normally catches this as NAM003 first,
+        \\so EVL003 means either (a) check was skipped, or (b) a name
+        \\that was visible to check became invisible to eval (a known
+        \\limitation: today, scenes/components don't enter their bodies'
+        \\scopes for eval, so a top-level let referencing a scene-local
+        \\binding would surface here).
+        \\
+        \\Repair: declare the name with `let` or import it before this
+        \\use; or run `cmo check` first to see the matching NAM003.
+        ,
+    },
 };
 
 pub fn run(ctx: Context, args: []const []const u8) !u8 {
