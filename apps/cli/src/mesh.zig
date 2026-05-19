@@ -759,20 +759,19 @@ pub fn extrudeGlyph(
     size_px: f32,
     depth: f32,
     bevel: f32,
+    bevel_segments: u32,
+    curve_segments: u32,
 ) !?Mesh {
-    const contours = try font.glyphContours(arena, codepoint, size_px) orelse return null;
+    const contours = try font.glyphContours(arena, codepoint, size_px, curve_segments) orelse return null;
     if (contours.len == 0) return null;
 
-    // Convert font.Vec2 → mesh.Vec2. They have the same shape but
-    // are distinct types so neither module has to depend on the
-    // other.
     const converted = try arena.alloc([]const Vec2, contours.len);
     for (contours, 0..) |fc, i| {
         const buf = try arena.alloc(Vec2, fc.len);
         for (fc, 0..) |p, j| buf[j] = .{ .x = p.x, .y = p.y };
         converted[i] = buf;
     }
-    return try extrudeContoursBeveled(arena, converted, depth, bevel);
+    return try extrudeContoursBeveled(arena, converted, depth, bevel, bevel_segments);
 }
 
 /// Move every vertex of a contour along its angle bisector by
@@ -872,25 +871,24 @@ pub fn extrudeContoursBeveled(
     contours: []const []const Vec2,
     depth: f32,
     bevel: f32,
+    bevel_segments: u32,
 ) !Mesh {
-    if (bevel <= 0) return extrudeContours(arena, contours, depth);
+    if (bevel <= 0 or bevel_segments == 0) return extrudeContours(arena, contours, depth);
     if (contours.len == 0) return Mesh{ .positions = &.{}, .normals = &.{}, .indices = &.{} };
 
     const half = depth * 0.5;
-    // Cap the bevel so the side-wall section (which sits between
-    // +half-bevel and -half+bevel) doesn't invert.
     const eff_bevel = @min(bevel, half * 0.45);
+    const segs: usize = @intCast(bevel_segments);
 
-    // Inset each contour. If any inset collapses (degenerate or
-    // self-intersecting), halve the bevel and retry once; fall
-    // back to flat extrusion if it still fails.
+    // Inset each contour (toward material interior for outer,
+    // toward hole interior for holes). Retry with smaller bevel
+    // on degenerate / self-intersecting insets.
     var inset = try arena.alloc([]const Vec2, contours.len);
     var ci: usize = 0;
     while (ci < contours.len) : (ci += 1) {
         inset[ci] = try insetContour(arena, contours[ci], eff_bevel, ci == 0);
     }
     if (!insetLooksSane(contours, inset)) {
-        // Try a smaller bevel.
         const smaller = eff_bevel * 0.5;
         ci = 0;
         while (ci < contours.len) : (ci += 1) {
@@ -908,38 +906,43 @@ pub fn extrudeContoursBeveled(
     var total: usize = 0;
     for (contours) |c| total += c.len;
 
-    const verts_per_contour_vertex: usize = 6;
-    const total_verts = verts_per_contour_vertex * total;
+    // Vertex layout:
+    //   Rings 0 ..= segs       — front bevel, parameterised by a
+    //                            quarter-circle profile. Ring 0 is
+    //                            the front cap perimeter (inset @
+    //                            +half, normal +z). Ring segs is the
+    //                            front edge of the side wall
+    //                            (outline @ +half-bevel, outward).
+    //   Rings segs+1 ..= 2segs+1 — back bevel, mirrored. Ring segs+1
+    //                            is the back edge of the side wall
+    //                            (outline @ -half+bevel, outward).
+    //                            Ring 2segs+1 is the back cap
+    //                            perimeter (inset @ -half, normal
+    //                            -z).
+    //
+    // The wall middle (between front bevel ring segs and back bevel
+    // ring 0 = ring segs+1) is a single vertical quad strip.
+    //
+    // Total rings = 2*segs + 2. For segs=4 that's 10 rings * total
+    // outline vertices.
+    const rings = 2 * segs + 2;
+    const total_verts = rings * total;
     const positions = try arena.alloc(Vec3, total_verts);
     const normals = try arena.alloc(Vec3, total_verts);
 
-    // Lay out the 6 rings per contour vertex.
-    var base: usize = 0;
+    var contour_off: usize = 0;
     var co: usize = 0;
     while (co < contours.len) : (co += 1) {
         const outline = contours[co];
         const inset_co = inset[co];
         const n = outline.len;
 
-        // Determine outward direction per *vertex* (averaged across
-        // its two adjacent edges) so the bevel slope normal lines
-        // up with the inset direction. For an inset move along
-        // direction d, the slope normal at the upper edge is
-        // roughly (d, 0) tilted up by `bevel / inset_length`; for
-        // v0 we use (d_xy_normalised, +1).normalise which gives a
-        // 45° slope normal — close to the actual slope for typical
-        // bevel proportions.
         var i: usize = 0;
         while (i < n) : (i += 1) {
             const outline_v = outline[i];
             const inset_v = inset_co[i];
 
-            // The slope direction in xy is the vector from outline
-            // toward inset (the bevel rolls in this direction
-            // going from the wall up to the cap). For an outer
-            // CCW contour this points toward the material; for a
-            // CW hole it points toward the hole interior. Either
-            // way it's the "inward" direction of the contour.
+            // Outward direction in xy at this vertex.
             var sx = inset_v.x - outline_v.x;
             var sy = inset_v.y - outline_v.y;
             const sl = @sqrt(sx * sx + sy * sy);
@@ -947,63 +950,74 @@ pub fn extrudeContoursBeveled(
                 sx /= sl;
                 sy /= sl;
             }
-            // Outward of the wall (opposite of slope-xy).
             const outward_x = -sx;
             const outward_y = -sy;
 
-            // Slope normal: 45° between outward and +z (or -z for
-            // the back bevel). normalise(outward + z).
-            const front_slope = Vec3{
-                .x = outward_x * std.math.sqrt1_2,
-                .y = outward_y * std.math.sqrt1_2,
-                .z = std.math.sqrt1_2,
-            };
-            const back_slope = Vec3{
-                .x = outward_x * std.math.sqrt1_2,
-                .y = outward_y * std.math.sqrt1_2,
-                .z = -std.math.sqrt1_2,
-            };
-            const wall_n = Vec3{ .x = outward_x, .y = outward_y, .z = 0 };
+            // Front bevel: rings 0 .. segs, parameterised by
+            // angle θ ∈ [0, π/2]. At θ=0 we're at the inset xy at
+            // z=+half (cap perimeter, normal +z); at θ=π/2 we're at
+            // the outline xy at z=+half-bevel (wall start, normal
+            // outward). The profile traces a quarter-circle so the
+            // corner reads as rounded.
+            var k: usize = 0;
+            while (k <= segs) : (k += 1) {
+                const t = @as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(segs));
+                const angle = (std.math.pi * 0.5) * t;
+                const s = @sin(angle);
+                const c = @cos(angle);
+                const x = inset_v.x + (outline_v.x - inset_v.x) * s;
+                const y = inset_v.y + (outline_v.y - inset_v.y) * s;
+                const z = half - eff_bevel * (1.0 - c);
+                const idx = k * total + contour_off + i;
+                positions[idx] = .{ .x = x, .y = y, .z = z };
+                normals[idx] = .{
+                    .x = outward_x * s,
+                    .y = outward_y * s,
+                    .z = c,
+                };
+            }
 
-            // Ring 0: front cap perimeter (inset @ +half), normal +z.
-            positions[base + 0 * total + i] = .{ .x = inset_v.x, .y = inset_v.y, .z = half };
-            normals[base + 0 * total + i] = .{ .x = 0, .y = 0, .z = 1 };
-            // Ring 1: front bevel top (inset @ +half), slope normal.
-            positions[base + 1 * total + i] = .{ .x = inset_v.x, .y = inset_v.y, .z = half };
-            normals[base + 1 * total + i] = front_slope;
-            // Ring 2: wall top (outline @ +half - bevel), outward normal.
-            positions[base + 2 * total + i] = .{ .x = outline_v.x, .y = outline_v.y, .z = half - eff_bevel };
-            normals[base + 2 * total + i] = wall_n;
-            // Ring 3: wall bottom (outline @ -half + bevel), outward normal.
-            positions[base + 3 * total + i] = .{ .x = outline_v.x, .y = outline_v.y, .z = -half + eff_bevel };
-            normals[base + 3 * total + i] = wall_n;
-            // Ring 4: back bevel bottom (inset @ -half), back slope normal.
-            positions[base + 4 * total + i] = .{ .x = inset_v.x, .y = inset_v.y, .z = -half };
-            normals[base + 4 * total + i] = back_slope;
-            // Ring 5: back cap perimeter (inset @ -half), normal -z.
-            positions[base + 5 * total + i] = .{ .x = inset_v.x, .y = inset_v.y, .z = -half };
-            normals[base + 5 * total + i] = .{ .x = 0, .y = 0, .z = -1 };
+            // Back bevel: rings segs+1 .. 2*segs+1. Mirrors the
+            // front around z=0. At ring segs+1 we're at the
+            // outline xy at z=-half+bevel (wall end, outward). At
+            // ring 2*segs+1 we're at the inset xy at z=-half (back
+            // cap perimeter, normal -z).
+            k = 0;
+            while (k <= segs) : (k += 1) {
+                const t = @as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(segs));
+                const angle = (std.math.pi * 0.5) * t;
+                const s = @sin(angle);
+                const c = @cos(angle);
+                const x = outline_v.x + (inset_v.x - outline_v.x) * s;
+                const y = outline_v.y + (inset_v.y - outline_v.y) * s;
+                const z = -half + eff_bevel * c;
+                const idx = (segs + 1 + k) * total + contour_off + i;
+                positions[idx] = .{ .x = x, .y = y, .z = z };
+                normals[idx] = .{
+                    .x = outward_x * c,
+                    .y = outward_y * c,
+                    .z = -s,
+                };
+            }
         }
-        base += n;
+        contour_off += n;
     }
 
-    // Build indices.
-    // - Front cap triangulation indexes into ring 0 (offset 0 from base).
-    // - Back cap triangulation indexes into ring 5 (offset 5*total from base).
-    // - Three quad strips per contour edge: front bevel, wall, back bevel.
+    // Indices: front cap + back cap (from earClip) + 2*segs + 1
+    // strips per contour edge.
+    const strip_count = rings - 1;
+    const max_indices = front_tris.len * 2 + 6 * total * strip_count;
+    const indices = try arena.alloc(u32, max_indices);
     var ti: usize = 0;
-    // Worst-case: front_tris.len + back_tris.len + 3 strips * 2 tris * total_edges.
-    const idx_cap: usize = front_tris.len + front_tris.len + 3 * 2 * total * 3;
-    const indices = try arena.alloc(u32, idx_cap);
 
-    // Front cap (ring 0 indices = the cap's vertex indices directly).
+    // Front cap — indices into ring 0 (offset 0 from contour_off).
     for (front_tris) |idx| {
         indices[ti] = idx;
         ti += 1;
     }
-    // Back cap: same triangulation, reversed winding, offset by 5*total.
+    // Back cap — reversed winding, offset by (2*segs+1)*total.
+    const back_offset: u32 = @intCast((2 * segs + 1) * total);
     var bi: usize = 0;
-    const back_offset: u32 = @intCast(5 * total);
     while (bi < front_tris.len) : (bi += 3) {
         indices[ti + 0] = front_tris[bi + 2] + back_offset;
         indices[ti + 1] = front_tris[bi + 1] + back_offset;
@@ -1011,39 +1025,35 @@ pub fn extrudeContoursBeveled(
         ti += 3;
     }
 
-    // Quad strips per contour. For each strip s in {front_bevel,
-    // wall, back_bevel}, ring_top and ring_bot offsets:
-    //   front bevel: top=ring1 (offset 1*total), bot=ring2 (2*total)
-    //   wall:        top=ring2 (2*total),        bot=ring3 (3*total)
-    //   back bevel:  top=ring3 (3*total),        bot=ring4 (4*total)
-    base = 0;
+    // Quad strips between adjacent rings. For each contour, walk
+    // each edge and emit one quad per strip-level (2*segs + 1
+    // strips total: segs front bevel + 1 wall middle + segs back
+    // bevel).
+    contour_off = 0;
     co = 0;
     while (co < contours.len) : (co += 1) {
         const n = contours[co].len;
-        const ring_offsets = [_]struct { top: usize, bot: usize }{
-            .{ .top = 1 * total + base, .bot = 2 * total + base },
-            .{ .top = 2 * total + base, .bot = 3 * total + base },
-            .{ .top = 3 * total + base, .bot = 4 * total + base },
-        };
-        for (ring_offsets) |ro| {
+        var strip_k: usize = 0;
+        while (strip_k < strip_count) : (strip_k += 1) {
+            const ring_top = strip_k * total + contour_off;
+            const ring_bot = (strip_k + 1) * total + contour_off;
             var s: u32 = 0;
             while (s < n) : (s += 1) {
                 const s_next = (s + 1) % @as(u32, @intCast(n));
-                const ta: u32 = @intCast(ro.top + s);
-                const tb: u32 = @intCast(ro.top + s_next);
-                const ba_: u32 = @intCast(ro.bot + s);
-                const bb: u32 = @intCast(ro.bot + s_next);
-                // Quad: ta, tb, bb, ba. Two triangles CCW from outside.
+                const ta: u32 = @intCast(ring_top + s);
+                const tb: u32 = @intCast(ring_top + s_next);
+                const ba: u32 = @intCast(ring_bot + s);
+                const bb: u32 = @intCast(ring_bot + s_next);
                 indices[ti + 0] = ta;
                 indices[ti + 1] = tb;
                 indices[ti + 2] = bb;
                 indices[ti + 3] = ta;
                 indices[ti + 4] = bb;
-                indices[ti + 5] = ba_;
+                indices[ti + 5] = ba;
                 ti += 6;
             }
         }
-        base += n;
+        contour_off += n;
     }
 
     return .{

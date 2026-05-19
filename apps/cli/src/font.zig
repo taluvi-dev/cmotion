@@ -166,6 +166,7 @@ pub fn glyphContours(
     arena: std.mem.Allocator,
     codepoint: u32,
     size_px: f32,
+    curve_segments: u32,
 ) !?[]const []const Vec2 {
     ensureInit();
     var vertices: [*c]c.stbtt_vertex = undefined;
@@ -204,15 +205,15 @@ pub fn glyphContours(
                 try current.append(.{ .x = x, .y = y });
             },
             c.STBTT_vcurve => {
-                // Quadratic Bézier: subdivide into a fixed number of
-                // straight segments. 12 is enough for any glyph at a
-                // typical screen size — curves under 8 pixels long
-                // would look jagged with fewer, but most strokes are
-                // larger than that at 96-pixel cap height.
+                // Quadratic Bézier — subdivide into `curve_segments`
+                // straight chunks. Three.js's ExtrudeGeometry defaults
+                // to 64; 32 is enough for ~96-px-tall glyphs at HD
+                // viewing distance while keeping the triangle count
+                // sane through the bevel rings.
                 const p0 = current.items[current.items.len - 1];
                 const cx = @as(f32, @floatFromInt(v.cx)) * scale;
                 const cy = @as(f32, @floatFromInt(v.cy)) * scale;
-                const steps = 12;
+                const steps = curve_segments;
                 var s: usize = 1;
                 while (s <= steps) : (s += 1) {
                     const t = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(steps));
@@ -223,16 +224,16 @@ pub fn glyphContours(
                 }
             },
             c.STBTT_vcubic => {
-                // CFF / OTF cubics. DM Sans is TTF (only quadratics)
+                // CFF / OTF cubics. DM Sans is TTF (quadratics only)
                 // so this branch is dead for our bundled font, but
-                // it's small and prevents a silent gap if we ship a
-                // different font later.
+                // it stays in for future fonts. Use a few more
+                // segments since cubics curve harder.
                 const p0 = current.items[current.items.len - 1];
                 const cx = @as(f32, @floatFromInt(v.cx)) * scale;
                 const cy = @as(f32, @floatFromInt(v.cy)) * scale;
                 const cx1 = @as(f32, @floatFromInt(v.cx1)) * scale;
                 const cy1 = @as(f32, @floatFromInt(v.cy1)) * scale;
-                const steps = 16;
+                const steps = curve_segments + curve_segments / 2;
                 var s: usize = 1;
                 while (s <= steps) : (s += 1) {
                     const t = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(steps));

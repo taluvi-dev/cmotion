@@ -8,6 +8,14 @@ const stb_root = "vendor/stb";
 const stb_header = stb_root ++ "/stb_truetype.h";
 const stb_impl = "src/stb_impl.c";
 const font_file = "vendor/fonts/DMSans-Bold.ttf";
+const three_js = "vendor/three/three.module.min.js";
+const viewer_index_html = "assets/viewer/index.html";
+const viewer_cmotion_three_js = "assets/viewer/cmotion-three.js";
+
+const WasmBuild = struct {
+    step: *std.Build.Step,
+    bin: std.Build.LazyPath,
+};
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -46,6 +54,20 @@ pub fn build(b: *std.Build) void {
     // this indirection.
     exe_mod.addAnonymousImport("font_ttf", .{ .root_source_file = b.path(font_file) });
 
+    // ---- WASM step (built first; the native binary embeds the WASM
+    // artifact for `cmo open` to serve). Building the WASM here also
+    // means `zig build` covers both targets so the parity / interp
+    // tests can rely on a fresh artifact.
+    const wasm_build = addWasmStep(b);
+
+    // Embed the viewer assets into the native binary so `cmo open` is
+    // self-contained — no on-disk asset paths to resolve, no need to
+    // co-locate the wasm or three.js with the binary.
+    exe_mod.addAnonymousImport("viewer_index_html", .{ .root_source_file = b.path(viewer_index_html) });
+    exe_mod.addAnonymousImport("viewer_cmotion_three_js", .{ .root_source_file = b.path(viewer_cmotion_three_js) });
+    exe_mod.addAnonymousImport("three_module_min_js", .{ .root_source_file = b.path(three_js) });
+    exe_mod.addAnonymousImport("cmotion_render_wasm", .{ .root_source_file = wasm_build.bin });
+
     const exe = b.addExecutable(.{
         .name = "cmotion",
         .root_module = exe_mod,
@@ -65,17 +87,6 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
-    // ---- WASM build target ---------------------------------------
-    //
-    // A second build of the renderer + supporting modules, compiled
-    // to wasm32-freestanding for the browser, Cloudflare container,
-    // and anything else that can't load the native binary. Same
-    // source as the native CLI; the entry point is the only
-    // wasm-specific file.
-    //
-    // Run with: `zig build wasm` → apps/cli/zig-out/bin/cmotion-render.wasm
-    const wasm_step = addWasmStep(b);
-
     // ---- WASM ↔ native parity test --------------------------------
     //
     // Runs `tests/wasm-parity.mjs` under Node. The script renders the
@@ -84,41 +95,77 @@ pub fn build(b: *std.Build) void {
     // pixel channels. Depends on both artifacts existing.
     const parity_cmd = b.addSystemCommand(&.{ "node", "tests/wasm-parity.mjs" });
     parity_cmd.step.dependOn(b.getInstallStep()); // native exe
-    parity_cmd.step.dependOn(wasm_step); // wasm artifact
+    parity_cmd.step.dependOn(wasm_build.step); // wasm artifact
     const parity_step = b.step("test-parity", "Render a fixture via native + WASM and assert pixel equality");
     parity_step.dependOn(&parity_cmd.step);
+
+    // ---- WASM interpreter smoke test --------------------------------
+    //
+    // Drives the parse_eval / sample_at exports through Node, parses
+    // the resulting JSON value tree, and asserts the expected shape.
+    // This is the contract a JS-side renderer (Three.js, canvas, etc.)
+    // depends on, so a regression here would break every downstream
+    // consumer.
+    const interp_cmd = b.addSystemCommand(&.{ "node", "tests/wasm-interp-smoke.mjs" });
+    interp_cmd.step.dependOn(wasm_build.step);
+    const interp_step = b.step("test-interp", "Drive the WASM interpreter (parse_eval + sample_at) from Node");
+    interp_step.dependOn(&interp_cmd.step);
 }
 
-fn addWasmStep(b: *std.Build) *std.Build.Step {
+fn addWasmStep(b: *std.Build) WasmBuild {
+    // wasm32-wasi: gives us a libc layer (wasi-libc bundled with Zig)
+    // so tree-sitter's `parser.c` + `lib.c` compile cleanly without
+    // hand-rolling shims for `fdopen` / endian intrinsics / etc.
+    // Artifact is larger than freestanding (we pay for libc), but it
+    // unlocks the *interpreter* in WASM — parse + lower + eval +
+    // sampler all live in the artifact, so the browser can drive a
+    // renderer (Three.js) from a sampled value tree without round-
+    // tripping to a server.
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
-        .os_tag = .freestanding,
+        .os_tag = .wasi,
     });
-    // Always optimize the WASM artifact for size — it's network-
-    // delivered every time someone loads the editor.
     const wasm_optimize: std.builtin.OptimizeMode = .ReleaseSmall;
+
+    const wasm_c_flags: []const []const u8 = &.{
+        "-std=c11",
+        "-D_DEFAULT_SOURCE",
+        // tree-sitter's portable/endian.h has no wasi branch; force it onto
+        // the `<endian.h>` path so we pick up wasi-libc's musl-derived
+        // le16toh/be16toh instead of falling through to `#error`.
+        "-DHAVE_ENDIAN_H=1",
+        "-Wno-unused-but-set-variable",
+        "-Wno-unused-variable",
+        "-Wno-unused-parameter",
+        "-fno-sanitize=undefined",
+    };
 
     const wasm_mod = b.createModule(.{
         .root_source_file = b.path("src/wasm_entry.zig"),
         .target = wasm_target,
         .optimize = wasm_optimize,
+        .link_libc = true,
     });
+
+    // Tree-sitter runtime + cmotion grammar. Same C sources as the
+    // native build; wasi-libc picks them up cleanly.
+    wasm_mod.addIncludePath(b.path(ts_runtime_root ++ "/lib/include"));
+    wasm_mod.addIncludePath(b.path(ts_runtime_root ++ "/lib/src"));
+    wasm_mod.addIncludePath(b.path(grammar_root ++ "/src"));
+    wasm_mod.addCSourceFile(.{ .file = b.path(ts_runtime_lib), .flags = wasm_c_flags });
+    wasm_mod.addCSourceFile(.{ .file = b.path(grammar_parser), .flags = wasm_c_flags });
 
     const wasm_exe = b.addExecutable(.{
         .name = "cmotion-render",
         .root_module = wasm_mod,
     });
-    // wasm-ld doesn't pick up exports unless rdynamic is set; without
-    // this, `export fn …` symbols get stripped as dead code.
     wasm_exe.rdynamic = true;
-    // Freestanding wasm modules don't run an entry point — the host
-    // imports the exports and drives them directly.
     wasm_exe.entry = .disabled;
 
     const wasm_install = b.addInstallArtifact(wasm_exe, .{});
     const wasm_step = b.step("wasm", "Build the WASM artifact for browser / Cloudflare hosts");
     wasm_step.dependOn(&wasm_install.step);
-    return wasm_step;
+    return .{ .step = wasm_step, .bin = wasm_exe.getEmittedBin() };
 }
 
 fn requireVendoredDeps(b: *std.Build) void {

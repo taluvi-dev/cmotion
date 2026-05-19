@@ -1,0 +1,241 @@
+---
+// /play — fresh, unlinked sandbox for the cmotion DSL.
+//
+// This page intentionally bypasses Starlight's layout: it's a
+// full-bleed editor + live preview, not a docs page. It's unlisted
+// (no sidebar entry, no nav link) until the editor experience is
+// solid enough to feature.
+//
+// Architecture:
+//   - The browser runs the cmotion *interpreter* (cmotion-render.wasm)
+//     — parse + lower + eval + sampler — and feeds the resulting JSON
+//     value tree to a Three.js renderer (src/scripts/cmotion-viewer.ts).
+//   - Hitting "Render" re-parses the source and seeks to t=0.
+//   - "Play" runs an rAF loop over the declared duration; "Download
+//     WebM" records the same loop via canvas.captureStream.
+//
+// The video length is read from the source itself
+// (`duration: Duration = 6s` style), so the download button records
+// exactly what the .cm declares.
+
+const initialSource = `// edit me — render to apply
+use std.shapes.*;
+
+scene play(duration: Duration = 6s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
+  let fg = rect(width: 96px,   height: 96px,   fill: #ff3399);
+  compose [bg, fg]
+}
+`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>cmotion · play</title>
+    <link rel="icon" href="/favicon.svg" />
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #fff;
+        --fg: #000;
+        --muted: #777;
+        --hair: #d8d8d8;
+        --accent: #000;
+        --accent-fg: #fff;
+        --panel: #fafafa;
+        --warn: #b00020;
+      }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+        font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; }
+      body { display: grid; grid-template-rows: 44px 1fr; }
+      header { display: flex; align-items: center; gap: 10px; padding: 0 14px;
+        border-bottom: 1px solid var(--hair); background: var(--bg); }
+      header h1 { font-size: 13px; font-weight: 600; margin: 0; }
+      header h1 a { color: var(--fg); text-decoration: none; }
+      header .status { color: var(--muted); font-size: 12px; flex: 1;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      header .status.err { color: var(--warn); }
+      button { background: var(--accent); color: var(--accent-fg); border: 0;
+        padding: 6px 12px; border-radius: 4px; cursor: pointer; font: inherit;
+        font-weight: 600; }
+      button.secondary { background: transparent; color: var(--fg);
+        border: 1px solid var(--hair); font-weight: 500; }
+      button:disabled { opacity: 0.4; cursor: progress; }
+      main { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+      .pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+      .pane + .pane { border-left: 1px solid var(--hair); }
+      .editor { position: relative; }
+      .editor textarea {
+        flex: 1; width: 100%; height: 100%; box-sizing: border-box;
+        padding: 16px; border: 0; outline: 0; resize: none; background: var(--panel);
+        font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        color: var(--fg); tab-size: 2;
+      }
+      .stage { position: relative; background: #000; }
+      canvas { width: 100%; height: 100%; display: block; }
+      .controls { position: absolute; left: 12px; right: 12px; bottom: 12px;
+        display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+        background: rgba(255,255,255,0.92); border: 1px solid var(--hair);
+        border-radius: 6px; backdrop-filter: blur(6px); }
+      .controls .scrub { flex: 1; }
+      .controls .scrub input { width: 100%; }
+      .controls .t { font-variant-numeric: tabular-nums; color: var(--muted);
+        min-width: 88px; font-size: 12px; text-align: right; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1><a href="/">cmotion</a> · play</h1>
+      <span class="status" id="status">booting…</span>
+      <button id="btn-render">Render</button>
+      <button class="secondary" id="btn-play">Play</button>
+      <button class="secondary" id="btn-png" disabled>Frame PNG</button>
+      <button class="secondary" id="btn-webm" disabled>Download WebM</button>
+    </header>
+
+    <main>
+      <section class="pane editor">
+        <textarea id="src" spellcheck="false" autocapitalize="off" autocorrect="off">{initialSource}</textarea>
+      </section>
+
+      <section class="pane stage">
+        <canvas id="stage"></canvas>
+        <div class="controls">
+          <button class="secondary" id="btn-back" title="seek to 0">↺</button>
+          <div class="scrub">
+            <input id="scrub" type="range" min="0" max="6" step="0.01" value="0" />
+          </div>
+          <span class="t" id="tval">0.00 / 6.00s</span>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      import { boot } from "../scripts/cmotion-viewer.ts";
+
+      const canvas = document.getElementById("stage") as HTMLCanvasElement;
+      const srcEl = document.getElementById("src") as HTMLTextAreaElement;
+      const statusEl = document.getElementById("status") as HTMLElement;
+      const btnRender = document.getElementById("btn-render") as HTMLButtonElement;
+      const btnPlay = document.getElementById("btn-play") as HTMLButtonElement;
+      const btnPng = document.getElementById("btn-png") as HTMLButtonElement;
+      const btnWebm = document.getElementById("btn-webm") as HTMLButtonElement;
+      const btnBack = document.getElementById("btn-back") as HTMLButtonElement;
+      const scrub = document.getElementById("scrub") as HTMLInputElement;
+      const tVal = document.getElementById("tval") as HTMLElement;
+
+      function setStatus(msg: string, isErr = false) {
+        statusEl.textContent = msg;
+        statusEl.classList.toggle("err", isErr);
+      }
+      function formatTime(t: number, total: number) {
+        return `${t.toFixed(2)} / ${total.toFixed(2)}s`;
+      }
+      function download(blob: Blob, name: string) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = name; a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+
+      let view: Awaited<ReturnType<typeof boot>> | null = null;
+      let playing = false;
+      let playStart = 0;
+      let rafId = 0;
+
+      function renderSource() {
+        if (!view) return;
+        try {
+          view.load(srcEl.value);
+          const d = view.durationSeconds;
+          scrub.max = String(d);
+          scrub.value = "0";
+          tVal.textContent = formatTime(0, d);
+          setStatus(`interp v${view.versions.cmotion} · three.js r${view.versions.three} · duration ${d}s`);
+          btnPng.disabled = false;
+          btnWebm.disabled = false;
+        } catch (e: any) {
+          setStatus(e.message, true);
+          btnPng.disabled = true;
+          btnWebm.disabled = true;
+        }
+      }
+
+      function tick() {
+        if (!view || !playing) return;
+        const elapsed = (performance.now() - playStart) / 1000;
+        const d = view.durationSeconds;
+        const t = elapsed % d; // loop
+        view.seek(t);
+        scrub.value = String(t);
+        tVal.textContent = formatTime(t, d);
+        rafId = requestAnimationFrame(tick);
+      }
+
+      function setPlaying(p: boolean) {
+        playing = p;
+        btnPlay.textContent = p ? "Pause" : "Play";
+        if (p) {
+          if (!view) return;
+          const startT = parseFloat(scrub.value);
+          playStart = performance.now() - startT * 1000;
+          rafId = requestAnimationFrame(tick);
+        } else {
+          cancelAnimationFrame(rafId);
+        }
+      }
+
+      btnRender.addEventListener("click", () => {
+        setPlaying(false);
+        renderSource();
+      });
+      btnPlay.addEventListener("click", () => setPlaying(!playing));
+      btnBack.addEventListener("click", () => {
+        setPlaying(false);
+        scrub.value = "0";
+        if (view) {
+          view.seek(0);
+          tVal.textContent = formatTime(0, view.durationSeconds);
+        }
+      });
+      scrub.addEventListener("input", () => {
+        if (!view) return;
+        setPlaying(false);
+        const t = parseFloat(scrub.value);
+        view.seek(t);
+        tVal.textContent = formatTime(t, view.durationSeconds);
+      });
+      btnPng.addEventListener("click", async () => {
+        if (!view) return;
+        const blob = await view.captureFrame();
+        if (blob) download(blob, `cmotion-${Date.now()}.png`);
+      });
+      btnWebm.addEventListener("click", async () => {
+        if (!view) return;
+        btnWebm.disabled = true;
+        const original = btnWebm.textContent;
+        btnWebm.textContent = "recording…";
+        setPlaying(false);
+        try {
+          const blob = await view.captureClip();
+          download(blob, `cmotion-${Date.now()}.webm`);
+        } catch (e: any) {
+          setStatus(e.message, true);
+        } finally {
+          btnWebm.disabled = false;
+          btnWebm.textContent = original;
+        }
+      });
+
+      try {
+        view = await boot(canvas);
+        renderSource();
+      } catch (e: any) {
+        setStatus(e.message, true);
+      }
+    </script>
+  </body>
+</html>

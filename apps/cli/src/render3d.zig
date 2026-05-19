@@ -51,6 +51,18 @@ pub const Material = struct {
     /// rough (broad, almost-imperceptible specular). The taste sample
     /// uses 0.35 — slightly rough metal-ish surface.
     roughness: f32 = 1.0,
+    /// Self-illuminating colour added on top of the lit result. Lets
+    /// surfaces facing away from every light still read with material
+    /// colour instead of going pitch black (or, in our case, looking
+    /// "transparent" against a dark background). Three.js's
+    /// MeshStandardMaterial calls this `emissive`.
+    emissive: [4]u8 = .{ 0, 0, 0, 255 },
+    /// Multiplier on `emissive` — separated so a scene can keep a
+    /// constant emissive *colour* (often tied to the hue animation)
+    /// while dialling the intensity independently. Three.js's
+    /// `emissiveIntensity` defaults to 1; the taste sample renders
+    /// at 0.6.
+    emissive_intensity: f32 = 1.0,
 };
 
 pub const Framebuffer = struct {
@@ -59,13 +71,21 @@ pub const Framebuffer = struct {
     height: u32,
 };
 
-/// Per-draw camera. Picked to frame a glyph at the canvas centre:
-/// look down -z from a distance, FOV chosen so a 100-unit-wide
-/// shape comfortably fills the canvas. Customisable later when
-/// scenes ask for it.
+/// Per-draw camera. Default FOV / distance picked to match the
+/// near-orthographic look the cmotion.org Three.js ScenePreview
+/// uses for the taste sample — 28° FOV at distance proportional
+/// to the canvas size. A wider FOV (e.g. 60°) exaggerates
+/// perspective foreshortening, making extruded letters read as
+/// "long tubes" when rotated edge-on; the narrow FOV preserves
+/// the letter's depth-to-width ratio across rotations.
 pub const Camera = struct {
-    distance: f32 = 300.0,
-    fov_rad: f32 = std.math.pi / 3.0, // 60°
+    /// Camera sits at +z, looking toward origin. Default keeps a
+    /// ~96-unit-tall glyph framed at roughly 1/3 of canvas height
+    /// — matches the ScenePreview's framing.
+    distance: f32 = 580.0,
+    /// 28° in radians. Near-orthographic — matches the
+    /// ScenePreview's `PerspectiveCamera(28, …)`.
+    fov_rad: f32 = 28.0 * std.math.pi / 180.0,
     near: f32 = 1.0,
     far: f32 = 10000.0,
 };
@@ -376,14 +396,18 @@ fn rasteriseTriangleClipped(
             // Three edge functions; barycentric weights = each
             // edge's value scaled by inv_area. Same-sign requirement
             // accepts both front- and back-wound triangles.
-            const w_a = edgeFn(b.x, b.y, c.x, c.y, fx, fy) * inv_area;
-            const w_b = edgeFn(c.x, c.y, a.x, a.y, fx, fy) * inv_area;
-            const w_c = edgeFn(a.x, a.y, b.x, b.y, fx, fy) * inv_area;
-            // For back-wound triangles all three are negative —
-            // negate so we can use one positive check.
-            const wa = if (area < 0) -w_a else w_a;
-            const wb = if (area < 0) -w_b else w_b;
-            const wc = if (area < 0) -w_c else w_c;
+            // Dividing the sub-area edge functions by the signed
+            // triangle area already produces positive barycentrics
+            // for inside points REGARDLESS of winding (the signs of
+            // the numerator and denominator cancel). The earlier
+            // "if area<0 then negate" step was incorrectly *re-*
+            // flipping the sign on screen-CW triangles (which, due
+            // to the y-flip in our projection, are world-CCW front
+            // faces) — silently culling every front-facing triangle.
+            // Just trust the division.
+            const wa = edgeFn(b.x, b.y, c.x, c.y, fx, fy) * inv_area;
+            const wb = edgeFn(c.x, c.y, a.x, a.y, fx, fy) * inv_area;
+            const wc = edgeFn(a.x, a.y, b.x, b.y, fx, fy) * inv_area;
             if (wa < 0 or wb < 0 or wc < 0) continue;
 
             const depth = wa * a.z + wb * b.z + wc * c.z;
@@ -519,6 +543,20 @@ fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
             },
         }
     }
+
+    // Emissive — added after the lighting loop so it's
+    // unaffected by view / normal / light direction. A face
+    // pointing away from every light still reads with the
+    // emissive colour; that's the "self-glow" that keeps the C
+    // looking solid rather than transparent against the dark
+    // background.
+    const emissive: Vec3F = .{
+        srgbDecode(material.emissive[0]),
+        srgbDecode(material.emissive[1]),
+        srgbDecode(material.emissive[2]),
+    };
+    const emit_i: Vec3F = @splat(material.emissive_intensity);
+    lit += emissive * emit_i;
 
     return .{
         finaliseChannel(lit[0]),
