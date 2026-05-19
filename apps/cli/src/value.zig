@@ -37,11 +37,19 @@ pub const Number = struct {
 /// Color mirrors the AST `Color` union — the evaluator preserves the
 /// constructor form (hex / oklch / oklab / srgb) rather than collapsing
 /// to a single normalized space. The renderer chooses the working space.
+///
+/// Components are `*const Value`, not `Number`, because cmotion colors
+/// can have *animated* channels (`oklch(0.78, 0.20, hue)` where `hue` is
+/// an animation). The renderer is responsible for resolving each
+/// component at render time: a `Number` is used directly, a
+/// `Constructed("animate", ...)` evaluates the animation at the current
+/// frame, and so on. The interpreter doesn't pre-bake this — its job is
+/// to carry the program's structure forward verbatim.
 pub const Color = union(enum) {
     hex: struct { digits: []const u8 },
-    oklch: struct { l: Number, c: Number, h: Number },
-    oklab: struct { l: Number, a: Number, b: Number },
-    srgb: struct { r: Number, g: Number, b: Number },
+    oklch: struct { l: *const Value, c: *const Value, h: *const Value },
+    oklab: struct { l: *const Value, a: *const Value, b: *const Value },
+    srgb: struct { r: *const Value, g: *const Value, b: *const Value },
 };
 
 pub const Field = struct {
@@ -57,6 +65,19 @@ pub const Array = struct {
     elems: []const Value,
 };
 
+/// Staging variant for stdlib constructors that haven't been typed yet.
+/// Each one preserves its constructor name and its (named or positional)
+/// arguments — the renderer can switch on `.name` to recognise it. As
+/// renderer needs pin down a constructor's shape, it graduates from
+/// `Value.constructed` to a dedicated variant on this union (e.g. a
+/// future `Value.frame`, `Value.shape`, `Value.animation`). This keeps
+/// the typed-records decision intact while letting the interpreter run
+/// against samples that use a wider stdlib than we've nailed down.
+pub const Constructed = struct {
+    name: []const u8,
+    fields: []const Field,
+};
+
 pub const Value = union(enum) {
     nil,
     number: Number,
@@ -66,11 +87,15 @@ pub const Value = union(enum) {
     color: Color,
     array: Array,
     record: Record,
+    constructed: Constructed,
 
     /// Write the JSON encoding of the value (no surrounding key, no
     /// trailing comma). Stable: `kind` is the discriminator, every variant
     /// uses a documented shape so downstream tools can match on it.
-    pub fn writeJson(self: Value, w: anytype) !void {
+    ///
+    /// Recursive (color components are nested values), so the error set
+    /// is explicit — Zig can't infer it through the cycle.
+    pub fn writeJson(self: Value, w: anytype) anyerror!void {
         switch (self) {
             .nil => try w.writeAll("{\"kind\":\"nil\"}"),
             .number => |n| {
@@ -117,13 +142,27 @@ pub const Value = union(enum) {
                 }
                 try w.writeAll("]}");
             },
+            .constructed => |c| {
+                try w.writeAll("{\"kind\":\"constructed\",\"name\":");
+                try writeJsonString(w, c.name);
+                try w.writeAll(",\"fields\":[");
+                for (c.fields, 0..) |f, i| {
+                    if (i != 0) try w.writeAll(",");
+                    try w.writeAll("{\"name\":");
+                    try writeJsonString(w, f.name);
+                    try w.writeAll(",\"value\":");
+                    try f.value.writeJson(w);
+                    try w.writeAll("}");
+                }
+                try w.writeAll("]}");
+            },
         }
     }
 
     /// Write the human text encoding. Intended for the default (non-JSON)
     /// `cmo eval` output. Mirrors the JSON shape loosely but keeps it
     /// scannable on a terminal.
-    pub fn writeText(self: Value, w: anytype) !void {
+    pub fn writeText(self: Value, w: anytype) anyerror!void {
         switch (self) {
             .nil => try w.writeAll("nil"),
             .number => |n| {
@@ -151,6 +190,19 @@ pub const Value = union(enum) {
                 }
                 try w.writeAll("}");
             },
+            .constructed => |c| {
+                try w.writeAll(c.name);
+                try w.writeAll("(");
+                for (c.fields, 0..) |f, i| {
+                    if (i != 0) try w.writeAll(", ");
+                    if (!std.mem.eql(u8, f.name, "")) {
+                        try w.writeAll(f.name);
+                        try w.writeAll(": ");
+                    }
+                    try f.value.writeText(w);
+                }
+                try w.writeAll(")");
+            },
         }
     }
 };
@@ -164,29 +216,29 @@ fn writeColorJson(c: Color, w: anytype) !void {
         },
         .oklch => |v| {
             try w.writeAll("{\"kind\":\"color\",\"form\":\"oklch\",\"l\":");
-            try writeNumberJson(v.l, w);
+            try v.l.writeJson(w);
             try w.writeAll(",\"c\":");
-            try writeNumberJson(v.c, w);
+            try v.c.writeJson(w);
             try w.writeAll(",\"h\":");
-            try writeNumberJson(v.h, w);
+            try v.h.writeJson(w);
             try w.writeAll("}");
         },
         .oklab => |v| {
             try w.writeAll("{\"kind\":\"color\",\"form\":\"oklab\",\"l\":");
-            try writeNumberJson(v.l, w);
+            try v.l.writeJson(w);
             try w.writeAll(",\"a\":");
-            try writeNumberJson(v.a, w);
+            try v.a.writeJson(w);
             try w.writeAll(",\"b\":");
-            try writeNumberJson(v.b, w);
+            try v.b.writeJson(w);
             try w.writeAll("}");
         },
         .srgb => |v| {
             try w.writeAll("{\"kind\":\"color\",\"form\":\"srgb\",\"r\":");
-            try writeNumberJson(v.r, w);
+            try v.r.writeJson(w);
             try w.writeAll(",\"g\":");
-            try writeNumberJson(v.g, w);
+            try v.g.writeJson(w);
             try w.writeAll(",\"b\":");
-            try writeNumberJson(v.b, w);
+            try v.b.writeJson(w);
             try w.writeAll("}");
         },
     }
@@ -200,47 +252,32 @@ fn writeColorText(c: Color, w: anytype) !void {
         },
         .oklch => |v| {
             try w.writeAll("oklch(");
-            try writeF64(w, v.l.value);
+            try v.l.writeText(w);
             try w.writeAll(", ");
-            try writeF64(w, v.c.value);
+            try v.c.writeText(w);
             try w.writeAll(", ");
-            try writeF64(w, v.h.value);
-            if (v.h.unit) |u| try w.writeAll(@tagName(u));
+            try v.h.writeText(w);
             try w.writeAll(")");
         },
         .oklab => |v| {
             try w.writeAll("oklab(");
-            try writeF64(w, v.l.value);
+            try v.l.writeText(w);
             try w.writeAll(", ");
-            try writeF64(w, v.a.value);
+            try v.a.writeText(w);
             try w.writeAll(", ");
-            try writeF64(w, v.b.value);
+            try v.b.writeText(w);
             try w.writeAll(")");
         },
         .srgb => |v| {
             try w.writeAll("srgb(");
-            try writeF64(w, v.r.value);
+            try v.r.writeText(w);
             try w.writeAll(", ");
-            try writeF64(w, v.g.value);
+            try v.g.writeText(w);
             try w.writeAll(", ");
-            try writeF64(w, v.b.value);
+            try v.b.writeText(w);
             try w.writeAll(")");
         },
     }
-}
-
-fn writeNumberJson(n: Number, w: anytype) !void {
-    try w.writeAll("{\"value\":");
-    try writeF64(w, n.value);
-    try w.writeAll(",\"unit\":");
-    if (n.unit) |u| {
-        try w.writeAll("\"");
-        try w.writeAll(@tagName(u));
-        try w.writeAll("\"");
-    } else {
-        try w.writeAll("null");
-    }
-    try w.writeAll("}");
 }
 
 fn writeF64(w: anytype, x: f64) !void {
@@ -292,15 +329,14 @@ test "Value.writeJson covers every variant" {
     const col: Value = .{ .color = .{ .hex = .{ .digits = "ff00aa" } } };
     try col.writeJson(w);
     try w.writeAll(";");
-    const oklch: Value = .{ .color = .{ .oklch = .{
-        .l = .{ .value = 0.5, .unit = null },
-        .c = .{ .value = 0.2, .unit = null },
-        .h = .{ .value = 280, .unit = .deg },
-    } } };
+    const l_val: Value = .{ .number = .{ .value = 0.5, .unit = null } };
+    const c_val: Value = .{ .number = .{ .value = 0.2, .unit = null } };
+    const h_val: Value = .{ .number = .{ .value = 280, .unit = .deg } };
+    const oklch: Value = .{ .color = .{ .oklch = .{ .l = &l_val, .c = &c_val, .h = &h_val } } };
     try oklch.writeJson(w);
 
     const written = stream.buffered();
     try std.testing.expectEqualStrings(
-        \\{"kind":"record","fields":[{"name":"x","value":{"kind":"number","value":1,"unit":"px"}},{"name":"ok","value":{"kind":"bool","value":true}}]};{"kind":"array","elems":[{"kind":"number","value":3.5,"unit":null},{"kind":"string","raw":"\"hi\""}]};{"kind":"color","form":"hex","digits":"ff00aa"};{"kind":"color","form":"oklch","l":{"value":0.5,"unit":null},"c":{"value":0.2,"unit":null},"h":{"value":280,"unit":"deg"}}
+        \\{"kind":"record","fields":[{"name":"x","value":{"kind":"number","value":1,"unit":"px"}},{"name":"ok","value":{"kind":"bool","value":true}}]};{"kind":"array","elems":[{"kind":"number","value":3.5,"unit":null},{"kind":"string","raw":"\"hi\""}]};{"kind":"color","form":"hex","digits":"ff00aa"};{"kind":"color","form":"oklch","l":{"kind":"number","value":0.5,"unit":null},"c":{"kind":"number","value":0.2,"unit":null},"h":{"kind":"number","value":280,"unit":"deg"}}
     , written);
 }
