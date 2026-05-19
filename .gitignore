@@ -141,3 +141,15 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Zig build artifacts
+zig-out/
+.zig-cache/
+
+# Vendored native deps fetched by scripts/fetch-deps.sh
+apps/cli/vendor/
+
+# tree-sitter native build artifacts (parser.c / grammar.json / node-types.json
+# are generated from grammar.js and ARE committed, per tree-sitter convention)
+packages/tree-sitter-cmotion/build/
+packages/tree-sitter-cmotion/bindings/node/build/
