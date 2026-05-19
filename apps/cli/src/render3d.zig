@@ -298,110 +298,151 @@ fn edgeFn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
 }
 
-/// Shade a fragment via Blinn-Phong with a PBR-style metalness +
-/// roughness mapping. Cheap approximation of GGX rather than the
-/// full Cook-Torrance BRDF — close enough for motion-graphics
-/// titles, and ~10× cheaper per fragment.
+/// Shade a fragment via a physically-based BRDF: GGX/Trowbridge-Reitz
+/// normal-distribution function + Smith geometric attenuation +
+/// Schlick Fresnel for the specular term, Lambert for diffuse,
+/// hemispheric sky/ground gradient for ambient. ACES filmic tone
+/// mapping + sRGB gamma encoding produces the final 8-bit output.
 ///
-/// The decomposition:
-///   - `diffuse_color`  = albedo · (1 − metalness)     (metals don't diffuse)
-///   - `specular_color` = mix(0.04, albedo, metalness) (dielectrics ≈ 4%
-///                                                      reflectance at
-///                                                      normal incidence;
-///                                                      metals reflect
-///                                                      their albedo)
-///   - `spec_power`     = 2^(11·(1−roughness)) + 2     (tight highlight
-///                                                      → broad as
-///                                                      roughness ramps)
-///
-/// Per directional light, accumulate
-///   diffuse_color  · I · max(0, N·L) +
-///   specular_color · I · max(0, N·H)^spec_power
-/// where H = normalize(L + V) and V is the view direction (camera
-/// looks down −z, so V ≈ +z in world space — accurate enough for
-/// our narrow FOV that we treat it as constant).
+/// The simplifications still in place: view direction treated as
+/// constant +z (narrow-FOV approximation that avoids per-fragment
+/// view recomputation); no environment-map reflection; no shadow
+/// casting. These are the polish that turns a "PBR-shaped" renderer
+/// into a "Three.js-grade" one and can land incrementally on top.
 fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
-    // Albedo in linear 0..1.
     const albedo: [3]f32 = .{
-        @as(f32, @floatFromInt(material.albedo[0])) / 255.0,
-        @as(f32, @floatFromInt(material.albedo[1])) / 255.0,
-        @as(f32, @floatFromInt(material.albedo[2])) / 255.0,
+        srgbDecode(material.albedo[0]),
+        srgbDecode(material.albedo[1]),
+        srgbDecode(material.albedo[2]),
     };
     const metalness = std.math.clamp(material.metalness, 0.0, 1.0);
-    const roughness = std.math.clamp(material.roughness, 0.0, 1.0);
+    const roughness_input = std.math.clamp(material.roughness, 0.0, 1.0);
+    // GGX gets numerically nasty near roughness=0 (perfectly smooth
+    // surface = delta-function NDF); the standard fix is to clamp
+    // up from a small epsilon. 0.04 is the threshold most game
+    // engines use.
+    const roughness = @max(roughness_input, 0.04);
 
-    const one_minus_m = 1.0 - metalness;
-    const diffuse_color: [3]f32 = .{
-        albedo[0] * one_minus_m,
-        albedo[1] * one_minus_m,
-        albedo[2] * one_minus_m,
+    // F0 = the surface's reflectance at normal incidence.
+    // Dielectric: 4 % white. Metal: tinted by the albedo.
+    const f0: [3]f32 = .{
+        std.math.lerp(@as(f32, 0.04), albedo[0], metalness),
+        std.math.lerp(@as(f32, 0.04), albedo[1], metalness),
+        std.math.lerp(@as(f32, 0.04), albedo[2], metalness),
     };
-    // F0 = mix(0.04, albedo, metalness). Dielectrics reflect 4% at
-    // normal incidence; metals reflect their colour.
-    const dielectric_f0: f32 = 0.04;
-    const specular_color: [3]f32 = .{
-        dielectric_f0 * one_minus_m + albedo[0] * metalness,
-        dielectric_f0 * one_minus_m + albedo[1] * metalness,
-        dielectric_f0 * one_minus_m + albedo[2] * metalness,
-    };
-    // Exponential mapping from roughness → Blinn-Phong shininess.
-    // roughness=0 → exponent ~2050 (mirror-tight), roughness=1 → 3
-    // (extremely broad, near-diffuse). Tuned so 0.35 (taste sample)
-    // gives a recognisable but soft highlight.
-    const spec_power = std.math.pow(f32, 2.0, 11.0 * (1.0 - roughness)) + 2.0;
 
-    var diffuse: [3]f32 = .{ 0, 0, 0 };
-    var specular: [3]f32 = .{ 0, 0, 0 };
+    var lit: [3]f32 = .{ 0, 0, 0 };
 
-    // View direction in world space — see function docstring.
+    // View direction — see function docstring for the constant-+z
+    // approximation. n_dot_v is bounded below to avoid singularities
+    // at grazing angles.
     const view = Vec3{ .x = 0, .y = 0, .z = 1 };
+    const n_dot_v = @max(0.001, normal.dot(view));
 
     for (lights) |l| {
         switch (l) {
             .ambient => |amb| {
-                // Ambient is direction-less: contributes a flat
-                // diffuse-shaped pedestal so unlit faces aren't
-                // pitch-black. No specular contribution.
-                inline for (0..3) |k| diffuse[k] += diffuse_color[k] * amb.intensity;
+                // Hemispheric ambient — a cool sky tint from above,
+                // a warm ground tint from below, the equator a
+                // neutral grey. n.y selects the gradient (y-up in
+                // world space). The whole thing scales by the
+                // scene's ambient `intensity:` so users can dim
+                // it via the same knob they had before.
+                const sky_color: [3]f32 = .{ 0.55, 0.62, 0.78 };
+                const ground_color: [3]f32 = .{ 0.35, 0.30, 0.22 };
+                const t = normal.y * 0.5 + 0.5;
+                inline for (0..3) |k| {
+                    const hemi = std.math.lerp(ground_color[k], sky_color[k], t);
+                    // Energy-conserving: ambient only enters via the
+                    // diffuse channel (no F at ambient since we don't
+                    // know an incidence angle). Metalness suppresses
+                    // diffuse, so highly metallic surfaces darken
+                    // under pure ambient — that's physically correct
+                    // and matches what MeshStandardMaterial does in
+                    // Three.js without an environment map.
+                    lit[k] += albedo[k] * hemi * amb.intensity * (1.0 - metalness);
+                }
             },
             .directional => |dir| {
-                // `dir.direction` is the direction the light *travels*
-                // (away from the source, toward the surface). For
-                // Lambertian we want the direction from the surface
-                // *back to* the source — that's −direction.
                 const L = dir.direction.scale(-1).normalise();
                 const n_dot_l = normal.dot(L);
-                if (n_dot_l <= 0) continue; // back-facing — skip.
-                // Diffuse Lambertian.
-                inline for (0..3) |k| {
-                    diffuse[k] += diffuse_color[k] * dir.intensity * n_dot_l;
-                }
-                // Blinn-Phong specular via the halfway vector.
+                if (n_dot_l <= 0) continue;
+
                 const H = L.add(view).normalise();
-                const n_dot_h = normal.dot(H);
-                if (n_dot_h <= 0) continue;
-                const spec = std.math.pow(f32, n_dot_h, spec_power);
-                inline for (0..3) |k| {
-                    specular[k] += specular_color[k] * dir.intensity * spec;
+                const n_dot_h = @max(0, normal.dot(H));
+                const v_dot_h = @max(0, view.dot(H));
+
+                // GGX/Trowbridge-Reitz normal distribution.
+                const alpha = roughness * roughness;
+                const alpha2 = alpha * alpha;
+                const ndf_denom = n_dot_h * n_dot_h * (alpha2 - 1.0) + 1.0;
+                const D = alpha2 / (std.math.pi * ndf_denom * ndf_denom);
+
+                // Smith geometric attenuation with Schlick-GGX
+                // approximation. `k` is the direct-light remapping
+                // — `(roughness + 1)² / 8`.
+                const k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+                const g_v = n_dot_v / (n_dot_v * (1.0 - k) + k);
+                const g_l = n_dot_l / (n_dot_l * (1.0 - k) + k);
+                const G = g_v * g_l;
+
+                // Schlick's Fresnel approximation.
+                const fres_x = 1.0 - v_dot_h;
+                const fres_x5 = fres_x * fres_x * fres_x * fres_x * fres_x;
+
+                // BRDF specular: (D · F · G) / (4 · n·v · n·l).
+                // F is per-channel, so the whole specular is per-channel.
+                const denom = 4.0 * n_dot_v * n_dot_l + 0.0001;
+                inline for (0..3) |k_idx| {
+                    const F = f0[k_idx] + (1.0 - f0[k_idx]) * fres_x5;
+                    const specular = (D * F * G) / denom;
+                    // Energy conservation: light reflected by F can't
+                    // also be absorbed/diffused. Metalness suppresses
+                    // the diffuse path entirely.
+                    const k_d = (1.0 - F) * (1.0 - metalness);
+                    const diffuse = k_d * albedo[k_idx] / std.math.pi;
+                    lit[k_idx] += (diffuse + specular) * dir.intensity * n_dot_l;
                 }
             },
         }
     }
 
-    // Combine, soft-clamp, convert to RGB8.
+    // ACES filmic tone mapping (Krzysztof Narkowicz's fit). Compresses
+    // the [0, ∞) HDR range into [0, 1] with a filmic shoulder /
+    // toe, then we gamma-encode for sRGB display.
     return .{
-        toChannel(diffuse[0] + specular[0]),
-        toChannel(diffuse[1] + specular[1]),
-        toChannel(diffuse[2] + specular[2]),
+        finaliseChannel(lit[0]),
+        finaliseChannel(lit[1]),
+        finaliseChannel(lit[2]),
         material.albedo[3],
     };
 }
 
-fn toChannel(linear: f32) u8 {
-    const v = linear * 255.0;
-    if (v >= 255) return 255;
-    if (v <= 0) return 0;
-    return @intFromFloat(@round(v));
+/// 0..255 sRGB → linear 0..1. Approximation: simple 2.2 gamma curve.
+/// Good enough for albedo; the full piecewise sRGB curve is more
+/// expensive and the difference is invisible on most renders.
+fn srgbDecode(c: u8) f32 {
+    return std.math.pow(f32, @as(f32, @floatFromInt(c)) / 255.0, 2.2);
+}
+
+/// Final per-channel output: ACES filmic tone map (linear in →
+/// LDR-friendly linear out), then sRGB gamma encode, then quantise.
+fn finaliseChannel(linear: f32) u8 {
+    const mapped = acesFilmic(@max(0.0, linear));
+    const gamma = std.math.pow(f32, mapped, 1.0 / 2.2);
+    const q = gamma * 255.0;
+    if (q >= 255) return 255;
+    if (q <= 0) return 0;
+    return @intFromFloat(@round(q));
+}
+
+fn acesFilmic(x: f32) f32 {
+    const a: f32 = 2.51;
+    const b: f32 = 0.03;
+    const c: f32 = 2.43;
+    const d: f32 = 0.59;
+    const e: f32 = 0.14;
+    return std.math.clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
 fn writePixel(fb: *Framebuffer, x: u32, y: u32, rgba: [4]u8) void {
@@ -448,11 +489,15 @@ test "drawMesh: an extruded square shaded by ambient light paints the canvas cen
         &lights,
     );
 
-    // Canvas centre pixel should be red (ambient-lit, no occlusion).
+    // Centre pixel: ambient lighting under the new hemispheric
+    // model produces a *muted* red, not pure red — the cool sky
+    // tint and warm ground tint modulate the albedo through the
+    // y-up gradient. Front face's normal is +y in the y-up world,
+    // so sky_color dominates. Still red-dominated though.
     const c = (32 * 64 + 32) * 4;
-    try std.testing.expect(fb.pixels[c + 0] > 200);
-    try std.testing.expectEqual(@as(u8, 0), fb.pixels[c + 1]);
-    try std.testing.expectEqual(@as(u8, 0), fb.pixels[c + 2]);
+    try std.testing.expect(fb.pixels[c + 0] > fb.pixels[c + 1]);
+    try std.testing.expect(fb.pixels[c + 0] > fb.pixels[c + 2]);
+    try std.testing.expect(fb.pixels[c + 0] > 30);
 }
 
 test "shade: a face pointed away from a directional light stays black under no ambient" {
@@ -465,57 +510,71 @@ test "shade: a face pointed away from a directional light stays black under no a
     try std.testing.expectEqual(@as(u8, 0), rgba[0]);
 }
 
-test "shade: a face pointed into a directional light receives its full intensity" {
+test "shade: a face pointed into a directional light receives bright red" {
     const lights = [_]Light{.{ .directional = .{
         .direction = .{ .x = 0, .y = 0, .z = -1 },
         .intensity = 1.0,
     } }};
     // Surface normal points +z → straight into the incoming light.
+    // With ACES + gamma encoding the channel doesn't peg at 255
+    // (the tone-mapper compresses near-1 input to ~0.7 linear and
+    // gamma encodes to ~0.85), but the result is unmistakably red
+    // and dominates over the other channels. The tiny green/blue
+    // spill (~10) is the dielectric Schlick Fresnel — F0=0.04
+    // white means ~4 % of the specular tints toward white.
     const rgba = shade(.{ .x = 0, .y = 0, .z = 1 }, .{ .albedo = .{ 255, 0, 0, 255 } }, &lights);
-    try std.testing.expectEqual(@as(u8, 255), rgba[0]);
+    try std.testing.expect(rgba[0] > 150);
+    try std.testing.expect(rgba[0] > rgba[1] * 5);
+    try std.testing.expect(rgba[0] > rgba[2] * 5);
+    try std.testing.expect(rgba[1] < 40);
+    try std.testing.expect(rgba[2] < 40);
 }
 
 test "shade: a metallic surface tints its specular highlight with the albedo" {
-    // Smooth red metal lit dead-on from +z. The specular for a
-    // metal tints toward the albedo (red) — red maxes out, green
-    // and blue stay at zero. A dielectric in the same geometry
-    // sees a ~4% white-tinted specular spill into all channels.
+    // Red metal lit dead-on from +z. Metal's F0 ≈ albedo, so the
+    // specular is red and the diffuse is suppressed by `1 - F`
+    // and `1 - metalness`. Result: vivid red dominant, off-channels
+    // near zero. A dielectric in the same geometry lets the diffuse
+    // dominate and the white-tinted Schlick highlight leak into
+    // green/blue.
     const lights = [_]Light{.{ .directional = .{
         .direction = .{ .x = 0, .y = 0, .z = -1 },
-        .intensity = 1.0,
+        .intensity = 2.0,
     } }};
     const metal = shade(
         .{ .x = 0, .y = 0, .z = 1 },
-        .{ .albedo = .{ 255, 0, 0, 255 }, .metalness = 1.0, .roughness = 0.1 },
+        .{ .albedo = .{ 255, 0, 0, 255 }, .metalness = 1.0, .roughness = 0.2 },
         &lights,
     );
     const plastic = shade(
         .{ .x = 0, .y = 0, .z = 1 },
-        .{ .albedo = .{ 255, 0, 0, 255 }, .metalness = 0.0, .roughness = 0.1 },
+        .{ .albedo = .{ 255, 0, 0, 255 }, .metalness = 0.0, .roughness = 0.2 },
         &lights,
     );
-    // Metal: red specular pegs red, leaves the other channels clean.
-    try std.testing.expectEqual(@as(u8, 255), metal[0]);
+    // Metal: bright red, off-channels are zero.
+    try std.testing.expect(metal[0] > 150);
     try std.testing.expectEqual(@as(u8, 0), metal[1]);
     try std.testing.expectEqual(@as(u8, 0), metal[2]);
-    // Plastic: a small white-ish specular sneaks into green/blue.
+    // Plastic: red dominates but the Schlick Fresnel tints the
+    // specular toward white at normal incidence (F0=0.04 white
+    // for dielectrics) so off-channels register too.
     try std.testing.expect(plastic[1] > 0);
     try std.testing.expect(plastic[2] > 0);
 }
 
 test "shade: roughness widens the specular highlight" {
-    // 15°-tilted normal, smooth metal vs moderately rough metal.
-    // A mirror's highlight is so narrow that 15° off-axis is
-    // effectively unlit; a moderately rough surface scatters
-    // enough specular to register.
+    // 15° off-axis normal, smooth metal vs moderately rough metal.
+    // A mirror's GGX D narrows to a tiny solid angle so the
+    // off-axis sample falls outside the highlight; the rougher
+    // surface spreads the spec lobe enough to still register.
     const lights = [_]Light{.{ .directional = .{
         .direction = .{ .x = 0, .y = 0, .z = -1 },
         .intensity = 1.0,
     } }};
-    const normal = Vec3{ .x = 0.259, .y = 0, .z = 0.966 }; // 15° off +z
+    const normal = Vec3{ .x = 0.259, .y = 0, .z = 0.966 };
     const mirror = shade(
         normal,
-        .{ .albedo = .{ 200, 200, 200, 255 }, .metalness = 1.0, .roughness = 0.0 },
+        .{ .albedo = .{ 200, 200, 200, 255 }, .metalness = 1.0, .roughness = 0.04 },
         &lights,
     );
     const rough = shade(
