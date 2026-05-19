@@ -1,0 +1,142 @@
+---
+// ExampleScene.astro — a single example's render + code + editor link.
+//
+// Used by the pages under /examples/. Same WASM viewer the homepage
+// uses, but without the inline editor — the example is fixed and the
+// "Open in /play →" link hands the source off for tinkering.
+
+interface Props {
+  source: string;
+}
+
+const { source } = Astro.props;
+const playHref = `/play/#source=${encodeURIComponent(source)}`;
+---
+
+<figure class="example-scene" data-source={source}>
+  <div class="frame">
+    <canvas data-example-canvas aria-label="Live render of this example"></canvas>
+  </div>
+  <figcaption>
+    <span data-example-status>rendering…</span>
+  </figcaption>
+  <pre class="example-code"><code>{source}</code></pre>
+  <p class="example-link"><a href={playHref}>Open in /play →</a></p>
+</figure>
+
+<style>
+  .example-scene { margin: 1.5rem 0 2rem; }
+
+  .example-scene .frame {
+    aspect-ratio: 16 / 9;
+    border-radius: 4px;
+    border: 1px solid var(--sl-color-hairline);
+    background: #000;
+    overflow: hidden;
+    position: relative;
+  }
+  .example-scene canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .example-scene figcaption {
+    font-size: 0.85rem;
+    color: var(--sl-color-gray-3);
+    margin: 0.5rem 0 1rem;
+    font-style: italic;
+  }
+  .example-scene figcaption .err { color: var(--sl-color-red, #b00020); font-style: normal; }
+
+  .example-scene .example-link {
+    margin: 0.75rem 0 0;
+    font-size: 0.9rem;
+  }
+  .example-scene .example-link a {
+    font-weight: 600;
+    color: var(--sl-color-text-accent);
+  }
+
+  .example-scene .example-code {
+    margin: 0;
+    padding: 14px 16px;
+    background: var(--sl-color-bg-inline-code, #f4f4f4);
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 4px;
+    overflow-x: auto;
+    font: 0.85rem/1.55 var(--sl-font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+    color: var(--sl-color-text, #111);
+    tab-size: 2;
+  }
+  .example-scene .example-code code {
+    background: none;
+    padding: 0;
+    border: 0;
+    font: inherit;
+    color: inherit;
+    white-space: pre;
+  }
+</style>
+
+<script>
+  import { boot } from "../scripts/cmotion-viewer.ts";
+
+  async function mount(figure: HTMLElement) {
+    const canvas = figure.querySelector<HTMLCanvasElement>("canvas[data-example-canvas]");
+    const statusEl = figure.querySelector<HTMLElement>("[data-example-status]");
+    if (!canvas || !statusEl) return;
+    const source = figure.dataset.source ?? "";
+    if (!source) return;
+
+    let view: Awaited<ReturnType<typeof boot>>;
+    try {
+      view = await boot(canvas);
+      view.load(source);
+      statusEl.textContent = `${view.durationSeconds.toFixed(1)}s loop`;
+    } catch (e: any) {
+      statusEl.textContent = String(e?.message ?? e);
+      statusEl.classList.add("err");
+      console.error("[cmotion example]", e);
+      return;
+    }
+
+    // Only animate while on screen; idle when scrolled away.
+    let visible = true;
+    const io = new IntersectionObserver(
+      (entries) => { for (const e of entries) visible = e.isIntersecting; },
+      { threshold: 0 },
+    );
+    io.observe(canvas);
+
+    let running = true;
+    let raf = 0;
+    const start = performance.now();
+    function frame(now: number) {
+      if (!running) return;
+      if (visible) {
+        const t = ((now - start) / 1000) % view.durationSeconds;
+        try { view.seek(t); } catch { /* skip transient sampler errors */ }
+      }
+      raf = requestAnimationFrame(frame);
+    }
+    raf = requestAnimationFrame(frame);
+
+    // Starlight uses Astro view transitions: dispose on navigation so the
+    // WASM module + WebGL context don't leak across pages.
+    document.addEventListener(
+      "astro:before-swap",
+      () => {
+        running = false;
+        cancelAnimationFrame(raf);
+        io.disconnect();
+        view.destroy();
+      },
+      { once: true },
+    );
+  }
+
+  for (const f of document.querySelectorAll<HTMLElement>("figure.example-scene")) {
+    mount(f);
+  }
+</script>

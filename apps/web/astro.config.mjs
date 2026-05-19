@@ -48,6 +48,13 @@ export default defineConfig({
 						{ label: 'Backends', slug: 'impl/backends' },
 					],
 				},
+				{
+					label: 'Examples',
+					items: [
+						{ label: 'Title sequence', slug: 'examples/title' },
+						{ label: 'Bouncing ball', slug: 'examples/bouncing-ball' },
+					],
+				},
 			],
 		}),
 	],
