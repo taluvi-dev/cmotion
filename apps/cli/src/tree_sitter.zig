@@ -94,3 +94,74 @@ pub fn startByte(node: Node) u32 {
 pub fn endByte(node: Node) u32 {
     return c.ts_node_end_byte(node);
 }
+
+//
+// Walking helpers used by the AST lowering pass.
+//
+
+pub fn isNull(node: Node) bool {
+    return c.ts_node_is_null(node);
+}
+
+pub fn isNamed(node: Node) bool {
+    return c.ts_node_is_named(node);
+}
+
+pub fn isMissing(node: Node) bool {
+    return c.ts_node_is_missing(node);
+}
+
+pub fn isExtra(node: Node) bool {
+    return c.ts_node_is_extra(node);
+}
+
+/// Stable node-kind string (e.g. "let_decl", "binary_expr_add"). Backed by
+/// the tree-sitter language tables; never freed.
+pub fn kind(node: Node) []const u8 {
+    return std.mem.span(c.ts_node_type(node));
+}
+
+pub fn kindId(node: Node) u16 {
+    return c.ts_node_symbol(node);
+}
+
+pub fn childCount(node: Node) u32 {
+    return c.ts_node_child_count(node);
+}
+
+pub fn namedChildCount(node: Node) u32 {
+    return c.ts_node_named_child_count(node);
+}
+
+pub fn child(node: Node, index: u32) Node {
+    return c.ts_node_child(node, index);
+}
+
+pub fn namedChild(node: Node, index: u32) Node {
+    return c.ts_node_named_child(node, index);
+}
+
+/// Look up a child by field name. Returns null when no such field is set
+/// on this node (e.g. an optional EBNF field that was omitted).
+pub fn childByFieldName(node: Node, name: []const u8) ?Node {
+    const got = c.ts_node_child_by_field_name(node, name.ptr, @intCast(name.len));
+    if (c.ts_node_is_null(got)) return null;
+    return got;
+}
+
+/// Field name attached to a child position by the grammar, or null if the
+/// child is anonymous (a literal token like '(' or ',') or unfielded.
+pub fn fieldNameForChild(node: Node, index: u32) ?[]const u8 {
+    const ptr = c.ts_node_field_name_for_child(node, index);
+    if (ptr == null) return null;
+    return std.mem.span(ptr);
+}
+
+/// Return the source bytes spanned by this node. The slice is into the
+/// original source buffer; the caller must keep that buffer alive.
+pub fn sourceSlice(node: Node, src: []const u8) []const u8 {
+    const s = c.ts_node_start_byte(node);
+    const e = c.ts_node_end_byte(node);
+    std.debug.assert(s <= e and e <= src.len);
+    return src[s..e];
+}
