@@ -59,13 +59,21 @@ pub const Framebuffer = struct {
     height: u32,
 };
 
-/// Per-draw camera. Picked to frame a glyph at the canvas centre:
-/// look down -z from a distance, FOV chosen so a 100-unit-wide
-/// shape comfortably fills the canvas. Customisable later when
-/// scenes ask for it.
+/// Per-draw camera. Default FOV / distance picked to match the
+/// near-orthographic look the cmotion.org Three.js ScenePreview
+/// uses for the taste sample — 28° FOV at distance proportional
+/// to the canvas size. A wider FOV (e.g. 60°) exaggerates
+/// perspective foreshortening, making extruded letters read as
+/// "long tubes" when rotated edge-on; the narrow FOV preserves
+/// the letter's depth-to-width ratio across rotations.
 pub const Camera = struct {
-    distance: f32 = 300.0,
-    fov_rad: f32 = std.math.pi / 3.0, // 60°
+    /// Camera sits at +z, looking toward origin. Default keeps a
+    /// ~96-unit-tall glyph framed at roughly 1/3 of canvas height
+    /// — matches the ScenePreview's framing.
+    distance: f32 = 580.0,
+    /// 28° in radians. Near-orthographic — matches the
+    /// ScenePreview's `PerspectiveCamera(28, …)`.
+    fov_rad: f32 = 28.0 * std.math.pi / 180.0,
     near: f32 = 1.0,
     far: f32 = 10000.0,
 };
