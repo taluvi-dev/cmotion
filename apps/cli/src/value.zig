@@ -65,6 +65,21 @@ pub const Array = struct {
     elems: []const Value,
 };
 
+/// A closure: an AST lambda paired with a snapshot of the bindings
+/// visible at the point of its creation. `params` and `body` borrow
+/// directly into the AST arena (the AST outlives the value), while
+/// `captured` lives in the evaluator's value arena.
+///
+/// Late binding is not modelled: each capture is a value-at-creation
+/// snapshot, not a pointer into a live scope. That means mutual
+/// recursion via two `let`s in the same block won't see each other;
+/// once we need it we'll switch to scope-chained captures.
+pub const Lambda = struct {
+    params: []const ast.Param,
+    body: ast.Block,
+    captured: []const Field,
+};
+
 /// Staging variant for stdlib constructors that haven't been typed yet.
 /// Each one preserves its constructor name and its (named or positional)
 /// arguments — the renderer can switch on `.name` to recognise it. As
@@ -88,6 +103,7 @@ pub const Value = union(enum) {
     array: Array,
     record: Record,
     constructed: Constructed,
+    lambda: Lambda,
 
     /// Write the JSON encoding of the value (no surrounding key, no
     /// trailing comma). Stable: `kind` is the discriminator, every variant
@@ -156,6 +172,14 @@ pub const Value = union(enum) {
                 }
                 try w.writeAll("]}");
             },
+            .lambda => |l| {
+                try w.writeAll("{\"kind\":\"lambda\",\"params\":[");
+                for (l.params, 0..) |p, i| {
+                    if (i != 0) try w.writeAll(",");
+                    try writeJsonString(w, p.name.name);
+                }
+                try w.writeAll("]}");
+            },
         }
     }
 
@@ -202,6 +226,14 @@ pub const Value = union(enum) {
                     try f.value.writeText(w);
                 }
                 try w.writeAll(")");
+            },
+            .lambda => |l| {
+                try w.writeAll("|");
+                for (l.params, 0..) |p, i| {
+                    if (i != 0) try w.writeAll(", ");
+                    try w.writeAll(p.name.name);
+                }
+                try w.writeAll("| { ... }");
             },
         }
     }

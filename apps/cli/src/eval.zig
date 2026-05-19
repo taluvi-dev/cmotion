@@ -1,20 +1,19 @@
-//! Cmotion reference interpreter — stage 4, v0.
+//! Cmotion reference interpreter — stage 4.
 //!
-//! Tree-walking evaluator over the typed AST. Today's scope is narrow on
-//! purpose: top-level `let` bindings, literals, identifiers, paren,
-//! unary, binary, blocks-with-lets, and color literals. Every other
-//! expression form emits `EVL001` (unsupported in v0) and the surrounding
-//! let evaluates to `nil` so the rest of the program still gets to run.
+//! Tree-walking evaluator over the typed AST. Covers every expression
+//! form the EBNF (GRAMMAR.md / https://cmotion.org/language/grammar/#ebnf)
+//! defines: literals, identifiers, paren, unary, binary, blocks-with-let,
+//! arrays, records, indexing, field access, if / else, match, function
+//! calls (positional + named args with defaults), method chains,
+//! `animate { ... }` and `compose [ ... ]` syntactic forms, and lambdas
+//! with lexical closure capture. Top-level scenes / components / filters
+//! whose params all have defaults are invoked automatically.
 //!
-//! Things deliberately deferred to future commits on this branch:
-//!   - function calls + builtin stdlib (rect, vec3, animate, compose, ...)
-//!   - method calls, field access, indexing
-//!   - if / else, match
-//!   - lambdas + closures
-//!   - `animate { ... }` and `compose [ ... ]` syntactic forms
-//!   - scene / component / filter / export evaluation (only their bodies'
-//!     top-level lets are sidestepped — these decls are recorded but not
-//!     entered)
+//! Calls to names that aren't bound at eval time (e.g. `rect(...)` in a
+//! file with `use std.shapes.*;`) become typed `Constructed` staging
+//! values that carry the call's name and evaluated args verbatim. The
+//! renderer (stage 6) is responsible for matching on these — every value
+//! a program produces is a description, never a pixel.
 //!
 //! Design notes:
 //!   - Diagnostic-first error handling, like the rest of the CLI. Eval
@@ -189,8 +188,41 @@ pub const Evaluator = struct {
             .method_call => |mc| try self.evalMethodCall(mc, scope),
             .animate => |a| try self.evalAnimate(a, scope),
             .compose => |c| try self.evalCompose(c, scope),
-            else => try self.unsupported(expr),
+            .lambda => |l| try self.evalLambda(l, scope),
         };
+    }
+
+    fn evalLambda(self: *Evaluator, l: ast.Lambda, scope: *Scope) EvalError!Value {
+        const captured = try self.snapshotScope(scope);
+        return .{ .lambda = .{
+            .params = l.params,
+            .body = l.body,
+            .captured = captured,
+        } };
+    }
+
+    /// Walk the scope chain inner-to-outer, collecting every visible
+    /// binding into an arena-allocated slice. Inner names shadow outer
+    /// ones (we only record a name the first time we see it).
+    fn snapshotScope(self: *Evaluator, scope: *Scope) EvalError![]const value.Field {
+        var seen = std.StringHashMap(Value).init(self.gpa);
+        defer seen.deinit();
+        var current: ?*const Scope = scope;
+        while (current) |s| {
+            var it = s.names.iterator();
+            while (it.next()) |entry| {
+                const gop = try seen.getOrPut(entry.key_ptr.*);
+                if (!gop.found_existing) gop.value_ptr.* = entry.value_ptr.*;
+            }
+            current = s.parent;
+        }
+        const fields = try self.arena.alloc(value.Field, seen.count());
+        var it2 = seen.iterator();
+        var i: usize = 0;
+        while (it2.next()) |entry| : (i += 1) {
+            fields[i] = .{ .name = entry.key_ptr.*, .value = entry.value_ptr.* };
+        }
+        return fields;
     }
 
     //
@@ -210,11 +242,88 @@ pub const Evaluator = struct {
             const fields = try self.evalArgs(c.args, scope, null);
             return .{ .constructed = .{ .name = name, .fields = fields } };
         }
-        // No syntactic-name path: try evaluating the callee to surface
-        // the underlying value, then complain that it's not callable.
         const callee = try self.evalExpr(c.callee.*, scope);
-        try self.notCallable(c.span, callee);
-        return .nil;
+        switch (callee) {
+            .lambda => |l| return self.invokeLambda(l, c.args, scope, c.span),
+            else => {
+                try self.notCallable(c.span, callee);
+                return .nil;
+            },
+        }
+    }
+
+    /// Invoke a closure: bind the call's arguments to the lambda's
+    /// params (positional, then named, then defaults), build a scope
+    /// chain over the captured snapshot, and evaluate the body.
+    fn invokeLambda(
+        self: *Evaluator,
+        lambda: value.Lambda,
+        args: []const ast.Arg,
+        caller_scope: *Scope,
+        call_span: ast.Span,
+    ) EvalError!Value {
+        var captured_scope = Scope{ .parent = null };
+        defer captured_scope.names.deinit(self.gpa);
+        for (lambda.captured) |f| try captured_scope.names.put(self.gpa, f.name, f.value);
+
+        var params_scope = Scope{ .parent = &captured_scope };
+        defer params_scope.names.deinit(self.gpa);
+        try self.bindArgs(lambda.params, args, caller_scope, &params_scope, call_span);
+
+        return self.evalBlock(lambda.body, &params_scope);
+    }
+
+    fn bindArgs(
+        self: *Evaluator,
+        params: []const ast.Param,
+        args: []const ast.Arg,
+        caller_scope: *Scope,
+        target: *Scope,
+        call_span: ast.Span,
+    ) EvalError!void {
+        // Track which call args have already been bound to a param so
+        // a name can't be double-consumed (and so we can later warn
+        // about leftover args — TODO when we add EVL005 for that).
+        const consumed = try self.gpa.alloc(bool, args.len);
+        defer self.gpa.free(consumed);
+        @memset(consumed, false);
+
+        for (params) |p| {
+            var picked: ?usize = null;
+            // First, a named arg whose name matches this param.
+            for (args, 0..) |a, i| {
+                if (consumed[i]) continue;
+                if (a.name) |n| if (std.mem.eql(u8, n.name, p.name.name)) {
+                    picked = i;
+                    break;
+                };
+            }
+            // Otherwise, the next unconsumed positional arg.
+            if (picked == null) {
+                for (args, 0..) |a, i| {
+                    if (consumed[i]) continue;
+                    if (a.name == null) {
+                        picked = i;
+                        break;
+                    }
+                }
+            }
+
+            const v: Value = if (picked) |i| blk: {
+                consumed[i] = true;
+                break :blk try self.evalExpr(args[i].value.*, caller_scope);
+            } else if (p.default) |d|
+                // Defaults evaluate in the lambda's scope (with params
+                // bound so far). That matches the obvious reading: a
+                // later param's default can reference an earlier one.
+                try self.evalExpr(d.*, target)
+            else blk: {
+                try self.missingArg(call_span, p.name.name);
+                break :blk .nil;
+            };
+
+            try target.names.put(self.gpa, p.name.name, v);
+        }
     }
 
     fn evalMethodCall(self: *Evaluator, mc: ast.MethodCall, scope: *Scope) EvalError!Value {
@@ -626,34 +735,6 @@ pub const Evaluator = struct {
     // Diagnostic helpers
     //
 
-    fn unsupported(self: *Evaluator, expr: ast.Expr) EvalError!Value {
-        const span = expr.span();
-        const loc = span.location(self.source);
-        const tag = @tagName(@as(std.meta.Tag(ast.Expr), expr));
-        const msg = try std.fmt.allocPrint(
-            self.arena,
-            "expression form '{s}' is not yet supported by the interpreter",
-            .{tag},
-        );
-        try self.diagnostics.append(self.gpa, .{
-            .code = "EVL001",
-            .message = msg,
-            .span = .{
-                .path = self.path,
-                .line = loc.line,
-                .column = loc.column,
-                .length = span.end - span.start,
-            },
-            .help = "stage-4 v0 covers literals, identifiers, paren, unary, binary, blocks-with-let, and color literals; everything else is on the roadmap",
-            .fix_safety = .@"requires-human-review",
-            .repair = .{
-                .id = "wait-for-stage-4-expansion",
-                .summary = "Track the interpreter roadmap; this form will land in a later commit on the same branch.",
-            },
-        });
-        return .nil;
-    }
-
     fn typeError(
         self: *Evaluator,
         span: ast.Span,
@@ -731,6 +812,31 @@ pub const Evaluator = struct {
             .repair = .{
                 .id = "add-or-rename-field",
                 .summary = "Add the field to the record literal, or rename the access to an existing field.",
+            },
+        });
+    }
+
+    fn missingArg(self: *Evaluator, span: ast.Span, name: []const u8) EvalError!void {
+        const loc = span.location(self.source);
+        const msg = try std.fmt.allocPrint(
+            self.arena,
+            "missing required argument '{s}'",
+            .{name},
+        );
+        try self.diagnostics.append(self.gpa, .{
+            .code = "EVL004",
+            .message = msg,
+            .span = .{
+                .path = self.path,
+                .line = loc.line,
+                .column = loc.column,
+                .length = span.end - span.start,
+            },
+            .expected = name,
+            .fix_safety = .@"requires-human-review",
+            .repair = .{
+                .id = "supply-argument",
+                .summary = "Pass a value for this parameter, either positionally or as a named argument.",
             },
         });
     }
@@ -1195,6 +1301,88 @@ test "eval: animated color component evaluates without complaint" {
     try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
     const c = r.program.bindings[1].value.color.oklch;
     try std.testing.expectEqualStrings("animate", c.h.constructed.name);
+}
+
+test "eval: lambda binds positional args and evaluates its body" {
+    var r = try evalSource(
+        \\let add = |a: Number, b: Number| { a + b };
+        \\let total = add(3, 4);
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(f64, 7), r.program.bindings[1].value.number.value);
+}
+
+test "eval: lambda mixes positional and named args" {
+    var r = try evalSource(
+        \\let f = |a: Number, b: Number, c: Number| { a * 100 + b * 10 + c };
+        \\let x = f(1, c: 3, b: 2);
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(f64, 123), r.program.bindings[1].value.number.value);
+}
+
+test "eval: lambda parameter default fires when the arg is omitted" {
+    var r = try evalSource(
+        \\let f = |a: Number, b: Number = 10| { a + b };
+        \\let x = f(5);
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(f64, 15), r.program.bindings[1].value.number.value);
+}
+
+test "eval: missing required argument emits EVL004" {
+    // Body intentionally doesn't use `b` so we get exactly one
+    // diagnostic — using nil for the missing arg downstream would
+    // cascade into EVL002s that aren't what this test is checking.
+    var r = try evalSource(
+        \\let f = |a: Number, b: Number| { a };
+        \\let x = f(1);
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
+    try std.testing.expectEqualStrings("EVL004", r.diagnostics[0].code);
+}
+
+test "eval: lambda closes over its lexical environment" {
+    var r = try evalSource(
+        \\let outer = 100;
+        \\let add_outer = |x: Number| { x + outer };
+        \\let r = add_outer(5);
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(f64, 105), r.program.bindings[2].value.number.value);
+}
+
+test "eval: lambda captures snapshot — later let doesn't leak in" {
+    // The closure captures `x` as it was when the lambda evaluated, so
+    // shadowing `x` later (or never seeing it at all) leaves the
+    // closure's view intact.
+    var r = try evalSource(
+        \\let inner = {
+        \\  let x = 1;
+        \\  let f = |y: Number| { x + y };
+        \\  f(10)
+        \\};
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(f64, 11), r.program.bindings[0].value.number.value);
 }
 
 test "eval: taste sample from index.mdx evaluates to a Frame with no diagnostics" {
