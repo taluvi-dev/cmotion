@@ -4,12 +4,68 @@ const ts = @import("../tree_sitter.zig");
 const ast = @import("../ast.zig");
 const lower = @import("../lower.zig");
 const eval = @import("../eval.zig");
+const sampler = @import("../sampler.zig");
 const Context = @import("../cli.zig").Context;
 
 const max_source_bytes: usize = 16 * 1024 * 1024;
 
 pub fn run(ctx: Context, args: []const []const u8) !u8 {
-    if (args.len == 0) {
+    var path_opt: ?[]const u8 = null;
+    var at_seconds: ?f64 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--at")) {
+            i += 1;
+            if (i >= args.len) {
+                try ctx.emitError(.{
+                    .code = "CLI011",
+                    .message = "`--at` requires a duration argument (e.g. `--at 1.5s`)",
+                    .help = "pass a duration after the flag: `cmo eval --at 1.5s src/main.cm`",
+                    .fix_safety = .@"requires-human-review",
+                    .repair = .{
+                        .id = "supply-at-duration",
+                        .summary = "Add a duration spec like `1.5s`, `500ms`, `1us`, or `1ns` after `--at`.",
+                    },
+                });
+                return 2;
+            }
+            at_seconds = sampler.parseDuration(args[i]) catch {
+                try ctx.emitError(.{
+                    .code = "CLI011",
+                    .message = try std.fmt.allocPrint(
+                        ctx.allocator,
+                        "could not parse `--at {s}` as a duration",
+                        .{args[i]},
+                    ),
+                    .help = "use a digits-plus-unit spec like `1.5s`, `500ms`, `1us`, `1ns`, or bare seconds (`2`)",
+                    .fix_safety = .@"requires-human-review",
+                    .repair = .{
+                        .id = "fix-at-duration",
+                        .summary = "Pass a duration of the form `<digits>[.<digits>][s|ms|us|ns]`.",
+                    },
+                });
+                return 2;
+            };
+        } else if (path_opt == null) {
+            path_opt = a;
+        } else {
+            try ctx.emitError(.{
+                .code = "CLI003",
+                .message = try std.fmt.allocPrint(ctx.allocator, "unexpected extra argument: {s}", .{a}),
+                .help = "`cmo eval` takes one .cm source file plus optional flags (e.g. `--at 1.5s`)",
+                .fix_safety = .@"requires-human-review",
+                .repair = .{
+                    .id = "drop-extra-arg",
+                    .summary = "Remove the extra argument, or use a single .cm path.",
+                },
+            });
+            return 2;
+        }
+    }
+
+    const path = path_opt orelse {
         try ctx.emitError(.{
             .code = "CLI002",
             .message = "`eval` requires a source file argument",
@@ -21,9 +77,7 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
             },
         });
         return 2;
-    }
-
-    const path = args[0];
+    };
 
     const source = std.fs.cwd().readFileAlloc(ctx.allocator, path, max_source_bytes) catch |err| {
         const msg = switch (err) {
@@ -135,6 +189,22 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
             break :blk null;
         };
         for (evaluator.diagnostics.items) |d| try diags.append(ctx.allocator, d);
+    }
+
+    // When `--at <t>` is given, sample the stream description at t —
+    // every Constructed("animate", ...) collapses to its value at t,
+    // and the rest of the tree is preserved. Same Value shape coming
+    // out, so the envelope JSON contract is unchanged.
+    if (at_seconds) |t| {
+        if (result) |*r| {
+            const sampled = try arena.allocator().alloc(eval.Binding, r.bindings.len);
+            for (r.bindings, 0..) |b, bi| sampled[bi] = .{
+                .name = b.name,
+                .span = b.span,
+                .value = try sampler.sampleAt(arena.allocator(), b.value, t),
+            };
+            r.bindings = sampled;
+        }
     }
 
     const has_error_diag = blk: {

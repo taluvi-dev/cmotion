@@ -42,4 +42,5 @@ test {
     _ = @import("fmt.zig");
     _ = @import("value.zig");
     _ = @import("eval.zig");
+    _ = @import("sampler.zig");
 }
