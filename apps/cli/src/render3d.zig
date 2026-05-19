@@ -445,6 +445,28 @@ const Vec3F = @Vector(3, f32);
 /// along N and R for ambient + reflection. ACES filmic tone
 /// mapping + sRGB gamma encoding produces the final 8-bit output.
 fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
+    // DEBUG normal-visualisation override: encode the surface
+    // normal as RGB so the user can see directly what geometry
+    // is present at each rotation. Front cap (+z) reads light
+    // blue; back cap (-z) reads yellow; outward walls show as
+    // pinks/teals depending on xy direction. If a region of the
+    // C silhouette shows the BACKGROUND colour instead of a
+    // normal-encoded colour, there's no geometry there. Revert
+    // this override once the diagnosis lands.
+    _ = material;
+    _ = lights;
+    const r: f32 = (normal.x + 1.0) * 0.5;
+    const g: f32 = (normal.y + 1.0) * 0.5;
+    const b: f32 = (normal.z + 1.0) * 0.5;
+    return .{
+        @intFromFloat(@round(std.math.clamp(r, 0.0, 1.0) * 255.0)),
+        @intFromFloat(@round(std.math.clamp(g, 0.0, 1.0) * 255.0)),
+        @intFromFloat(@round(std.math.clamp(b, 0.0, 1.0) * 255.0)),
+        255,
+    };
+}
+
+fn shade_disabled_real(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
     const albedo: Vec3F = .{
         srgbDecode(material.albedo[0]),
         srgbDecode(material.albedo[1]),
