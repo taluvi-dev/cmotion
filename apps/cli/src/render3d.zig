@@ -126,13 +126,31 @@ pub fn drawMesh(
         world_normal[v] = model.mulDirection(mesh.normals[v]).normalise();
     }
 
+    // Pre-compute each triangle's screen-space y-extent. Each worker
+    // uses it to skip triangles entirely outside its band — for
+    // glyph meshes (where most triangles cluster vertically near
+    // the letter's bounding box) this lets bands above and below
+    // the glyph finish almost instantly.
+    const tri_count = mesh.indices.len / 3;
+    const tri_y_min = try arena.alloc(f32, tri_count);
+    const tri_y_max = try arena.alloc(f32, tri_count);
+    var ti: usize = 0;
+    while (ti < tri_count) : (ti += 1) {
+        const i_base = ti * 3;
+        const ya = screen[mesh.indices[i_base]].y;
+        const yb = screen[mesh.indices[i_base + 1]].y;
+        const yc = screen[mesh.indices[i_base + 2]].y;
+        tri_y_min[ti] = @min(@min(ya, yb), yc);
+        tri_y_max[ti] = @max(@max(ya, yb), yc);
+    }
+
     // Partition the framebuffer into row bands, one per worker.
     const max_threads = 16;
     const cpu_count = std.Thread.getCpuCount() catch 1;
     const num_threads_raw = @min(cpu_count, max_threads);
     // For tiny canvases / tiny meshes, threading overhead exceeds
     // the work. Single-thread under a workload threshold.
-    const workload = @as(usize, fb.width) * fb.height * (mesh.indices.len / 3);
+    const workload = @as(usize, fb.width) * fb.height * tri_count;
     const num_threads = if (workload < 200_000) 1 else num_threads_raw;
 
     if (num_threads <= 1) {
@@ -143,6 +161,8 @@ pub fn drawMesh(
             .screen = screen,
             .normals = world_normal,
             .indices = mesh.indices,
+            .tri_y_min = tri_y_min,
+            .tri_y_max = tri_y_max,
             .material = material,
             .lights = lights,
             .y_start = 0,
@@ -163,6 +183,8 @@ pub fn drawMesh(
             .screen = screen,
             .normals = world_normal,
             .indices = mesh.indices,
+            .tri_y_min = tri_y_min,
+            .tri_y_max = tri_y_max,
             .material = material,
             .lights = lights,
             .y_start = y_start,
@@ -179,6 +201,8 @@ const BandArgs = struct {
     screen: []const Vec3,
     normals: []const Vec3,
     indices: []const u32,
+    tri_y_min: []const f32,
+    tri_y_max: []const f32,
     material: Material,
     lights: []const Light,
     y_start: u32,
@@ -186,8 +210,18 @@ const BandArgs = struct {
 };
 
 fn rasteriseBand(args: BandArgs) void {
+    const y_start_f: f32 = @floatFromInt(args.y_start);
+    const y_end_f: f32 = @floatFromInt(args.y_end);
     var i: usize = 0;
-    while (i < args.indices.len) : (i += 3) {
+    var ti: usize = 0;
+    while (i < args.indices.len) : ({
+        i += 3;
+        ti += 1;
+    }) {
+        // Pre-cull: triangle's screen-space y-extent must overlap
+        // our band, otherwise the bounding-box clip inside the
+        // rasteriser would empty out anyway.
+        if (args.tri_y_max[ti] < y_start_f or args.tri_y_min[ti] >= y_end_f) continue;
         const ia = args.indices[i];
         const ib = args.indices[i + 1];
         const ic = args.indices[i + 2];

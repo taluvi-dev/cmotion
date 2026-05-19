@@ -666,7 +666,15 @@ fn drawExtrude(
     // edges at the cost of 4× the per-fragment work. For a 320×180
     // canvas that's well under a second total; if perf becomes a
     // need we can drop to 1× via a render flag.
-    const supersample_factor: u32 = 2;
+    // Supersampling cost is 4× the rasteriser; the visual win
+    // diminishes as the native canvas resolution grows. Adaptive:
+    // SS=2 below ~1080p (small canvases gain a lot from the box
+    // filter softening hard silhouette edges), SS=1 at 1080p+
+    // (the rasteriser already produces edges below the perceptible
+    // threshold at typical viewing distances). Saves 4× at 4K /
+    // 8K renders for ~zero visible loss.
+    const pixels: usize = @as(usize, fb.width) * fb.height;
+    const supersample_factor: u32 = if (pixels < 2_073_600) 2 else 1; // 1920×1080 = 2.07M
     try render3d.drawMeshSupersampled(
         arena,
         fb,
