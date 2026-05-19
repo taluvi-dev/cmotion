@@ -754,16 +754,19 @@ fn meshFromShape(
     if (std.mem.eql(u8, c.name, "text.glyph")) {
         var text_raw: []const u8 = "";
         var size_px: f32 = 96;
+        var curve_segments: u32 = 32;
         for (c.fields) |f| {
             if (f.name.len == 0 and f.value == .string) {
                 text_raw = f.value.string;
             } else if (std.mem.eql(u8, f.name, "size")) {
                 if (numberAsF32(f.value)) |s| size_px = s;
+            } else if (std.mem.eql(u8, f.name, "curve_segments")) {
+                if (numberAsF32(f.value)) |s| curve_segments = @intFromFloat(@max(2.0, s));
             }
         }
         const text = stripQuotes(text_raw);
         if (text.len == 0) return null;
-        return try mesh_mod.extrudeGlyph(arena, text[0], size_px, depth, bevel, bevel_segments);
+        return try mesh_mod.extrudeGlyph(arena, text[0], size_px, depth, bevel, bevel_segments, curve_segments);
     }
     return null;
 }

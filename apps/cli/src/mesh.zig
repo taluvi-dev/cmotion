@@ -760,8 +760,9 @@ pub fn extrudeGlyph(
     depth: f32,
     bevel: f32,
     bevel_segments: u32,
+    curve_segments: u32,
 ) !?Mesh {
-    const contours = try font.glyphContours(arena, codepoint, size_px) orelse return null;
+    const contours = try font.glyphContours(arena, codepoint, size_px, curve_segments) orelse return null;
     if (contours.len == 0) return null;
 
     const converted = try arena.alloc([]const Vec2, contours.len);
