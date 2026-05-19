@@ -336,3 +336,50 @@ fn lookup(code: []const u8) ?Entry {
     for (entries) |e| if (std.mem.eql(u8, e.code, code)) return e;
     return null;
 }
+
+// Every diagnostic code emitted anywhere in the CLI must resolve through
+// `lookup`, or `cmo explain CODE` falls back to CLI006 ("no explanation
+// registered"). Past regressions shipped because the emit site and the
+// explain table drifted; this test closes the loop by scanning the source
+// for emit-site code literals (the field assignment used in every
+// `ctx.emit*` call) and asserting every one is registered.
+//
+// The file list is hand-maintained: adding a new module with diagnostics
+// means adding it here. If a file is missing, its codes are simply not
+// checked — there's no way to recover the directory listing at comptime.
+test "every emitted diagnostic code has an explain entry" {
+    const sources = [_][]const u8{
+        @embedFile("../cli.zig"),
+        @embedFile("../check.zig"),
+        @embedFile("../diagnostics.zig"),
+        @embedFile("../fmt.zig"),
+        @embedFile("../lower.zig"),
+        @embedFile("../main.zig"),
+        @embedFile("../tree_sitter.zig"),
+        @embedFile("check.zig"),
+        @embedFile("explain.zig"),
+        @embedFile("fmt.zig"),
+        @embedFile("parse.zig"),
+        @embedFile("version.zig"),
+    };
+
+    const needle = ".code = \"";
+    var missing: u32 = 0;
+    for (sources) |src| {
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, src, i, needle)) |hit| {
+            const code_start = hit + needle.len;
+            const code_end = std.mem.indexOfScalarPos(u8, src, code_start, '"') orelse {
+                i = code_start;
+                continue;
+            };
+            const code = src[code_start..code_end];
+            if (lookup(code) == null) {
+                std.debug.print("emitted code '{s}' has no explain entry\n", .{code});
+                missing += 1;
+            }
+            i = code_end + 1;
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 0), missing);
+}
