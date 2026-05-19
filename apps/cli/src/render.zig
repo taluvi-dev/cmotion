@@ -266,10 +266,104 @@ fn srgbEncode(linear: f64) u8 {
     return @intFromFloat(@round(std.math.clamp(gamma, 0.0, 1.0) * 255.0));
 }
 
+/// Write the framebuffer as a PNG. RGBA8, no interlacing, stored
+/// deflate (no compression of the pixel data — keeps the encoder under
+/// 200 lines of Zig with no external deps). For 320×180 the file is
+/// ~230 KB; for a typical preview that's fine. We'll switch to real
+/// deflate when we render anything bigger than a phone screen.
+///
+/// Spec: https://www.w3.org/TR/PNG/. Sections referenced inline.
+pub fn writePng(arena: std.mem.Allocator, fb: Framebuffer, writer: anytype) !void {
+    // §5.2 — file signature.
+    try writer.writeAll(&[_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
+
+    // §11.2.2 IHDR.
+    var ihdr: [13]u8 = undefined;
+    std.mem.writeInt(u32, ihdr[0..4], fb.width, .big);
+    std.mem.writeInt(u32, ihdr[4..8], fb.height, .big);
+    ihdr[8] = 8; // bit depth
+    ihdr[9] = 6; // color type: RGBA (truecolor + alpha)
+    ihdr[10] = 0; // compression method (0 = deflate)
+    ihdr[11] = 0; // filter method (0 = adaptive per-scanline)
+    ihdr[12] = 0; // interlace method (0 = none)
+    try writePngChunk(writer, "IHDR", &ihdr);
+
+    // §11.2.4 IDAT — build the zlib-wrapped, deflate-stored pixel
+    // stream, then drop it in a single chunk. Filter byte 0 (None) per
+    // scanline means we just prepend a zero to each row of raw bytes.
+    const row_bytes: usize = @as(usize, fb.width) * 4;
+    const raw_size = @as(usize, fb.height) * (1 + row_bytes);
+    const raw = try arena.alloc(u8, raw_size);
+    var ro: usize = 0;
+    var y: u32 = 0;
+    while (y < fb.height) : (y += 1) {
+        raw[ro] = 0; // filter: None
+        ro += 1;
+        const src = @as(usize, y) * row_bytes;
+        @memcpy(raw[ro .. ro + row_bytes], fb.pixels[src .. src + row_bytes]);
+        ro += row_bytes;
+    }
+
+    // RFC 1950 zlib wrapper around RFC 1951 deflate stored blocks. Two-
+    // byte zlib header is `78 01` — fastest/least-compression preset,
+    // matches stored deflate.
+    const stored_overhead = 5; // per block: 1 byte BFINAL/BTYPE + 4 bytes LEN/NLEN
+    const max_block = 0xFFFF;
+    const num_blocks = if (raw.len == 0) 1 else (raw.len + max_block - 1) / max_block;
+    const idat_size = 2 + raw.len + num_blocks * stored_overhead + 4;
+    const idat = try arena.alloc(u8, idat_size);
+    var p: usize = 0;
+    idat[p] = 0x78;
+    idat[p + 1] = 0x01;
+    p += 2;
+    var off: usize = 0;
+    var blocks_written: usize = 0;
+    while (true) : (blocks_written += 1) {
+        const remaining = raw.len - off;
+        const block_len: u16 = @intCast(@min(remaining, max_block));
+        const is_last = blocks_written + 1 == num_blocks;
+        idat[p] = if (is_last) 0x01 else 0x00; // BFINAL bit + BTYPE=00 (stored)
+        p += 1;
+        // §3.2.4 — LEN little-endian, NLEN is one's complement.
+        std.mem.writeInt(u16, idat[p..][0..2], block_len, .little);
+        p += 2;
+        std.mem.writeInt(u16, idat[p..][0..2], ~block_len, .little);
+        p += 2;
+        if (block_len > 0) {
+            @memcpy(idat[p .. p + block_len], raw[off .. off + block_len]);
+            p += block_len;
+            off += block_len;
+        }
+        if (is_last) break;
+    }
+    const adler = std.hash.Adler32.hash(raw);
+    std.mem.writeInt(u32, idat[p..][0..4], adler, .big);
+    p += 4;
+    try writePngChunk(writer, "IDAT", idat[0..p]);
+
+    // §11.2.5 IEND.
+    try writePngChunk(writer, "IEND", &.{});
+}
+
+fn writePngChunk(writer: anytype, chunk_type: []const u8, data: []const u8) !void {
+    var len_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &len_bytes, @intCast(data.len), .big);
+    try writer.writeAll(&len_bytes);
+    try writer.writeAll(chunk_type);
+    try writer.writeAll(data);
+
+    // §5.5 — CRC32 over chunk_type + data.
+    var crc = std.hash.Crc32.init();
+    crc.update(chunk_type);
+    crc.update(data);
+    var crc_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &crc_bytes, crc.final(), .big);
+    try writer.writeAll(&crc_bytes);
+}
+
 /// Write the framebuffer out as binary PPM (P6). PPM is the simplest
-/// format that any image viewer in 2026 still opens; we'll add PNG once
-/// we vendor a small encoder. Alpha is composited against black during
-/// the write — PPM is RGB-only.
+/// format around; useful for piping into ImageMagick or `display`.
+/// Alpha is composited against black during the write — PPM is RGB-only.
 pub fn writePpm(fb: Framebuffer, writer: anytype) !void {
     try writer.print("P6\n{d} {d}\n255\n", .{ fb.width, fb.height });
     var i: usize = 0;
@@ -374,6 +468,34 @@ test "oklch: known sanity values land in plausible sRGB range" {
     try std.testing.expectEqual(grey[0], grey[1]);
     try std.testing.expectEqual(grey[1], grey[2]);
     try std.testing.expect(grey[0] > 80 and grey[0] < 200);
+}
+
+test "writePng: emits a well-formed file with expected signature and chunks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fb = Framebuffer{
+        .pixels = try a.alloc(u8, 4 * 4 * 4),
+        .width = 4,
+        .height = 4,
+    };
+    @memset(fb.pixels, 0);
+    fb.pixels[0] = 255;
+    fb.pixels[3] = 255;
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&buf);
+    try writePng(a, fb, &stream);
+    const out = stream.buffered();
+
+    const sig = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+    try std.testing.expect(std.mem.startsWith(u8, out, &sig));
+    // Each PNG file ends with an IEND chunk: 4-byte zero length, "IEND",
+    // 4-byte CRC. The chunk type makes a reliable terminal marker.
+    try std.testing.expect(std.mem.indexOf(u8, out, "IHDR") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "IDAT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "IEND") != null);
 }
 
 test "writePpm: header + payload byte count" {
