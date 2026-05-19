@@ -9,15 +9,29 @@ isn't available on your machine.
 
 ## Build
 
-Requires Zig 0.15.x (pinned in `.zigversion`).
+Requires Zig 0.15.x (pinned in `.zigversion`) and Git.
+
+First-time setup vendors the tree-sitter C runtime into `vendor/` and
+regenerates `parser.c` from the grammar:
 
 ```sh
 cd apps/cli
+./scripts/fetch-deps.sh                                  # clones tree-sitter
+pnpm --filter @cmotion/tree-sitter-cmotion generate      # regenerates parser.c
+```
+
+Then:
+
+```sh
 zig build                              # debug build at zig-out/bin/cmotion
 zig build -Doptimize=ReleaseFast       # release build
-zig build run -- --json parse foo.cm   # build and run with args
+zig build run -- parse src/main.cm     # build and run with args
 zig build test                         # unit tests
 ```
+
+The build links `vendor/tree-sitter/lib/src/lib.c` (MIT) and the generated
+`packages/tree-sitter-cmotion/src/parser.c` into one static binary. No
+runtime tree-sitter dependency is needed at install time.
 
 ## Install
 

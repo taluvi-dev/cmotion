@@ -55,6 +55,26 @@ const entries = [_]Entry{
         \\directory.
         ,
     },
+    .{
+        .code = "PAR000",
+        .title = "Parser failed to initialise",
+        .body =
+        \\The tree-sitter parser could not be created or could not accept
+        \\the generated cmotion language. This is an internal error — the
+        \\runtime and the grammar are out of sync, or the binary was built
+        \\against the wrong runtime version.
+        ,
+    },
+    .{
+        .code = "PAR100",
+        .title = "Syntax error in source",
+        .body =
+        \\The parser produced a tree containing ERROR or MISSING nodes.
+        \\The span on the diagnostic points at the first invalid token.
+        \\Run `cmo parse --json <file>` to inspect the full CST and locate
+        \\every error node.
+        ,
+    },
 };
 
 pub fn run(ctx: Context, args: []const []const u8) !u8 {
