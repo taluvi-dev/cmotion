@@ -91,15 +91,14 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
 fn emitCstSExpr(ctx: Context, root: ts.Node) !void {
     const sexp = ts.sexprAlloc(root) orelse return;
     defer ts.freeSExpr(sexp);
-    const w = ctx.stdout.writer();
-    try w.writeAll(std.mem.span(sexp));
-    try w.writeAll("\n");
+    try ctx.stdout.writeAll(std.mem.span(sexp));
+    try ctx.stdout.writeAll("\n");
 }
 
 fn emitCstJson(ctx: Context, path: []const u8, root: ts.Node, source: []const u8) !void {
     _ = source;
-    const w = ctx.stdout.writer();
-    try w.print("{{\"schemaVersion\":1,\"path\":", .{});
+    const w = ctx.stdout;
+    try w.writeAll("{\"schemaVersion\":1,\"path\":");
     try writeJsonString(w, path);
     try w.writeAll(",\"cst\":");
     // For now, embed the same S-expression tree-sitter produces. A future
@@ -113,16 +112,16 @@ fn emitCstJson(ctx: Context, path: []const u8, root: ts.Node, source: []const u8
     try w.writeAll("}\n");
 }
 
-fn writeJsonString(writer: anytype, s: []const u8) !void {
-    try writer.writeByte('"');
+fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
+    try w.writeByte('"');
     for (s) |b| switch (b) {
-        '"' => try writer.writeAll("\\\""),
-        '\\' => try writer.writeAll("\\\\"),
-        '\n' => try writer.writeAll("\\n"),
-        '\r' => try writer.writeAll("\\r"),
-        '\t' => try writer.writeAll("\\t"),
-        0...0x1f => try std.fmt.format(writer, "\\u{x:0>4}", .{b}),
-        else => try writer.writeByte(b),
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{b}),
+        else => try w.writeByte(b),
     };
-    try writer.writeByte('"');
+    try w.writeByte('"');
 }

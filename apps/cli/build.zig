@@ -13,6 +13,7 @@ pub fn build(b: *std.Build) void {
 
     const c_flags: []const []const u8 = &.{
         "-std=c11",
+        "-D_DEFAULT_SOURCE", // tree-sitter uses be16toh/le16toh/fdopen
         "-Wno-unused-but-set-variable",
         "-Wno-unused-variable",
         "-Wno-unused-parameter",
