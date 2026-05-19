@@ -39,10 +39,18 @@ pub const Light = union(enum) {
 };
 
 pub const Material = struct {
-    /// Albedo, RGBA8. Alpha is the source-over alpha for the
-    /// rasterised triangles, not the material's "transparency"
-    /// in the physically-based sense.
+    /// Diffuse albedo, RGBA8. Alpha is the source-over compositing
+    /// alpha, not a physically-based transmission term.
     albedo: [4]u8 = .{ 220, 220, 220, 255 },
+    /// `0` = pure dielectric (plastic, paper, paint — reflects 4% at
+    /// normal incidence regardless of colour). `1` = pure metal (the
+    /// specular reflection tints with the albedo, the diffuse drops
+    /// to zero). Values in between blend the two ends.
+    metalness: f32 = 0.0,
+    /// `0` = mirror-smooth (tight pinpoint highlight). `1` = fully
+    /// rough (broad, almost-imperceptible specular). The taste sample
+    /// uses 0.35 — slightly rough metal-ish surface.
+    roughness: f32 = 1.0,
 };
 
 pub const Framebuffer = struct {
@@ -204,35 +212,107 @@ fn edgeFn(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) f32 {
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
 }
 
-/// Sum ambient + Lambertian directional contributions, modulate the
-/// material albedo. Output is straight-alpha RGBA8 ready for blit.
+/// Shade a fragment via Blinn-Phong with a PBR-style metalness +
+/// roughness mapping. Cheap approximation of GGX rather than the
+/// full Cook-Torrance BRDF — close enough for motion-graphics
+/// titles, and ~10× cheaper per fragment.
+///
+/// The decomposition:
+///   - `diffuse_color`  = albedo · (1 − metalness)     (metals don't diffuse)
+///   - `specular_color` = mix(0.04, albedo, metalness) (dielectrics ≈ 4%
+///                                                      reflectance at
+///                                                      normal incidence;
+///                                                      metals reflect
+///                                                      their albedo)
+///   - `spec_power`     = 2^(11·(1−roughness)) + 2     (tight highlight
+///                                                      → broad as
+///                                                      roughness ramps)
+///
+/// Per directional light, accumulate
+///   diffuse_color  · I · max(0, N·L) +
+///   specular_color · I · max(0, N·H)^spec_power
+/// where H = normalize(L + V) and V is the view direction (camera
+/// looks down −z, so V ≈ +z in world space — accurate enough for
+/// our narrow FOV that we treat it as constant).
 fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
-    var lit: f32 = 0;
+    // Albedo in linear 0..1.
+    const albedo: [3]f32 = .{
+        @as(f32, @floatFromInt(material.albedo[0])) / 255.0,
+        @as(f32, @floatFromInt(material.albedo[1])) / 255.0,
+        @as(f32, @floatFromInt(material.albedo[2])) / 255.0,
+    };
+    const metalness = std.math.clamp(material.metalness, 0.0, 1.0);
+    const roughness = std.math.clamp(material.roughness, 0.0, 1.0);
+
+    const one_minus_m = 1.0 - metalness;
+    const diffuse_color: [3]f32 = .{
+        albedo[0] * one_minus_m,
+        albedo[1] * one_minus_m,
+        albedo[2] * one_minus_m,
+    };
+    // F0 = mix(0.04, albedo, metalness). Dielectrics reflect 4% at
+    // normal incidence; metals reflect their colour.
+    const dielectric_f0: f32 = 0.04;
+    const specular_color: [3]f32 = .{
+        dielectric_f0 * one_minus_m + albedo[0] * metalness,
+        dielectric_f0 * one_minus_m + albedo[1] * metalness,
+        dielectric_f0 * one_minus_m + albedo[2] * metalness,
+    };
+    // Exponential mapping from roughness → Blinn-Phong shininess.
+    // roughness=0 → exponent ~2050 (mirror-tight), roughness=1 → 3
+    // (extremely broad, near-diffuse). Tuned so 0.35 (taste sample)
+    // gives a recognisable but soft highlight.
+    const spec_power = std.math.pow(f32, 2.0, 11.0 * (1.0 - roughness)) + 2.0;
+
+    var diffuse: [3]f32 = .{ 0, 0, 0 };
+    var specular: [3]f32 = .{ 0, 0, 0 };
+
+    // View direction in world space — see function docstring.
+    const view = Vec3{ .x = 0, .y = 0, .z = 1 };
+
     for (lights) |l| {
         switch (l) {
-            .ambient => |amb| lit += amb.intensity,
+            .ambient => |amb| {
+                // Ambient is direction-less: contributes a flat
+                // diffuse-shaped pedestal so unlit faces aren't
+                // pitch-black. No specular contribution.
+                inline for (0..3) |k| diffuse[k] += diffuse_color[k] * amb.intensity;
+            },
             .directional => |dir| {
-                // Light points *toward* the surface; the cosine term
-                // is dot(normal, -direction). Negative values get
-                // clamped — the surface faces away from this light.
-                const cos_term = -normal.dot(dir.direction.normalise());
-                if (cos_term > 0) lit += dir.intensity * cos_term;
+                // `dir.direction` is the direction the light *travels*
+                // (away from the source, toward the surface). For
+                // Lambertian we want the direction from the surface
+                // *back to* the source — that's −direction.
+                const L = dir.direction.scale(-1).normalise();
+                const n_dot_l = normal.dot(L);
+                if (n_dot_l <= 0) continue; // back-facing — skip.
+                // Diffuse Lambertian.
+                inline for (0..3) |k| {
+                    diffuse[k] += diffuse_color[k] * dir.intensity * n_dot_l;
+                }
+                // Blinn-Phong specular via the halfway vector.
+                const H = L.add(view).normalise();
+                const n_dot_h = normal.dot(H);
+                if (n_dot_h <= 0) continue;
+                const spec = std.math.pow(f32, n_dot_h, spec_power);
+                inline for (0..3) |k| {
+                    specular[k] += specular_color[k] * dir.intensity * spec;
+                }
             },
         }
     }
-    // Soft clamp at slightly over 1 — preserves a touch of highlight
-    // detail when multiple lights stack. Hard clip at 255 below.
-    const intensity = std.math.clamp(lit, 0.0, 1.5);
+
+    // Combine, soft-clamp, convert to RGB8.
     return .{
-        scaleChannel(material.albedo[0], intensity),
-        scaleChannel(material.albedo[1], intensity),
-        scaleChannel(material.albedo[2], intensity),
+        toChannel(diffuse[0] + specular[0]),
+        toChannel(diffuse[1] + specular[1]),
+        toChannel(diffuse[2] + specular[2]),
         material.albedo[3],
     };
 }
 
-fn scaleChannel(c: u8, intensity: f32) u8 {
-    const v = @as(f32, @floatFromInt(c)) * intensity;
+fn toChannel(linear: f32) u8 {
+    const v = linear * 255.0;
     if (v >= 255) return 255;
     if (v <= 0) return 0;
     return @intFromFloat(@round(v));
@@ -307,4 +387,55 @@ test "shade: a face pointed into a directional light receives its full intensity
     // Surface normal points +z → straight into the incoming light.
     const rgba = shade(.{ .x = 0, .y = 0, .z = 1 }, .{ .albedo = .{ 255, 0, 0, 255 } }, &lights);
     try std.testing.expectEqual(@as(u8, 255), rgba[0]);
+}
+
+test "shade: a metallic surface tints its specular highlight with the albedo" {
+    // Smooth red metal lit dead-on from +z. The specular for a
+    // metal tints toward the albedo (red) — red maxes out, green
+    // and blue stay at zero. A dielectric in the same geometry
+    // sees a ~4% white-tinted specular spill into all channels.
+    const lights = [_]Light{.{ .directional = .{
+        .direction = .{ .x = 0, .y = 0, .z = -1 },
+        .intensity = 1.0,
+    } }};
+    const metal = shade(
+        .{ .x = 0, .y = 0, .z = 1 },
+        .{ .albedo = .{ 255, 0, 0, 255 }, .metalness = 1.0, .roughness = 0.1 },
+        &lights,
+    );
+    const plastic = shade(
+        .{ .x = 0, .y = 0, .z = 1 },
+        .{ .albedo = .{ 255, 0, 0, 255 }, .metalness = 0.0, .roughness = 0.1 },
+        &lights,
+    );
+    // Metal: red specular pegs red, leaves the other channels clean.
+    try std.testing.expectEqual(@as(u8, 255), metal[0]);
+    try std.testing.expectEqual(@as(u8, 0), metal[1]);
+    try std.testing.expectEqual(@as(u8, 0), metal[2]);
+    // Plastic: a small white-ish specular sneaks into green/blue.
+    try std.testing.expect(plastic[1] > 0);
+    try std.testing.expect(plastic[2] > 0);
+}
+
+test "shade: roughness widens the specular highlight" {
+    // 15°-tilted normal, smooth metal vs moderately rough metal.
+    // A mirror's highlight is so narrow that 15° off-axis is
+    // effectively unlit; a moderately rough surface scatters
+    // enough specular to register.
+    const lights = [_]Light{.{ .directional = .{
+        .direction = .{ .x = 0, .y = 0, .z = -1 },
+        .intensity = 1.0,
+    } }};
+    const normal = Vec3{ .x = 0.259, .y = 0, .z = 0.966 }; // 15° off +z
+    const mirror = shade(
+        normal,
+        .{ .albedo = .{ 200, 200, 200, 255 }, .metalness = 1.0, .roughness = 0.0 },
+        &lights,
+    );
+    const rough = shade(
+        normal,
+        .{ .albedo = .{ 200, 200, 200, 255 }, .metalness = 1.0, .roughness = 0.5 },
+        &lights,
+    );
+    try std.testing.expect(rough[0] > mirror[0]);
 }
