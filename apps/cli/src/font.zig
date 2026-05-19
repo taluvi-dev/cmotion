@@ -150,6 +150,114 @@ pub fn freeBitmap(bitmap: GlyphBitmap) void {
     c.stbtt_FreeBitmap(bitmap.pixels.ptr, null);
 }
 
+/// A 2D point in glyph-outline space (pixel units, y-up — matches the
+/// TTF convention, *not* the renderer's framebuffer convention).
+/// The 3D pipeline flips y when projecting to screen.
+pub const Vec2 = struct { x: f32, y: f32 };
+
+/// Glyph outline as a list of closed contours. Each contour is a
+/// flattened polyline (curves already subdivided into line segments)
+/// in TTF y-up coordinates, scaled to `size_px` pixel height. For
+/// letters without holes (most uppercase except A, B, D, O, P, Q, R)
+/// this is a single contour; letters with holes carry multiple.
+///
+/// Caller owns the slices via `arena`.
+pub fn glyphContours(
+    arena: std.mem.Allocator,
+    codepoint: u32,
+    size_px: f32,
+) !?[]const []const Vec2 {
+    ensureInit();
+    var vertices: [*c]c.stbtt_vertex = undefined;
+    const n = c.stbtt_GetCodepointShape(&info, @intCast(codepoint), &vertices);
+    if (n <= 0) return null;
+    defer c.stbtt_FreeShape(&info, vertices);
+
+    const scale = c.stbtt_ScaleForPixelHeight(&info, size_px);
+
+    // First pass: count contours (each STBTT_vmove starts one).
+    var num_contours: usize = 0;
+    for (0..@intCast(n)) |i| {
+        if (vertices[i].type == c.STBTT_vmove) num_contours += 1;
+    }
+    if (num_contours == 0) return null;
+
+    var contours = try arena.alloc([]const Vec2, num_contours);
+    var contour_idx: usize = 0;
+
+    var current = std.array_list.Managed(Vec2).init(arena);
+    var i: usize = 0;
+    while (i < @as(usize, @intCast(n))) : (i += 1) {
+        const v = vertices[i];
+        const x = @as(f32, @floatFromInt(v.x)) * scale;
+        const y = @as(f32, @floatFromInt(v.y)) * scale;
+        switch (v.type) {
+            c.STBTT_vmove => {
+                if (current.items.len > 0) {
+                    contours[contour_idx] = try current.toOwnedSlice();
+                    contour_idx += 1;
+                    current = std.array_list.Managed(Vec2).init(arena);
+                }
+                try current.append(.{ .x = x, .y = y });
+            },
+            c.STBTT_vline => {
+                try current.append(.{ .x = x, .y = y });
+            },
+            c.STBTT_vcurve => {
+                // Quadratic Bézier: subdivide into a fixed number of
+                // straight segments. 12 is enough for any glyph at a
+                // typical screen size — curves under 8 pixels long
+                // would look jagged with fewer, but most strokes are
+                // larger than that at 96-pixel cap height.
+                const p0 = current.items[current.items.len - 1];
+                const cx = @as(f32, @floatFromInt(v.cx)) * scale;
+                const cy = @as(f32, @floatFromInt(v.cy)) * scale;
+                const steps = 12;
+                var s: usize = 1;
+                while (s <= steps) : (s += 1) {
+                    const t = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(steps));
+                    const inv = 1.0 - t;
+                    const bx = inv * inv * p0.x + 2.0 * inv * t * cx + t * t * x;
+                    const by = inv * inv * p0.y + 2.0 * inv * t * cy + t * t * y;
+                    try current.append(.{ .x = bx, .y = by });
+                }
+            },
+            c.STBTT_vcubic => {
+                // CFF / OTF cubics. DM Sans is TTF (only quadratics)
+                // so this branch is dead for our bundled font, but
+                // it's small and prevents a silent gap if we ship a
+                // different font later.
+                const p0 = current.items[current.items.len - 1];
+                const cx = @as(f32, @floatFromInt(v.cx)) * scale;
+                const cy = @as(f32, @floatFromInt(v.cy)) * scale;
+                const cx1 = @as(f32, @floatFromInt(v.cx1)) * scale;
+                const cy1 = @as(f32, @floatFromInt(v.cy1)) * scale;
+                const steps = 16;
+                var s: usize = 1;
+                while (s <= steps) : (s += 1) {
+                    const t = @as(f32, @floatFromInt(s)) / @as(f32, @floatFromInt(steps));
+                    const inv = 1.0 - t;
+                    const bx = inv * inv * inv * p0.x +
+                        3.0 * inv * inv * t * cx +
+                        3.0 * inv * t * t * cx1 +
+                        t * t * t * x;
+                    const by = inv * inv * inv * p0.y +
+                        3.0 * inv * inv * t * cy +
+                        3.0 * inv * t * t * cy1 +
+                        t * t * t * y;
+                    try current.append(.{ .x = bx, .y = by });
+                }
+            },
+            else => {},
+        }
+    }
+    if (current.items.len > 0) {
+        contours[contour_idx] = try current.toOwnedSlice();
+        contour_idx += 1;
+    }
+    return contours[0..contour_idx];
+}
+
 test "font: rasterise produces a non-empty 'C' bitmap" {
     const g = rasterise('C', 96) orelse {
         try std.testing.expect(false);
