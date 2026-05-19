@@ -56,6 +56,17 @@ const entries = [_]Entry{
         ,
     },
     .{
+        .code = "CLI006",
+        .title = "No explanation registered",
+        .body =
+        \\`cmo explain CODE` was called with a code that has no long-form
+        \\entry. Usually means the code is mistyped or the binary is
+        \\older than the code you're looking up. Run `cmo help` for the
+        \\list of subcommands, or visit /language/diagnostics on the
+        \\site for the full code table.
+        ,
+    },
+    .{
         .code = "PAR000",
         .title = "Parser failed to initialise",
         .body =
