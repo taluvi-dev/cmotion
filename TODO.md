@@ -42,9 +42,11 @@ the docs site deploy independently.
 **Topology:**
 
 ```
-client → Worker (Hono) ──┬──→ Container (one-shot, max 1) ──→ R2 outputs (<guid>.mp4 / .png)
-                         │                ↑
-                         │           R2 staging (per-job assets)
+client → Worker (Hono) ──┬──→ Container (Playwright + Chromium, one-shot, max 1)
+                         │       │  → loads bundled viewer, drives WebGL render
+                         │       │  → ffmpeg muxes screenshots into mp4 (or single PNG for /frame)
+                         │       └──→ R2 outputs (<guid>.mp4 / .png)
+                         │           R2 staging (per-job assets, read via in-container http)
                          └──→ D1 (source + params + manifest + status + key)
 ```
 
@@ -120,13 +122,75 @@ assets also marks any D1 row in `pending` state older than 1 h
 as `error: orphaned` — catches container crashes / OOMs that
 didn't fire a callback.
 
-**Container.** One-shot per job; clean `/tmp` every time, no
-state hygiene logic. Cold start ~1–2 s. Image bundles `cmo` +
-ffmpeg + DM Sans, built via `wrangler containers deploy` from
-a `Dockerfile` in `apps/api/container/`. Image tagged by git
-short SHA; `wrangler.toml` pins to a specific SHA so every
-Worker deploy maps to a known image. CI rebuilds on push to
-main affecting `apps/cli/` or `apps/api/container/`.
+**Renderer: headless Chrome, not `cmo bounce`.** The bouncing-ball
+example uses `sphere`, `image().as_texture(...)`, `material`,
+`render3d` — all rendered today by the Three.js viewer in the
+browser, *not* by `render.zig` (which only does 2D rect / circle
+/ text-extrude). To get cloud renders that match the editor
+preview exactly, the container loads the same viewer code in
+headless Chrome (via Playwright), seeks frame-by-frame, captures
+screenshots, and pipes them into ffmpeg for muxing. **`cmo` is
+not in the container at all** — the rendering pipeline is pure
+JS + WASM + WebGL.
+
+This is deliberately one path for all scenes (no "fast lane for
+2D"): one renderer, no behaviour divergence, no "why is this
+scene slow?" debugging. When `render.zig` reaches feature parity
+in stage 6 we can revisit a lean Zig-only path; until then this
+is the renderer.
+
+**Container.** One-shot per job; clean Chromium process every
+time, no state hygiene logic. Cold start ~5 s (Chromium spawn).
+Stays one-shot rather than a warm pool because the cap is one
+instance and isolation is cheap insurance; revisit with a warm
+pool if render volume justifies it.
+
+```
+Base:        mcr.microsoft.com/playwright:v1.56.0-noble   (~1 GB, browsers pre-installed)
+Adds:        ffmpeg                                        (apt-get)
+Bundles:     apps/api/container/render.mjs                 (Playwright driver script)
+             dist/viewer/                                  (HTML + cmotion-render.wasm +
+                                                            cmotion-viewer bundle + DM Sans)
+Entrypoint:  read job from env → start local asset server →
+             load /render/?source=... in Chrome → seek + screenshot
+             each frame → pipe to ffmpeg → upload to R2 → callback Worker
+```
+
+**Viewer assets are baked into the image** at build time (CI step
+that runs `pnpm --filter @cmotion/web build` then copies the
+relevant slice of `dist/` into the container). The image is the
+source of truth; the renderer version is exactly whatever the
+deployed image was built from. No runtime fetch from
+cmotion.org, no coupling between the container and whatever the
+site happens to be serving.
+
+**Image build.** `Dockerfile` lives in `apps/api/container/`,
+deployed via `wrangler containers deploy` from a GitHub Action
+on push to main affecting `apps/web/src/scripts/`,
+`apps/cli/src/wasm_entry.zig`, or `apps/api/container/`. Image
+tagged by git short SHA; `wrangler.toml` pins to a specific SHA
+so every Worker deploy maps to a known image.
+
+**Render loop (rough):**
+
+```js
+const browser = await chromium.launch({ args: ['--no-sandbox'] });
+const page = await browser.newPage({ viewport: { width, height } });
+await page.goto(`http://localhost/render/?job=${jobId}`);
+await page.waitForFunction(() => window.__viewerReady === true);
+
+const ff = spawn('ffmpeg', ['-y', '-f', 'image2pipe', '-r', `${fps}`,
+                            '-i', '-', '-c:v', 'libx264',
+                            '-pix_fmt', 'yuv420p', '/tmp/out.mp4']);
+for (let f = 0; f < totalFrames; f++) {
+  await page.evaluate(t => window.__viewer.seek(t), f / fps);
+  ff.stdin.write(await page.locator('canvas').screenshot({ type: 'png' }));
+}
+ff.stdin.end();
+```
+
+For `POST /v1/frame`, the loop is a single seek + screenshot, no
+ffmpeg invocation — output is the PNG directly.
 
 **D1 schema (initial):**
 
@@ -156,11 +220,11 @@ staging/  <job_id>/<asset_uuid>     — uploaded inputs; deleted eagerly + night
 gallery/  <name>.<ext>              — curated shipped assets; permanent
 ```
 
-**CLI gap.** `cmo render --at <t>` writes PPM today, not PNG.
-Trivial extension (the APNG encoder in `cmo bounce` already
-emits PNG IDAT chunks) — ~20 lines in
-`apps/cli/src/commands/render.zig`. Lands in the same PR that
-ships `POST /v1/frame`.
+**CLI gap (not a cloud-API blocker).** `cmo render --at <t>`
+writes PPM today, not PNG — only affects local CLI usage, since
+the cloud renderer uses headless Chrome screenshots. Trivial
+extension when convenient (~20 lines in
+`apps/cli/src/commands/render.zig`).
 
 **Editor integration.** The `/editor` page gains drag-and-drop
 for image assets: dropping a file inserts an `image("/<name>")`
