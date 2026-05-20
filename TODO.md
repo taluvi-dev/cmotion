@@ -9,6 +9,73 @@ Ordered by leverage, not by what's easy.
 
 ---
 
+## Top priority — infrastructure
+
+### Hosted render API on Cloudflare
+
+A public endpoint that takes a `.cm` source and returns a rendered
+video. Processed through a queue in front of a single Cloudflare
+Container — the queue itself is the rate limiter, no separate
+token bucket. The container runs `cmo bounce` unchanged.
+
+**Shape:**
+
+- `POST /render` — body is the `.cm` source plus optional render
+  params (`fps`, `duration`, `format`). Enqueues the job, returns
+  `{ job_id }`.
+- `GET /render/:job_id` — polls D1 for status. Returns one of:
+  - `{ status: "pending" }` — still queued or rendering
+  - `{ status: "ready", url: "<r2 signed link>" }` — done
+  - `{ status: "error", code, message }` — failed; surfaces the
+    underlying `cmo` diagnostic verbatim
+
+**Topology:**
+
+```
+client → Worker (Hono) → Queue → Container ─→ R2  (rendered video)
+                       ↘                    ↘
+                          D1 (script + status + link)
+```
+
+**Why this shape.** A single container means one renderer at a
+time — no concurrency bugs in `cmo bounce` (which already shells
+out to ffmpeg) and a queue depth that's trivially observable. R2
+is the only sensible blob store on Cloudflare. D1 sits next to
+the queue so the same row records what was submitted, what came
+out, and any error — one source of truth, easy to debug, easy to
+replay.
+
+**D1 schema (initial):**
+
+```
+renders (
+  id           TEXT PRIMARY KEY,   -- job_id, uuid
+  source       TEXT NOT NULL,      -- the submitted .cm text
+  status       TEXT NOT NULL,      -- pending | ready | error
+  output_url   TEXT,               -- R2 link, when ready
+  error_code   TEXT,               -- e.g. PAR100, EVL002
+  error_message TEXT,
+  created_at   INTEGER NOT NULL,
+  completed_at INTEGER
+)
+```
+
+**R2** holds the rendered videos. No lifecycle policy initially.
+Cleanup is a follow-up script — sweep anything older than N days
+or whose D1 row was deleted.
+
+**Open questions** (none are blockers for v0):
+
+- Auth — none for v0, but anonymous endpoints draw abuse.
+  Turnstile + a simple API key before going public.
+- Container image — bundle the released `cmo` + ffmpeg into a
+  pinned image. CI rebuilds on each release tag.
+- Streaming progress — out of scope. Polling is enough; SSE /
+  websocket lands only if the editor wants live render
+  progress, not just success/fail.
+
+---
+
 ## Top priority — type system
 
 ### `Signal<T>` as a first-class type
