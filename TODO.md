@@ -13,19 +13,25 @@ Ordered by leverage, not by what's easy.
 
 ### Hosted render API on Cloudflare
 
-A public endpoint that takes a `.cm` source and returns either a
-rendered video or a single frame. The renderer is a one-shot
-Cloudflare Container per job; the Worker dispatches via the
+A public endpoint that takes a `.cm` source plus its uploaded
+asset images and returns either a rendered video or a single
+frame. The renderer is a one-shot Cloudflare Container per job,
+capped at one concurrent instance; the Worker dispatches via the
 Containers binding and tracks every job in D1. Lives in a new
 `apps/api/` package — separate from `apps/web/` so the API and
 the docs site deploy independently.
 
 **Endpoints (v1):**
 
-- `POST /v1/render` — `{ source, fps?, duration?, format? }` →
-  `202 { job_id, kind: "video" }`. Default format `mp4`.
-- `POST /v1/frame` — `{ source, at, width?, height? }` →
-  `202 { job_id, kind: "frame" }`. Output is PNG.
+- `POST /v1/assets` — multipart upload, body is one or more files
+  each with a friendly `name` (e.g. `earth.png`). Returns
+  `200 { keys: ["asset_<uuid>", ...] }`. Per-upload size + count
+  caps enforced.
+- `POST /v1/render` — `{ source, assets: ["asset_<uuid>", ...],
+  fps?, duration?, format? }` → `202 { job_id, kind: "video" }`.
+  Default format `mp4`.
+- `POST /v1/frame` — `{ source, assets: [...], at, width?,
+  height? }` → `202 { job_id, kind: "frame" }`. Output is PNG.
 - `GET /v1/jobs/:job_id` — poll. Returns one of:
   - `{ status: "pending" }` — still queued or rendering
   - `{ status: "ready", kind, url: "<r2 signed link>" }` — done
@@ -36,34 +42,91 @@ the docs site deploy independently.
 **Topology:**
 
 ```
-client → Worker (Hono) ──┬──→ Container (one-shot) ──→ R2  (<guid>.mp4 / .png)
-                         │           ↑
-                         └──→ D1 (source + params + status + key)
+client → Worker (Hono) ──┬──→ Container (one-shot, max 1) ──→ R2 outputs (<guid>.mp4 / .png)
+                         │                ↑
+                         │           R2 staging (per-job assets)
+                         └──→ D1 (source + params + manifest + status + key)
 ```
 
-**Assets.** `.cm` may reference external image URLs
-(`image("https://…/earth.jpg")`). The container fetches them at
-render time — *we never persist input assets*. Outputs only
-(`<guid>.mp4`, `<guid>.png`) live in R2. The container's
-entrypoint enforces:
+**Assets.** Users upload images directly via `POST /v1/assets`;
+the `.cm` source references them by friendly path (`image("/earth.png")`),
+not by URL or opaque UUID. No external URL fetching anywhere in
+the request path — container has zero outbound network
+requirements, no SSRF / DNS-rebinding surface, deterministic
+renders, no third-party hosts to allowlist or moderate.
 
-- `--max-asset-bytes` per fetched URL (~25 MiB) and per job
-  (~100 MiB)
-- per-fetch wall-clock timeout (~15 s)
-- private-IP block (refuse RFC1918, link-local, IPv6 ULAs, and
-  resolve-then-recheck against DNS-rebinding)
+Naming rules:
 
-**Auth.** None in v0. Protected solely by Cloudflare Rate
-Limiting Rules per-IP at the edge, plus app-level clamps on the
-expensive render params (`duration`, `fps`, output dimensions).
-Turnstile / API keys land before the API goes public.
+- Leading slash optional, normalised to present: `earth.png` and
+  `/earth.png` are the same key.
+- Case-insensitive (`/Earth.PNG` == `/earth.png`).
+- Character set `[a-zA-Z0-9._-/]+`; no `..`, no URL-shaped paths.
+- Each job's asset names must be unique within the job.
 
-**Container.** One-shot per job (not a long-lived poller), so the
-process gets a clean `/tmp` every time and no state hygiene logic
-to maintain. Cold start runs ~1–2 s; revisit with a warm pool if
-that becomes a perceptible drag. Image bundles a pinned `cmo`
-release + ffmpeg + the DM Sans font set; CI rebuilds on each
-release tag.
+A `/gallery/` prefix is reserved for curated shipped assets
+(e.g. `/gallery/earth_4k.jpg`) — always available, cached
+forever in a separate R2 bucket, no upload needed. Users can
+mix gallery references with their own uploads in the same `.cm`.
+
+**Local-cloud parity.** The same `.cm` works unchanged in the
+browser preview (the editor intercepts `image("/earth.png")` and
+serves from local IndexedDB / blob URLs) and against the cloud
+API (assets uploaded, `.cm` submitted verbatim). No source
+rewriting on the "Render in cloud" path.
+
+**Asset lifecycle.** Uploaded assets land in an R2 staging
+prefix (`staging/<job_id>/<asset_uuid>`). After a job is marked
+`ready` or `error`, its staging assets are deleted eagerly. A
+nightly cron Worker sweeps anything still in `staging/` older
+than 6 h, so orphans from failed-before-status-update paths
+don't accumulate.
+
+**Input moderation.** Every uploaded asset runs through an NSFW
+classifier (Cloudflare Workers AI image-classification, or
+SightEngine fallback) at upload time. Flagged →
+`400 { error: "asset_rejected", index: <i> }`. Asset never
+lands in R2.
+
+**Output protection.** R2 responses serve `X-Robots-Tag:
+noindex, nofollow` and `Content-Disposition: attachment` so
+outputs are never indexable and don't embed inline. Output URLs
+are R2 signed links with a 1 h TTL; the file itself is deleted
+by the nightly sweep at 24 h.
+
+**Auth.** None in v0. Protected by Cloudflare Rate Limiting
+Rules per-IP at the edge, plus app-level clamps on the expensive
+render params (`duration`, `fps`, output dimensions). Turnstile
+/ API keys land before the API goes truly public.
+
+**Concurrency cap.** Hard limit of **one container instance**,
+ever. This is the cost ceiling — render-seconds × $/s, no
+parallel multiplier. Configured by:
+
+- `wrangler.toml`: `[[containers]] max_instances = 1`
+- queue consumer: `max_concurrency = 1`
+- container `max_duration = 300s` (5 min per-job hard cap)
+
+Trade-off: queue depth becomes user-visible wait time
+(`render_seconds × position_in_queue`). Acceptable for v0; the
+status endpoint's `pending` makes the wait obvious to clients.
+
+**Backpressure.** Deferred: when queue depth > ~200,
+`POST /v1/render` should return
+`429 { error: "queue_full", retry_after_ms }`. Not needed for
+v0 unless we see abuse fill the queue with cheap jobs.
+
+**Stuck-job sweep.** Same nightly cron that handles staging
+assets also marks any D1 row in `pending` state older than 1 h
+as `error: orphaned` — catches container crashes / OOMs that
+didn't fire a callback.
+
+**Container.** One-shot per job; clean `/tmp` every time, no
+state hygiene logic. Cold start ~1–2 s. Image bundles `cmo` +
+ffmpeg + DM Sans, built via `wrangler containers deploy` from
+a `Dockerfile` in `apps/api/container/`. Image tagged by git
+short SHA; `wrangler.toml` pins to a specific SHA so every
+Worker deploy maps to a known image. CI rebuilds on push to
+main affecting `apps/cli/` or `apps/api/container/`.
 
 **D1 schema (initial):**
 
@@ -73,6 +136,7 @@ CREATE TABLE jobs (
   kind          TEXT NOT NULL,      -- 'video' | 'frame'
   source        TEXT NOT NULL,      -- raw .cm
   params        TEXT NOT NULL,      -- JSON: fps/duration/at/width/height/format
+  assets        TEXT NOT NULL,      -- JSON: { "/earth.png": "asset_<uuid>", ... }
   status        TEXT NOT NULL,      -- 'pending' | 'ready' | 'error'
   output_key    TEXT,               -- '<guid>.mp4' or '<guid>.png'
   error_code    TEXT,               -- e.g. PAR100, EVL002
@@ -81,31 +145,47 @@ CREATE TABLE jobs (
   completed_at  INTEGER
 );
 CREATE INDEX idx_jobs_created_at ON jobs(created_at);
+CREATE INDEX idx_jobs_status     ON jobs(status, created_at);
 ```
 
-**R2** holds the rendered outputs only. No lifecycle policy
-initially. Cleanup is a follow-up cron Worker — sweep anything
-older than N days, or whose D1 row was already deleted.
+**R2 layout:**
+
+```
+outputs/  <guid>.mp4 | <guid>.png   — rendered artifacts; 24 h TTL
+staging/  <job_id>/<asset_uuid>     — uploaded inputs; deleted eagerly + nightly
+gallery/  <name>.<ext>              — curated shipped assets; permanent
+```
 
 **CLI gap.** `cmo render --at <t>` writes PPM today, not PNG.
 Trivial extension (the APNG encoder in `cmo bounce` already
-emits PNG IDAT chunks) — ~20 lines in `apps/cli/src/commands/render.zig`.
-Lands in the same PR that ships `POST /v1/frame`.
+emits PNG IDAT chunks) — ~20 lines in
+`apps/cli/src/commands/render.zig`. Lands in the same PR that
+ships `POST /v1/frame`.
+
+**Editor integration.** The `/editor` page gains drag-and-drop
+for image assets: dropping a file inserts an `image("/<name>")`
+reference into the source, the file is held in IndexedDB for
+the browser preview, and a "Render in cloud" button uploads to
+`POST /v1/assets` + submits the `.cm` unchanged.
+
+**LLM / Claude consumption.** Ship a small MCP server
+(`@cmotion/mcp` npm) alongside the REST API that wraps the
+two-step (upload-then-render) into one tool call:
+`render_video({ source, image_files })` and
+`render_frame({ source, image_files, at })`. Hides the polling
+loop too. ~150 lines once the REST API works.
 
 **Open questions** (none block v0):
 
-- **Output URL signing.** Public R2 (with unguessable guid keys)
-  vs. signed URLs with TTL. Signed URLs cost nothing extra and
-  let us narrow the abuse window — go with signed.
 - **Streaming progress.** Polling is enough for v0; SSE /
   websocket if the editor wants live render progress later.
-- **CI image build.** A Dockerfile + GitHub Action rebuilding on
-  release tag, pushing to Cloudflare's registry.
-- **Editor integration.** The `/editor` page's "Save video"
-  button currently uses in-browser `canvas.captureStream`; once
-  the API exists we'd offer a "Render in cloud" option that
-  hits `POST /v1/render` and polls — better quality, no laptop
-  GPU dependency.
+- **Queue position in status response.** `{ status: "pending",
+  queue_position, eta_seconds }` would be a nice UX win but
+  costs a D1 count query per poll. Add if users complain about
+  polling blind.
+- **Persistent user galleries.** v0 scopes uploads per-job. A
+  v1 feature: tie uploads to a user account so the editor can
+  keep a personal asset library. Needs auth first.
 
 ---
 
