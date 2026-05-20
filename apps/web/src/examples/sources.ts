@@ -47,22 +47,62 @@ scene title(duration: Duration = 6s) -> Frame {
 
 export const BOUNCING_BALL_SOURCE = `use std.shapes.*;
 use std.anim.*;
+use std.scene3d.*;
+use std.lighting.*;
 
-scene bouncing_ball(duration: Duration = 1s) -> Frame {
-  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.96, 0.02, 240));
+scene bouncing_ball(
+  size:     Size     = size(1920px, 1080px),
+  duration: Duration = 6s,
+) -> Frame {
+  let assets = {
+    earth: "/img/earth_4k.jpg",
+    night: "/img/starry_night.jpg",
+  };
 
-  // Two-keyframe ping-pong: apex → ground → apex, looping forever.
-  // Linear segments read as constant velocity — bouncy enough at this
-  // tempo without needing a piecewise easing.
-  let y = animate {
-    0s    =>  280px,
-    500ms => -280px,
-    1s    =>  280px,
+  // Full-bleed starry background. \`image(...).fit(cover)\` becomes the
+  // scene's background texture (handled in the compose translator); no
+  // size info on the image itself, so the viewport falls back to 16:9.
+  let bg = image(assets.night).fit(cover);
+
+  // Continuous y-axis spin — full turn every 6 s, looping.
+  let spin = animate {
+    0s => 0deg,
+    6s => 360deg,
   } with { repeat: forever };
 
-  let ball = circle(radius: 90px, fill: oklch(0.62, 0.20, 25))
-               .translate(y: y);
+  // Ping-pong bounce, eased: the ball dwells near the apex and snaps
+  // through the floor contact at 600 ms.
+  let bounce_y = animate {
+    0s     => -280px,
+    600ms  =>  280px,
+    1200ms => -280px,
+  } with { easing: easing.in_out_quad, repeat: forever };
 
-  compose [bg, ball]
+  // Squash peak co-located with the bounce floor at 600 ms — sharp ramp
+  // in, smoother release. Approximates \`on_event(impacts, decay: …)\`
+  // until that primitive lands in the sampler.
+  let stretch = animate {
+    0s     => 0,
+    540ms  => 0,
+    600ms  => 0.35,
+    760ms  => 0,
+    1200ms => 0,
+  } with { easing: easing.out_cubic, repeat: forever };
+
+  let ball = sphere(r: 220px)
+    .material(fill: image(assets.earth).as_texture(projection: equirectangular))
+    .rotate(y: spin)
+    .pivot(bottom)
+    .squash(factor: stretch);
+
+  let scene = render3d(
+    ball.translate(y: bounce_y),
+    lights: [
+      ambient(0.35),
+      directional(from: vec3(2, 3, 4), intensity: 1.0),
+    ],
+  );
+
+  compose [bg, scene]
 }
 `;
