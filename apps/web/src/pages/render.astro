@@ -1,0 +1,113 @@
+---
+// /render — headless render surface for the cloud renderer.
+//
+// This page is loaded by the Playwright driver inside
+// `containers/<version>/render.mjs`. It bypasses Starlight, has
+// no chrome, exposes only a `<canvas>`, and surfaces a tiny global
+// API the driver uses to seek + screenshot the scene frame-by-frame:
+//
+//   window.__viewerReady : true   once the viewer has booted and
+//                                 loaded the job's `.cm` source
+//   window.__viewerError : { message, code? }  on a parse/eval failure
+//   window.__viewer.seek(t)       seek to time t (seconds)
+//   window.__viewer.durationSeconds
+//   window.__viewer.versions      { cmotion, three }
+//
+// The job's source + params are passed in via a `window.__job`
+// global that Playwright sets through `page.addInitScript(...)`
+// *before* the page loads. For local dev / debugging we also
+// accept a base64-encoded source on the URL hash:
+//
+//   /render/#source=<base64(.cm)>&width=1920&height=1080
+//
+// Asset references like `image("/earth.png")` are fetched relative
+// to the page URL — the container spins up a local asset server
+// on the same origin that resolves those paths. Nothing special
+// needs to happen here.
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>cmotion · render</title>
+    <style>
+      :root { color-scheme: light; }
+      html, body { margin: 0; padding: 0; height: 100%; width: 100%;
+        background: #000; overflow: hidden; }
+      /* The canvas is exactly the viewport so `page.screenshot()`
+         on the canvas locator captures the full frame at the
+         requested resolution. */
+      canvas { display: block; width: 100vw; height: 100vh;
+        background: #000; }
+    </style>
+  </head>
+  <body>
+    <canvas id="stage"></canvas>
+
+    <script>
+      import { boot } from "../scripts/cmotion-viewer.ts";
+
+      declare global {
+        interface Window {
+          __job?: { source: string; params?: Record<string, unknown> };
+          __viewerReady?: boolean;
+          __viewerError?: { message: string; code?: string };
+          __viewer?: {
+            seek: (t: number) => void;
+            durationSeconds: number;
+            versions: { cmotion: string; three: string };
+          };
+        }
+      }
+
+      function readJob(): { source: string } | null {
+        if (window.__job?.source) return { source: window.__job.source };
+        // Fallback for local browser testing: /render/#source=<base64>
+        const hash = location.hash.startsWith("#") ? location.hash.slice(1) : "";
+        if (!hash) return null;
+        const params = new URLSearchParams(hash);
+        const b64 = params.get("source");
+        if (!b64) return null;
+        try {
+          return { source: atob(b64) };
+        } catch {
+          return null;
+        }
+      }
+
+      function fail(message: string, code?: string) {
+        window.__viewerError = code ? { message, code } : { message };
+        // Surface to stderr-equivalent for the Playwright console
+        // listener — the container's driver reads console messages.
+        console.error(`[render] ${code ?? "ERR"}: ${message}`);
+      }
+
+      (async () => {
+        const canvas = document.getElementById("stage") as HTMLCanvasElement;
+        const job = readJob();
+        if (!job) {
+          fail("no job source — set window.__job or use #source=<base64>", "NO_JOB");
+          return;
+        }
+        try {
+          const view = await boot(canvas);
+          view.load(job.source);
+          window.__viewer = {
+            seek: (t) => view.seek(t),
+            durationSeconds: view.durationSeconds,
+            versions: view.versions,
+          };
+          // Re-seek to 0 so the first screenshot is deterministic
+          // regardless of whatever frame `load` happened to leave on
+          // the canvas.
+          view.seek(0);
+          window.__viewerReady = true;
+        } catch (e: any) {
+          fail(e?.message ?? String(e));
+        }
+      })();
+    </script>
+  </body>
+</html>
