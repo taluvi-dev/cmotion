@@ -7,15 +7,17 @@ import ExampleScene from '../../../components/ExampleScene.astro';
 import { BOUNCING_BALL_SOURCE } from '../../../examples/sources.ts';
 
 An Earth-textured `sphere` bouncing in front of a starry-night
-`image` background. The bounce, spin and squash are all driven by
-looping `animate` blocks — the squash peak is timed to the floor
-contact so the ball compresses on impact. Lit by an ambient +
-directional pair through `render3d`.
+`image` background. The vertical motion comes from `bounce(...)` —
+a parabolic arc per period that returns both the current
+`position` and the list of `impacts`. The squash is keyed off
+those impacts via `on_event(...)`: an exponential-decay envelope
+that spikes at each floor contact and relaxes between hits. Lit by
+an ambient + directional pair through `render3d`.
 
 `image(...).as_texture(...)` paints the sphere; `image(...).fit(cover)`
-becomes the scene background. The squash is anisotropic — y compresses
-by `factor`, x/z widen to roughly preserve volume. The eventual
-`bounce(...) / on_event(...)` primitives in the sampler will let you
-write this without the hand-tuned keyframe ramp.
+becomes the scene background. The squash is anisotropic — y
+compresses by `factor`, x/z widen to roughly preserve volume. Field
+access on a sampler-deferred value (`bounce_y.impacts`) lowers to a
+`field_of` staging form that the sampler resolves at sample time.
 
 <ExampleScene source={BOUNCING_BALL_SOURCE} />

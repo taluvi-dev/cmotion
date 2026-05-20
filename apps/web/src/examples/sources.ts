@@ -70,24 +70,16 @@ scene bouncing_ball(
     6s => 360deg,
   } with { repeat: forever };
 
-  // Ping-pong bounce, eased: the ball dwells near the apex and snaps
-  // through the floor contact at 600 ms.
-  let bounce_y = animate {
-    0s     => -280px,
-    600ms  =>  280px,
-    1200ms => -280px,
-  } with { easing: easing.in_out_quad, repeat: forever };
+  // Parabolic bounce: y swings from \`floor\` (impact) up to
+  // \`floor + height\` (apex). Returns a record { position, impacts },
+  // where impacts is the list of contact times the squash listens to.
+  let bounce_y = bounce(height: 560px, period: 1.2s, floor: -280px);
 
-  // Squash peak co-located with the bounce floor at 600 ms — sharp ramp
-  // in, smoother release. Approximates \`on_event(impacts, decay: …)\`
-  // until that primitive lands in the sampler.
-  let stretch = animate {
-    0s     => 0,
-    540ms  => 0,
-    600ms  => 0.35,
-    760ms  => 0,
-    1200ms => 0,
-  } with { easing: easing.out_cubic, repeat: forever };
+  // Exponential decay envelope keyed off the bounce impacts: zero
+  // between contacts, snaps to \`peak\` on impact, then relaxes over
+  // \`decay\`. Squash factor below is "how much to compress" —
+  // 0 = no squash, 0.35 = compressed to ~65% height.
+  let stretch = on_event(bounce_y.impacts, decay: 0.18s, peak: 0.35);
 
   let ball = sphere(r: 220px)
     .material(fill: image(assets.earth).as_texture(projection: equirectangular))
@@ -96,7 +88,7 @@ scene bouncing_ball(
     .squash(factor: stretch);
 
   let scene = render3d(
-    ball.translate(y: bounce_y),
+    ball.translate(y: bounce_y.position),
     lights: [
       ambient(0.35),
       directional(from: vec3(2, 3, 4), intensity: 1.0),

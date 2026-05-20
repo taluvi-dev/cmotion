@@ -112,14 +112,18 @@ fn sampleConstructed(
     c: value.Constructed,
     t: f64,
 ) SampleError!Value {
-    // animate(...) and wave(...) collapse to scalar values at t.
-    // Anything else just recurses into its fields.
+    // Named constructors that collapse to a concrete value at t. Others
+    // recurse verbatim so the structure stays inspectable downstream.
     if (std.mem.eql(u8, c.name, "animate")) {
         if (try tryEvalAnimate(arena, c, t)) |sampled| return sampled;
-        // Malformed — fall through to the verbatim recursion below so
-        // the structure stays inspectable.
     } else if (std.mem.eql(u8, c.name, "wave")) {
         if (tryEvalWave(c, t)) |sampled| return sampled;
+    } else if (std.mem.eql(u8, c.name, "bounce")) {
+        if (try tryEvalBounce(arena, c, t)) |sampled| return sampled;
+    } else if (std.mem.eql(u8, c.name, "on_event")) {
+        if (try tryEvalOnEvent(arena, c, t)) |sampled| return sampled;
+    } else if (std.mem.eql(u8, c.name, "field_of")) {
+        if (try tryEvalFieldOf(arena, c, t)) |sampled| return sampled;
     }
     const fields = try arena.alloc(value.Field, c.fields.len);
     for (c.fields, 0..) |f, i| fields[i] = .{
@@ -193,6 +197,159 @@ fn tryEvalAnimate(
     }
 
     return interpolate(times, values, t, opts_rec);
+}
+
+/// `bounce(height: <px>, period: <s>, floor: <px>)` resolves to a record
+/// `{ position: <px>, impacts: [<s>] }` at `t`. The arc is the standard
+/// projectile parabola per period (apex at the midpoint), so the ball
+/// dwells near the top and snaps through the floor contact. `position`
+/// swings between `floor` (at impact) and `floor + height` (at apex);
+/// `impacts` is a windowed list of impact times around `t` — enough for
+/// `on_event(...)` to evaluate a decay envelope without scanning a list
+/// that grows with the timeline.
+///
+/// Returns null if any required field is missing or non-numeric (the
+/// caller then preserves the staging Constructed verbatim).
+fn tryEvalBounce(
+    arena: std.mem.Allocator,
+    c: value.Constructed,
+    t: f64,
+) SampleError!?Value {
+    var height: ?value.Number = null;
+    var period: ?value.Number = null;
+    var floor: ?value.Number = null;
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "height") and f.value == .number) {
+            height = f.value.number;
+        } else if (std.mem.eql(u8, f.name, "period") and f.value == .number) {
+            period = f.value.number;
+        } else if (std.mem.eql(u8, f.name, "floor") and f.value == .number) {
+            floor = f.value.number;
+        }
+    }
+    const h = height orelse return null;
+    const fl = floor orelse return null;
+    const per_seconds = numberToSeconds(period orelse return null);
+    if (per_seconds <= 0) return null;
+
+    // Position: parabolic arc per period, `arc(t_norm) = 4·t_norm·(1-t_norm)`,
+    // so arc is 0 at the impacts and 1 at the apex.
+    const t_clamped = if (t < 0) 0 else t;
+    const t_norm = @mod(t_clamped, per_seconds) / per_seconds;
+    const arc = 4.0 * t_norm * (1.0 - t_norm);
+    const position = fl.value + h.value * arc;
+    const pos_unit = fl.unit orelse h.unit;
+
+    // Impacts: emit a small window — recent past + the next impact. That's
+    // all `on_event(decay: ...)` ever consults; keeping the list bounded
+    // means the cost doesn't grow with `t`.
+    const back_window: f64 = 2.0;
+    const start_idx_f = @floor(@max(0.0, t_clamped - back_window) / per_seconds);
+    const end_idx_f = @floor((t_clamped + per_seconds) / per_seconds);
+    const start_idx: usize = @intFromFloat(start_idx_f);
+    const end_idx: usize = @intFromFloat(end_idx_f);
+    const count: usize = end_idx - start_idx + 1;
+    const impacts = try arena.alloc(Value, count);
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const idx_f = @as(f64, @floatFromInt(start_idx + i));
+        impacts[i] = .{ .number = .{ .value = idx_f * per_seconds, .unit = .s } };
+    }
+
+    const fields = try arena.alloc(value.Field, 2);
+    fields[0] = .{ .name = "position", .value = .{ .number = .{ .value = position, .unit = pos_unit } } };
+    fields[1] = .{ .name = "impacts", .value = .{ .array = .{ .elems = impacts } } };
+    return .{ .record = .{ .fields = fields } };
+}
+
+/// `on_event(events, decay: <s>, peak: <number>)` resolves to a scalar
+/// envelope at `t`: `peak · exp(-(t - t_last) / decay)`, where `t_last`
+/// is the most recent event time ≤ `t`. Returns 0 (preserving `peak`'s
+/// unit) when no event has fired yet — a clean cold-start.
+///
+/// The `events` arg may be the first positional or a named `events:`;
+/// it's sampled before reading so `bounce(...).impacts` resolves
+/// through `field_of` first.
+fn tryEvalOnEvent(
+    arena: std.mem.Allocator,
+    c: value.Constructed,
+    t: f64,
+) SampleError!?Value {
+    var events_v: ?Value = null;
+    var decay: ?value.Number = null;
+    var peak: ?value.Number = null;
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "events")) {
+            events_v = f.value;
+        } else if (f.name.len == 0 and events_v == null) {
+            events_v = f.value;
+        } else if (std.mem.eql(u8, f.name, "decay") and f.value == .number) {
+            decay = f.value.number;
+        } else if (std.mem.eql(u8, f.name, "peak") and f.value == .number) {
+            peak = f.value.number;
+        }
+    }
+    const events_unsampled = events_v orelse return null;
+    const d_seconds = numberToSeconds(decay orelse return null);
+    const p = peak orelse return null;
+    if (d_seconds <= 0) return null;
+
+    // Resolve the events arg — it's typically a `field_of` staged value
+    // pulled off a `bounce(...)` result, so we have to sample before reading.
+    const sampled = try sampleAt(arena, events_unsampled, t);
+    if (sampled != .array) return null;
+
+    var t_last: ?f64 = null;
+    for (sampled.array.elems) |elem| {
+        if (elem != .number) continue;
+        const event_t = numberToSeconds(elem.number);
+        if (event_t <= t and (t_last == null or event_t > t_last.?)) {
+            t_last = event_t;
+        }
+    }
+    if (t_last == null) {
+        return .{ .number = .{ .value = 0, .unit = p.unit } };
+    }
+    const dt = t - t_last.?;
+    const envelope = p.value * @exp(-dt / d_seconds);
+    return .{ .number = .{ .value = envelope, .unit = p.unit } };
+}
+
+/// `field_of(self, name)` — deferred record-field access. The eval pass
+/// emits this when the user writes `x.name` and `x` is a Constructed
+/// staging value (not a real record yet). At sample time we resolve
+/// `self` first; if the result is a record, return the named field's
+/// value. Anything else falls back to nil.
+fn tryEvalFieldOf(
+    arena: std.mem.Allocator,
+    c: value.Constructed,
+    t: f64,
+) SampleError!?Value {
+    var self_value: ?Value = null;
+    var name: ?[]const u8 = null;
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "self")) {
+            self_value = f.value;
+        } else if (std.mem.eql(u8, f.name, "name") and f.value == .string) {
+            // Strip the surrounding quotes the lexer leaves on string lits.
+            const raw = f.value.string;
+            name = if (raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"')
+                raw[1 .. raw.len - 1]
+            else
+                raw;
+        }
+    }
+    const self_v = self_value orelse return null;
+    const field_name = name orelse return null;
+
+    const sampled = try sampleAt(arena, self_v, t);
+    return switch (sampled) {
+        .record => |r| blk: {
+            for (r.fields) |f| if (std.mem.eql(u8, f.name, field_name)) break :blk f.value;
+            break :blk .nil;
+        },
+        else => .nil,
+    };
 }
 
 fn isForever(opts: value.Record) bool {
@@ -561,4 +718,80 @@ test "sampleAt: recurses into Constructed fields and array elems" {
     try std.testing.expectEqualStrings("rect", sampled.constructed.name);
     try std.testing.expectEqualStrings("width", sampled.constructed.fields[0].name);
     try std.testing.expectEqual(@as(f64, 50), sampled.constructed.fields[0].value.number.value);
+}
+
+fn buildBounce(a: std.mem.Allocator, height_px: f64, period_s: f64, floor_px: f64) !Value {
+    const fs = try a.alloc(value.Field, 3);
+    fs[0] = .{ .name = "height", .value = .{ .number = .{ .value = height_px, .unit = .px } } };
+    fs[1] = .{ .name = "period", .value = .{ .number = .{ .value = period_s, .unit = .s } } };
+    fs[2] = .{ .name = "floor", .value = .{ .number = .{ .value = floor_px, .unit = .px } } };
+    return .{ .constructed = .{ .name = "bounce", .fields = fs } };
+}
+
+test "sampleAt: bounce resolves to {position, impacts} at t" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const b = try buildBounce(a, 400, 1.0, -200);
+
+    // At impact (t=0): position = floor, arc = 0.
+    const at_impact = try sampleAt(a, b, 0);
+    try std.testing.expect(at_impact == .record);
+    try std.testing.expectEqualStrings("position", at_impact.record.fields[0].name);
+    try std.testing.expectEqual(@as(f64, -200), at_impact.record.fields[0].value.number.value);
+    try std.testing.expectEqual(ast.Unit.px, at_impact.record.fields[0].value.number.unit.?);
+
+    // At apex (t = period/2): position = floor + height.
+    const at_apex = try sampleAt(a, b, 0.5);
+    try std.testing.expectEqual(@as(f64, 200), at_apex.record.fields[0].value.number.value);
+
+    // Impacts: an array containing 0s (the current cycle's impact).
+    const impacts = at_impact.record.fields[1].value.array;
+    try std.testing.expect(impacts.elems.len >= 1);
+    try std.testing.expectEqual(@as(f64, 0), impacts.elems[0].number.value);
+}
+
+test "sampleAt: field_of(staged-record, name) defers through the sampler" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const b = try buildBounce(a, 400, 1.0, -200);
+
+    // field_of(self: bounce(...), name: "position")
+    const fields = try a.alloc(value.Field, 2);
+    fields[0] = .{ .name = "self", .value = b };
+    fields[1] = .{ .name = "name", .value = .{ .string = "\"position\"" } };
+    const f = Value{ .constructed = .{ .name = "field_of", .fields = fields } };
+
+    const sampled = try sampleAt(a, f, 0.5);
+    try std.testing.expect(sampled == .number);
+    try std.testing.expectEqual(@as(f64, 200), sampled.number.value);
+}
+
+test "sampleAt: on_event(bounce.impacts, …) peaks on impact then decays" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // field_of(self: bounce(period:1s), name: "impacts")
+    const b = try buildBounce(a, 400, 1.0, -200);
+    const fa_fields = try a.alloc(value.Field, 2);
+    fa_fields[0] = .{ .name = "self", .value = b };
+    fa_fields[1] = .{ .name = "name", .value = .{ .string = "\"impacts\"" } };
+    const impacts = Value{ .constructed = .{ .name = "field_of", .fields = fa_fields } };
+
+    // on_event(impacts, decay: 0.2s, peak: 0.5)
+    const oe_fields = try a.alloc(value.Field, 3);
+    oe_fields[0] = .{ .name = "", .value = impacts };
+    oe_fields[1] = .{ .name = "decay", .value = .{ .number = .{ .value = 0.2, .unit = .s } } };
+    oe_fields[2] = .{ .name = "peak", .value = .{ .number = .{ .value = 0.5, .unit = null } } };
+    const oe = Value{ .constructed = .{ .name = "on_event", .fields = oe_fields } };
+
+    // Right at the impact at t=1.0s — full peak.
+    const at_impact = try sampleAt(a, oe, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), at_impact.number.value, 1e-9);
+
+    // One decay constant later — peak / e.
+    const after_decay = try sampleAt(a, oe, 1.2);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5 / std.math.e), after_decay.number.value, 1e-9);
 }
