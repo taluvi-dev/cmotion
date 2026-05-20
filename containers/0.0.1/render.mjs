@@ -198,7 +198,73 @@ async function renderVideo(env) {
   }
 }
 
+// HTTP-server mode. Cloudflare Containers proxies requests to a
+// port the container exposes, so when CF launches us we run an
+// HTTP server instead of the env-driven one-shot path. POST / with
+//   { jobId?, source, kind?, params? }
+// returns the rendered bytes (image/png for kind=frame, video/mp4
+// for kind=video). PORT env var triggers this mode; local Docker
+// runs without PORT keep using the env-var one-shot contract.
+async function runHttpServer() {
+  const port = parseInt(process.env.PORT ?? "8080", 10);
+  const server = http.createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/healthz") {
+      res.writeHead(200, { "content-type": "text/plain" }).end("ok\n");
+      return;
+    }
+    if (req.method !== "POST") { res.writeHead(405).end(); return; }
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (c) => { body += c; });
+    req.on("end", async () => {
+      let job;
+      try { job = JSON.parse(body); }
+      catch (e) { res.writeHead(400).end(`bad json: ${e.message}`); return; }
+      if (!job?.source) { res.writeHead(400).end("missing source"); return; }
+
+      const env = {
+        jobId: job.jobId ?? `req-${Date.now()}`,
+        source: job.source,
+        kind: job.kind ?? "frame",
+        params: job.params ?? {},
+        outDir: "/tmp/render-out",
+      };
+      if (env.kind !== "frame" && env.kind !== "video") {
+        res.writeHead(400).end(`bad kind: ${env.kind}`); return;
+      }
+
+      try {
+        if (env.kind === "frame") await renderFrame(env);
+        else await renderVideo(env);
+        const ext = env.kind === "frame" ? "png" : "mp4";
+        const outFile = path.join(env.outDir, `${env.jobId}.${ext}`);
+        const stat = fs.statSync(outFile);
+        res.writeHead(200, {
+          "content-type": env.kind === "frame" ? "image/png" : "video/mp4",
+          "content-length": stat.size,
+        });
+        fs.createReadStream(outFile)
+          .on("end", () => fs.unlink(outFile, () => {}))
+          .pipe(res);
+      } catch (e) {
+        process.stderr.write(`[render] error: ${e.stack ?? e.message}\n`);
+        res.writeHead(500, { "content-type": "application/json" })
+          .end(JSON.stringify({ error: e.message }));
+      }
+    });
+  });
+  server.listen(port, "0.0.0.0", () => {
+    process.stdout.write(`[render] HTTP mode on :${port}\n`);
+  });
+}
+
 async function main() {
+  // Cloudflare Containers always sets PORT; local `docker run` with
+  // env vars (SOURCE / JOB_ID / KIND) keeps using the one-shot path.
+  if (process.env.PORT) {
+    await runHttpServer();
+    return;
+  }
   const env = readEnv();
   if (env.kind === "frame") {
     await renderFrame(env);
