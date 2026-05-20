@@ -97,28 +97,69 @@ scene quick(duration: Duration = 3s) -> Frame {
       button.secondary { background: transparent; color: var(--fg);
         border: 1px solid var(--hair); font-weight: 500; }
       button:disabled { opacity: 0.4; cursor: progress; }
-      .status { padding: 14px 16px; border-top: 1px solid var(--hair);
-        background: var(--panel); font-size: 12px; color: var(--muted);
+      .status-bar { display: flex; align-items: center; gap: 10px;
+        padding: 10px 16px; border-top: 1px solid var(--hair);
+        background: var(--panel); }
+      .status-bar .status { flex: 1; font-size: 12px; color: var(--muted);
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .status-bar button.dl {
+        background: var(--accent); color: var(--accent-fg);
+        padding: 4px 10px; border-radius: 4px; border: 0;
+        font: 600 12px/1.4 ui-sans-serif, system-ui, sans-serif;
+        cursor: pointer;
+      }
+      .status-bar button.dl[aria-hidden="true"] { display: none; }
+      .status-bar button.dl:hover { opacity: 0.85; }
+      .status-bar button.dl:disabled { opacity: 0.4; cursor: progress; }
       .status.ok { color: var(--ok); }
       .status.err { color: var(--warn); }
-      .result { background: #111; flex: 1; min-height: 0;
+      /* Dark stage — `position: relative` so the media positions
+         absolutely against it, sidestepping the flex-sizing quirks
+         that were clipping the image's bottom edge. */
+      .stage { position: relative; background: #111;
+        flex: 1; min-height: 0; min-width: 0;
+        overflow: hidden; }
+      .stage .placeholder {
+        position: absolute; inset: 0;
         display: flex; align-items: center; justify-content: center;
-        padding: 20px; box-sizing: border-box; overflow: hidden; }
-      .result img, .result video {
-        max-width: 100%; max-height: 100%;
-        box-shadow: 0 6px 20px rgba(0,0,0,0.45);
-        background: #000;
+        color: #888; font-size: 13px; text-align: center;
+        padding: 20px; box-sizing: border-box; line-height: 1.5;
       }
-      .result .placeholder { color: #888; font-size: 13px; text-align: center;
-        max-width: 360px; line-height: 1.5; }
-      .meta { padding: 10px 16px; border-top: 1px solid var(--hair);
-        background: var(--bg); font-size: 11px; color: var(--muted);
-        font-family: ui-monospace, monospace; display: flex; gap: 14px;
-        flex-wrap: wrap; }
-      .meta .pill { background: var(--panel); padding: 2px 8px; border-radius: 10px;
-        border: 1px solid var(--hair); }
+      /* The reliable "media fits inside a frame" pattern: position
+         the element at the stage edges (inset by the padding we
+         want) and let object-fit: contain handle the letterboxing.
+         Decoupled from flex so max-height: 100% can't get
+         miscalculated. */
+      .stage img, .stage video {
+        position: absolute;
+        inset: 20px;
+        width: calc(100% - 40px);
+        height: calc(100% - 40px);
+        object-fit: contain;
+        background: #000;
+        box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+      }
+      /* Transport bar: a real row in the column layout, NOT a
+         floating overlay. Always visible below the stage when a
+         video is loaded. Buttons: ↺ rewind · ▶/⏸ play/pause · ⏭ skip
+         · scrub slider · time display. */
+      .transport { display: none; align-items: center; gap: 8px;
+        padding: 8px 14px; border-top: 1px solid var(--hair);
+        background: var(--panel); }
+      .transport.visible { display: flex; }
+      .transport button.tx {
+        background: var(--bg); color: var(--fg);
+        border: 1px solid var(--hair); padding: 4px 10px; border-radius: 4px;
+        font: 600 13px/1 ui-sans-serif, system-ui, sans-serif;
+        cursor: pointer; min-width: 36px;
+      }
+      .transport button.tx:hover { background: var(--panel); }
+      .transport .scrub { flex: 1; }
+      .transport .scrub input { width: 100%; }
+      .transport .t { font-variant-numeric: tabular-nums;
+        color: var(--muted); min-width: 96px; font-size: 12px; text-align: right; }
     </style>
   </head>
   <body>
@@ -160,11 +201,10 @@ scene quick(duration: Duration = 3s) -> Frame {
             <h2>Assets</h2>
             <div class="assets">
               <span class="note">
-                Image assets aren't wired through yet — <code>POST /v1/assets</code>
-                lands in a follow-up. Files you pick here are just shown for now;
-                the render won't see them. Sources that need uploaded images will
-                fail to find them. Gallery assets (under <code>/img/...</code>)
-                ship with the runner and do work.
+                Pick images and they get uploaded to <code>POST /v1/assets</code>
+                before the render kicks off. Reference them from the source by
+                friendly path — a file named <code>earth.png</code> becomes
+                <code>image("/earth.png")</code> in your <code>.cm</code> source.
               </span>
               <input id="assets" type="file" accept="image/*" multiple />
               <ul class="files" id="asset-list"></ul>
@@ -183,15 +223,18 @@ scene quick(duration: Duration = 3s) -> Frame {
       </section>
 
       <section class="pane">
-        <div class="result" id="result">
+        <div class="stage" id="stage">
           <div class="placeholder">
             Hit <strong>Render frame</strong> or <strong>Render video</strong>
             to send the source to <code>api.cmotion.org</code>. The result
             appears here once the job flips to <code>ready</code>.
           </div>
         </div>
-        <div class="meta" id="meta"></div>
-        <div class="status" id="status">idle</div>
+        <div class="transport" id="transport"></div>
+        <div class="status-bar">
+          <span class="status" id="status">idle</span>
+          <button class="dl" id="dl" type="button" aria-hidden="true">↓ Download</button>
+        </div>
       </section>
     </main>
 
@@ -206,8 +249,9 @@ scene quick(duration: Duration = 3s) -> Frame {
       const srcEl = $("src") as HTMLTextAreaElement;
       const initialSrc = srcEl.value;
       const status = $("status");
-      const result = $("result");
-      const meta = $("meta");
+      const stage = $("stage");
+      const transport = $("transport");
+      const dl = $("dl") as HTMLButtonElement;
       const assetsInput = $("assets") as HTMLInputElement;
       const assetList = $("asset-list");
 
@@ -215,25 +259,49 @@ scene quick(duration: Duration = 3s) -> Frame {
         status.className = "status" + (kind === "ok" ? " ok" : kind === "err" ? " err" : "");
         status.textContent = msg;
       }
-      function appendStatus(msg: string) {
-        status.textContent += "\n" + msg;
-        status.scrollTop = status.scrollHeight;
-      }
-      function setMeta(parts: Array<[string, string]>) {
-        meta.innerHTML = "";
-        for (const [k, v] of parts) {
-          const pill = document.createElement("span");
-          pill.className = "pill";
-          pill.textContent = `${k}: ${v}`;
-          meta.appendChild(pill);
+
+      // Download via fetch → blob → ephemeral <a download>. Doing it
+      // this way works across origins (api.cmotion.org → cmotion.org)
+      // — the plain `<a href download>` attribute is ignored by
+      // browsers when the URL is cross-origin, which is why the
+      // earlier version just opened the video in a new tab.
+      let dlUrl: string | null = null;
+      let dlName = "";
+      dl.addEventListener("click", async () => {
+        if (!dlUrl) return;
+        dl.disabled = true;
+        try {
+          const res = await fetch(dlUrl);
+          const blob = await res.blob();
+          const obj = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = obj;
+          a.download = dlName;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          // Give the browser a tick to start the download before
+          // revoking — otherwise some browsers cancel the save.
+          setTimeout(() => URL.revokeObjectURL(obj), 1000);
+        } finally {
+          dl.disabled = false;
         }
+      });
+      function setDownload(url: string | null, filename = "") {
+        dlUrl = url;
+        dlName = filename;
+        if (url) dl.removeAttribute("aria-hidden");
+        else dl.setAttribute("aria-hidden", "true");
       }
-      function clearResult(placeholderHTML?: string) {
+
+      function clearStage(placeholderHTML?: string) {
         if (placeholderHTML) {
-          result.innerHTML = `<div class="placeholder">${placeholderHTML}</div>`;
+          stage.innerHTML = `<div class="placeholder">${placeholderHTML}</div>`;
         } else {
-          result.innerHTML = "";
+          stage.innerHTML = "";
         }
+        transport.classList.remove("visible");
+        transport.innerHTML = "";
       }
       function setBusy(busy: boolean) {
         ($("btn-frame") as HTMLButtonElement).disabled = busy;
@@ -251,7 +319,30 @@ scene quick(duration: Duration = 3s) -> Frame {
 
       $("btn-reset").addEventListener("click", () => { srcEl.value = initialSrc; });
 
-      async function enqueue(kind: "frame" | "video"): Promise<string> {
+      // Upload any selected files to /v1/assets and return the
+      // path-in-source → asset-key map ready to thread into the
+      // render call. Filename `earth.png` is mapped to source path
+      // `/earth.png` so users can write `image("/earth.png")`.
+      async function uploadAssets(): Promise<Record<string, string>> {
+        const files = Array.from(assetsInput.files ?? []);
+        if (files.length === 0) return {};
+        const form = new FormData();
+        for (const f of files) form.append(f.name, f, f.name);
+        const res = await fetch(`${API_BASE}/v1/assets`, { method: "POST", body: form });
+        if (!res.ok) {
+          const body = await res.text();
+          throw new Error(`asset upload failed: HTTP ${res.status} · ${body}`);
+        }
+        const body = await res.json() as { assets: Record<string, string> };
+        // Map filename → asset key into source-path → asset key.
+        const out: Record<string, string> = {};
+        for (const [filename, key] of Object.entries(body.assets)) {
+          out[`/${filename}`] = key;
+        }
+        return out;
+      }
+
+      async function enqueue(kind: "frame" | "video", assets: Record<string, string>): Promise<string> {
         const source = srcEl.value;
         const params: Record<string, number> = {};
         const width = parseInt(($("p-width") as HTMLInputElement).value, 10);
@@ -277,7 +368,7 @@ scene quick(duration: Duration = 3s) -> Frame {
         const res = await fetch(`${API_BASE}${endpoint}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ source, params }),
+          body: JSON.stringify({ source, params, assets }),
         });
         if (!res.ok) {
           const body = await res.text();
@@ -287,62 +378,129 @@ scene quick(duration: Duration = 3s) -> Frame {
         return body.job_id;
       }
 
-      async function poll(id: string, kind: "frame" | "video"): Promise<any> {
-        let n = 0;
+      // Format milliseconds as a compact "12.3 s" / "1m04 s"
+      // string suited for an in-place updating timer.
+      function fmtElapsed(ms: number): string {
+        if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
+        const m = Math.floor(ms / 60_000);
+        const s = Math.floor((ms % 60_000) / 1000);
+        return `${m}m${String(s).padStart(2, "0")} s`;
+      }
+
+      async function poll(id: string, kind: "frame" | "video", t0: number): Promise<any> {
         const interval = POLL_MS[kind];
-        while (true) {
-          await new Promise((r) => setTimeout(r, interval));
-          n += 1;
-          const res = await fetch(`${API_BASE}/v1/jobs/${id}`);
-          const body = await res.json();
-          appendStatus(`poll #${n} (${interval}ms) → ${body.status}`);
-          if (body.status === "ready") return body;
-          if (body.status === "error") {
-            throw new Error(body.message || "render failed");
+        // Live elapsed-time tick — updates the status line in-place
+        // every 100 ms so the user sees a smooth counter, not the
+        // discrete poll cadence.
+        const tick = setInterval(() => {
+          const ms = performance.now() - t0;
+          setStatus(`rendering ${kind} · ${fmtElapsed(ms)} …`);
+        }, 100);
+        try {
+          while (true) {
+            await new Promise((r) => setTimeout(r, interval));
+            const res = await fetch(`${API_BASE}/v1/jobs/${id}`);
+            const body = await res.json();
+            if (body.status === "ready") return body;
+            if (body.status === "error") {
+              throw new Error(body.message || "render failed");
+            }
           }
+        } finally {
+          clearInterval(tick);
         }
       }
 
+      // Populate the dedicated #transport row (NOT overlaid on the
+       // video). Matches /editor's `.controls` pattern: ↺ rewind ·
+       // ▶/⏸ play-pause · ⏭ skip-to-end · scrub slider · time.
+      function mountVideoTransport(v: HTMLVideoElement) {
+        v.controls = false;
+        transport.innerHTML = "";
+        transport.classList.add("visible");
+
+        const back = document.createElement("button");
+        back.className = "tx"; back.textContent = "↺"; back.title = "Rewind to start";
+        back.addEventListener("click", () => { v.currentTime = 0; });
+
+        const play = document.createElement("button");
+        play.className = "tx"; play.textContent = "▶"; play.title = "Play";
+        play.addEventListener("click", () => { if (v.paused) v.play(); else v.pause(); });
+        v.addEventListener("play",  () => { play.textContent = "⏸"; play.title = "Pause"; });
+        v.addEventListener("pause", () => { play.textContent = "▶"; play.title = "Play"; });
+
+        const skip = document.createElement("button");
+        skip.className = "tx"; skip.textContent = "⏭"; skip.title = "Skip to end";
+        skip.addEventListener("click", () => {
+          if (Number.isFinite(v.duration)) v.currentTime = v.duration;
+        });
+
+        const scrubWrap = document.createElement("div");
+        scrubWrap.className = "scrub";
+        const scrub = document.createElement("input");
+        scrub.type = "range"; scrub.min = "0"; scrub.max = "0"; scrub.step = "0.01"; scrub.value = "0";
+        scrubWrap.appendChild(scrub);
+
+        const t = document.createElement("span");
+        t.className = "t"; t.textContent = "0.00 / 0.00s";
+
+        function fmtT(s: number) { return s.toFixed(2); }
+        function syncFromVideo() {
+          if (Number.isFinite(v.duration)) scrub.max = String(v.duration);
+          scrub.value = String(v.currentTime || 0);
+          t.textContent = `${fmtT(v.currentTime || 0)} / ${fmtT(v.duration || 0)}s`;
+        }
+        v.addEventListener("loadedmetadata", syncFromVideo);
+        v.addEventListener("timeupdate", syncFromVideo);
+        scrub.addEventListener("input", () => { v.currentTime = parseFloat(scrub.value); });
+
+        transport.appendChild(back);
+        transport.appendChild(play);
+        transport.appendChild(skip);
+        transport.appendChild(scrubWrap);
+        transport.appendChild(t);
+      }
+
       async function render(kind: "frame" | "video") {
-        clearResult(`Rendering ${kind}…`);
+        clearStage(`Rendering ${kind}…`);
         setBusy(true);
-        setMeta([]);
+        setDownload(null);
         const t0 = performance.now();
         try {
-          setStatus(`POST /v1/${kind} …`);
-          const id = await enqueue(kind);
-          appendStatus(`job_id = ${id}`);
-          appendStatus(`polling every ${POLL_MS[kind]}ms …`);
-          const ready = await poll(id, kind);
+          const fileCount = (assetsInput.files?.length ?? 0);
+          if (fileCount > 0) {
+            setStatus(`uploading ${fileCount} asset${fileCount === 1 ? "" : "s"} …`);
+          }
+          const assets = await uploadAssets();
+          setStatus(`enqueueing ${kind} …`);
+          const id = await enqueue(kind, assets);
+          const ready = await poll(id, kind, t0);
           const url = `${API_BASE}${ready.url}`;
           const ms = Math.round(performance.now() - t0);
-          appendStatus(`ready in ${ms} ms`);
-          setStatus(`done · ${kind} · ${ms} ms\n${url}`, "ok");
-          setMeta([
-            ["kind", ready.kind],
-            ["mime", ready.mime],
-            ["job_id", ready.job_id.slice(0, 8) + "…"],
-            ["render", `${ms} ms`],
-          ]);
-          clearResult();
+          setStatus(`done · ${kind} · ${fmtElapsed(ms)}`, "ok");
+
+          const filename = ready.url.split("/").pop()
+            || `cmotion.${ready.mime === "image/png" ? "png" : "mp4"}`;
+          setDownload(url, filename);
+
+          clearStage();
           if (ready.mime === "image/png") {
             const img = document.createElement("img");
             img.src = url;
             img.alt = "rendered frame";
-            result.appendChild(img);
+            stage.appendChild(img);
           } else {
             const v = document.createElement("video");
             v.src = url;
-            v.controls = true;
-            v.autoplay = true;
             v.loop = true;
-            v.muted = true;
             v.playsInline = true;
-            result.appendChild(v);
+            v.preload = "metadata";
+            stage.appendChild(v);
+            mountVideoTransport(v);
           }
         } catch (e: any) {
           setStatus(`error: ${e?.message ?? e}`, "err");
-          clearResult(`Failed — see status below.`);
+          clearStage(`Failed — see status below.`);
         } finally {
           setBusy(false);
         }

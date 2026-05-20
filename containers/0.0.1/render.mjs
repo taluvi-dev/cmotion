@@ -40,6 +40,14 @@ function getChromium() {
 
 const VIEWER_DIR = path.join(import.meta.dirname, "viewer");
 
+// Per-job asset overlay. When a render request comes in with an
+// `assets` map (path-in-source → base64 bytes), we write the
+// decoded files into `currentUploadsDir` and the static viewer
+// server checks here *first* before falling back to VIEWER_DIR.
+// Cleared after each render. Single-job-at-a-time is enforced by
+// the Worker's `max_instances: 1` Containers binding.
+let currentUploadsDir = null;
+
 function fail(code, message) {
   process.stderr.write(`code=${code} message=${message}\n`);
   process.exit(1);
@@ -85,6 +93,24 @@ async function startViewerServer() {
   const server = http.createServer((req, res) => {
     let url = decodeURIComponent((req.url ?? "/").split("?")[0]);
     if (url.endsWith("/")) url += "index.html";
+    // Per-job uploaded assets win over the baked-in viewer
+    // bundle: a source can write `image("/earth.png")` and a
+    // matching uploaded asset will resolve here first. We refuse
+    // any path that escapes the uploads root.
+    if (currentUploadsDir) {
+      const upload = path.join(currentUploadsDir, url);
+      if (upload.startsWith(currentUploadsDir + path.sep) || upload === currentUploadsDir) {
+        try {
+          const stat = fs.statSync(upload);
+          if (stat.isFile()) {
+            const mime = mimes[path.extname(upload)] ?? "application/octet-stream";
+            res.writeHead(200, { "content-type": mime, "cache-control": "no-store" });
+            fs.createReadStream(upload).pipe(res);
+            return;
+          }
+        } catch { /* fall through to viewer */ }
+      }
+    }
     const file = path.join(VIEWER_DIR, url);
     if (!file.startsWith(VIEWER_DIR)) { res.writeHead(403).end(); return; }
     fs.stat(file, (err, stat) => {
@@ -97,6 +123,39 @@ async function startViewerServer() {
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const { port } = server.address();
   return { server, base: `http://127.0.0.1:${port}` };
+}
+
+// Decode an `assets` map ({ "/earth.png": "<base64>" }) into a
+// per-job directory the viewer server can serve. Returns the dir
+// so the caller can unmount it when the render is done.
+function mountAssets(jobId, assets) {
+  if (!assets || Object.keys(assets).length === 0) return null;
+  const dir = path.join("/tmp", "uploads", jobId);
+  fs.mkdirSync(dir, { recursive: true });
+  for (const [rawPath, b64] of Object.entries(assets)) {
+    if (typeof b64 !== "string") continue;
+    // Source paths typically start with `/` ("/earth.png"); the
+    // viewer fetches them at root. Normalise to a relative path
+    // inside the uploads dir.
+    const rel = rawPath.replace(/^\/+/, "");
+    if (!/^[A-Za-z0-9._\-\/]+$/.test(rel) || rel.includes("..")) {
+      throw new Error(`bad asset path: ${rawPath}`);
+    }
+    const dest = path.join(dir, rel);
+    if (!dest.startsWith(dir + path.sep)) {
+      throw new Error(`asset path escapes uploads dir: ${rawPath}`);
+    }
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, Buffer.from(b64, "base64"));
+  }
+  currentUploadsDir = dir;
+  return dir;
+}
+
+function unmountAssets(dir) {
+  if (!dir) return;
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  if (currentUploadsDir === dir) currentUploadsDir = null;
 }
 
 // Boots Chromium, loads /render/ with the job's source injected,
@@ -143,6 +202,7 @@ async function bootViewer(env) {
 }
 
 async function renderFrame(env) {
+  const uploadDir = mountAssets(env.jobId, env.assets);
   const { page, dispose } = await bootViewer(env);
   try {
     const at = env.params.at ?? 0;
@@ -155,10 +215,12 @@ async function renderFrame(env) {
     process.stdout.write(`[render] frame → ${outPath}\n`);
   } finally {
     await dispose();
+    unmountAssets(uploadDir);
   }
 }
 
 async function renderVideo(env) {
+  const uploadDir = mountAssets(env.jobId, env.assets);
   const { page, dispose } = await bootViewer(env);
   try {
     const fps = env.params.fps ?? 30;
@@ -208,6 +270,7 @@ async function renderVideo(env) {
     process.stdout.write(`[render] video → ${outPath}\n`);
   } finally {
     await dispose();
+    unmountAssets(uploadDir);
   }
 }
 
@@ -240,6 +303,11 @@ async function runHttpServer() {
         source: job.source,
         kind: job.kind ?? "frame",
         params: job.params ?? {},
+        // Optional `assets`: { "/earth.png": "<base64 bytes>" }
+        // mapping path-in-source to file contents. Mounted ahead
+        // of the baked-in viewer so the source can reference them
+        // by friendly path.
+        assets: job.assets ?? {},
         outDir: "/tmp/render-out",
       };
       if (env.kind !== "frame" && env.kind !== "video") {

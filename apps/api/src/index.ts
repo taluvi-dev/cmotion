@@ -48,8 +48,9 @@ export class RenderRunner extends Container<Env> {
     kind: "video" | "frame",
     source: string,
     params: Record<string, unknown>,
+    assets: Record<string, string>,
   ): Promise<void> {
-    this.ctx.waitUntil(this.executeJob(id, kind, source, params));
+    this.ctx.waitUntil(this.executeJob(id, kind, source, params, assets));
   }
 
   // The actual render lifecycle — runs inside the DO via waitUntil,
@@ -59,13 +60,33 @@ export class RenderRunner extends Container<Env> {
     kind: "video" | "frame",
     source: string,
     params: Record<string, unknown>,
+    assets: Record<string, string>,
   ): Promise<void> {
     try {
+      console.log(`[do] ${id} assets received:`, JSON.stringify(assets));
+      // Fetch each referenced asset from R2 staging and inline
+      // it as base64 in the request to the container. Inlining
+      // bytes (instead of giving the container a signed URL) keeps
+      // the container free of CF credentials and the storage
+      // pipeline single-direction (Worker → Container → R2 outputs).
+      const assetBytes: Record<string, string> = {};
+      for (const [pathInSource, key] of Object.entries(assets)) {
+        const obj = await this.env.R2.get(`staging/${key}`);
+        if (!obj) {
+          console.error(`[do] ${id} asset NOT FOUND in R2: staging/${key}`);
+          await markErrorInDb(this.env, id, `asset not found: ${key}`);
+          return;
+        }
+        const bytes = await obj.arrayBuffer();
+        assetBytes[pathInSource] = bufferToBase64(bytes);
+        console.log(`[do] ${id} loaded asset ${pathInSource} = ${bytes.byteLength} bytes`);
+      }
+
       const containerRes = await this.containerFetch(
         new Request("http://container/", {
           method: "POST",
           headers: JSON_HEADERS,
-          body: JSON.stringify({ jobId: id, source, kind, params }),
+          body: JSON.stringify({ jobId: id, source, kind, params, assets: assetBytes }),
         }),
       );
 
@@ -94,6 +115,16 @@ export class RenderRunner extends Container<Env> {
       await markErrorInDb(this.env, id, message.slice(0, 500));
     }
   }
+}
+
+// Workers don't have Node's Buffer.toString("base64"); roll one
+// from the ArrayBuffer manually. Modern V8 makes this fast enough
+// for the few-MB image payloads the API takes.
+function bufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
+  return btoa(bin);
 }
 
 // Standalone DB-update helper so both the DO and any future
@@ -405,6 +436,9 @@ function err(status: number, message: string, code?: string): Response {
 interface JobBody {
   source?: string;
   params?: Record<string, unknown>;
+  // Mapping of friendly path-in-source ("/earth.png") to the
+  // R2 staging key returned by POST /v1/assets ("asset_<uuid>").
+  assets?: Record<string, string>;
 }
 
 async function readJobBody(request: Request): Promise<JobBody | { error: string }> {
@@ -438,6 +472,7 @@ async function handleEnqueue(
 
   const id = crypto.randomUUID();
   const params_json = JSON.stringify(body.params ?? {});
+  const assets = body.assets ?? {};
   const now = Date.now();
 
   await env.DB.prepare(
@@ -454,7 +489,7 @@ async function handleEnqueue(
   // dodges the ~30 s cap on Worker-level waitUntil that was
   // cancelling longer videos before they could upload to R2.
   const stub = env.RENDER_RUNNER.get(env.RENDER_RUNNER.idFromName("singleton"));
-  ctx.waitUntil(stub.runJob(id, kind, body.source!, body.params ?? {}));
+  ctx.waitUntil(stub.runJob(id, kind, body.source!, body.params ?? {}, assets));
 
   return json({ job_id: id, status: "pending", kind }, 202);
 }
@@ -569,10 +604,60 @@ function withCors(res: Response): Response {
   return res;
 }
 
+// Multipart upload — every part with a filename becomes an
+// R2 staging entry under `staging/asset_<uuid>`. Response maps
+// the original filename to the staging key, e.g.
+//   { assets: { "earth.png": "asset_<uuid>", "starry.jpg": "asset_<uuid>" } }
+// The caller threads those keys into POST /v1/render's `assets`
+// field. Files older than 24h get swept by the cron worker
+// (TODO).
+async function handleAssets(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") return err(405, "method not allowed");
+
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch (e) {
+    return err(400, `multipart parse failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // Per-upload count + size caps. Conservative until we have
+  // real numbers; lift once we see actual usage.
+  const MAX_FILES = 10;
+  const MAX_SIZE = 25 * 1024 * 1024; // 25 MiB each
+
+  const out: Record<string, string> = {};
+  let count = 0;
+
+  for (const [, value] of form) {
+    // `value` is FormDataEntryValue (string | File-like). In Workers
+    // the File-like has `.name`, `.size`, `.arrayBuffer()` — duck-type
+    // it instead of `instanceof File` (the types don't line up).
+    if (typeof value === "string") continue;
+    const file = value as { name: string; size: number; type?: string; arrayBuffer: () => Promise<ArrayBuffer> };
+    if (typeof file.arrayBuffer !== "function") continue;
+    if (count++ >= MAX_FILES) return err(400, `too many files (max ${MAX_FILES})`);
+    if (file.size > MAX_SIZE) {
+      return err(400, `'${file.name}' exceeds ${MAX_SIZE / 1024 / 1024} MiB cap`);
+    }
+    const key = `asset_${crypto.randomUUID().replace(/-/g, "")}`;
+    const bytes = await file.arrayBuffer();
+    await env.R2.put(`staging/${key}`, bytes, {
+      httpMetadata: { contentType: file.type || "application/octet-stream" },
+      customMetadata: { original_name: file.name },
+    });
+    out[file.name] = key;
+  }
+
+  if (count === 0) return err(400, "no files in upload");
+  return json({ assets: out });
+}
+
 async function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    if (path === "/v1/assets") return handleAssets(request, env);
     if (path === "/v1/render") return handleEnqueue(request, env, ctx, "video");
     if (path === "/v1/frame")  return handleEnqueue(request, env, ctx, "frame");
 
