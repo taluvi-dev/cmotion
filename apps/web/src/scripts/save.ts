@@ -1,5 +1,5 @@
 // Cross-platform "save this Blob to disk" helper. The same function is
-// used by /play and by the homepage preview's "Save video" button.
+// used by /editor and by the homepage preview's "Save video" button.
 //
 // Three paths in priority order:
 //   1. File System Access API (Chrome/Edge desktop) — opens the OS save

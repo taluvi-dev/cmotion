@@ -3,14 +3,14 @@
 //
 // Used by the pages under /examples/. Same WASM viewer the homepage
 // uses, but without the inline editor — the example is fixed and the
-// "Open in /play →" link hands the source off for tinkering.
+// "Open in /editor →" link hands the source off for tinkering.
 
 interface Props {
   source: string;
 }
 
 const { source } = Astro.props;
-const playHref = `/play/#source=${encodeURIComponent(source)}`;
+const playHref = `/editor/#source=${encodeURIComponent(source)}`;
 ---
 
 <figure class="example-scene" data-source={source}>
@@ -21,7 +21,7 @@ const playHref = `/play/#source=${encodeURIComponent(source)}`;
     <span data-example-status>rendering…</span>
   </figcaption>
   <pre class="example-code"><code>{source}</code></pre>
-  <p class="example-link"><a href={playHref}>Open in /play →</a></p>
+  <p class="example-link"><a href={playHref}>Open in /editor →</a></p>
 </figure>
 
 <style>
