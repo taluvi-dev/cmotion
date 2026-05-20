@@ -13,16 +13,23 @@ if [[ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
   echo "deploy: CLOUDFLARE_ACCOUNT_ID must be set in the environment" >&2
   exit 1
 fi
+if [[ -z "${D1_DB_ID:-}" ]]; then
+  echo "deploy: D1_DB_ID must be set in the environment" >&2
+  echo "deploy: (find it with: wrangler d1 list)" >&2
+  exit 1
+fi
 
 api_dir="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$api_dir"
 
 # Substituted config has to live next to wrangler.jsonc so `main:
 # "src/index.ts"` and other relative paths resolve. The file is in
-# .gitignore so the rendered account_id never lands in git.
+# .gitignore so the rendered account/db IDs never land in git.
 tmp_cfg="$api_dir/.wrangler-deploy.jsonc"
 trap 'rm -f "$tmp_cfg"' EXIT
 
-sed "s/CF_ACCOUNT_PLACEHOLDER/$CLOUDFLARE_ACCOUNT_ID/g" wrangler.jsonc > "$tmp_cfg"
+sed -e "s/CF_ACCOUNT_PLACEHOLDER/$CLOUDFLARE_ACCOUNT_ID/g" \
+    -e "s/D1_DB_ID_PLACEHOLDER/$D1_DB_ID/g" \
+    wrangler.jsonc > "$tmp_cfg"
 
 exec pnpm exec wrangler deploy --config "$tmp_cfg" "$@"

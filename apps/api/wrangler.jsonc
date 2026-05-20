@@ -56,5 +56,27 @@
       "tag": "v1",
       "new_sqlite_classes": ["RenderRunner"]
     }
+  ],
+
+  // D1 database for job rows. The database_id is environment-
+  // specific so it stays out of the committed config — see
+  // scripts/deploy.sh, same pattern as the account placeholder.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cmotion-jobs",
+      "database_id": "D1_DB_ID_PLACEHOLDER",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // R2 bucket where render outputs live. Bucket name isn't
+  // sensitive (it's not a secret and there's no access without
+  // the API token), so it's committed directly.
+  "r2_buckets": [
+    {
+      "binding": "R2",
+      "bucket_name": "cmotion-outputs"
+    }
   ]
 }
