@@ -73,7 +73,9 @@ scene bouncing_ball(
   // Parabolic bounce: y swings from \`floor\` (impact) up to
   // \`floor + height\` (apex). Returns a record { position, impacts },
   // where impacts is the list of contact times the squash listens to.
-  let bounce_y = bounce(height: 560px, period: 1.2s, floor: -280px);
+  // floor = -540px = bottom edge of the 1080-tall canvas — the ball
+  // bottom (pivoted) lands right on the image floor at impact.
+  let bounce_y = bounce(height: 760px, period: 1.2s, floor: -540px);
 
   // Exponential decay envelope keyed off the bounce impacts: zero
   // between contacts, snaps to \`peak\` on impact, then relaxes over
@@ -81,7 +83,7 @@ scene bouncing_ball(
   // 0 = no squash, 0.35 = compressed to ~65% height.
   let stretch = on_event(bounce_y.impacts, decay: 0.18s, peak: 0.35);
 
-  let ball = sphere(r: 220px)
+  let ball = sphere(r: 120px)
     .material(fill: image(assets.earth).as_texture(projection: equirectangular))
     .rotate(y: spin)
     .pivot(bottom)
