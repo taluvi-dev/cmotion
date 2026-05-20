@@ -4,7 +4,14 @@
   "description": "Tree-sitter grammar for the cmotion DSL",
   "private": true,
   "main": "bindings/node",
-  "keywords": ["tree-sitter", "parser", "cmotion"],
+  "keywords": [
+    "tree-sitter",
+    "parser",
+    "cmotion"
+  ],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.24.0"
+  },
   "files": [
     "grammar.js",
     "binding.gyp",
@@ -16,8 +23,5 @@
     "generate": "tree-sitter generate",
     "test": "tree-sitter test",
     "build": "tree-sitter generate"
-  },
-  "devDependencies": {
-    "tree-sitter-cli": "^0.24.0"
   }
 }

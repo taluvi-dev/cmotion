@@ -38,18 +38,34 @@ pub const Lowerer = struct {
     pub fn lowerProgram(self: *Lowerer, root: ts.Node) LoweringError!ast.Program {
         if (!std.mem.eql(u8, ts.kind(root), "program")) return error.UnexpectedNodeKind;
 
+        var runner: ?ast.RunnerDecl = null;
         var decls: std.ArrayListUnmanaged(ast.TopDecl) = .{};
         const n = ts.namedChildCount(root);
         var i: u32 = 0;
         while (i < n) : (i += 1) {
             const child = ts.namedChild(root, i);
             if (ts.isExtra(child) or ts.isMissing(child)) continue;
+            const k = ts.kind(child);
+            if (std.mem.eql(u8, k, "runner_decl")) {
+                runner = try self.lowerRunnerDecl(child);
+                continue;
+            }
             try decls.append(self.arena, try self.lowerTopDecl(child));
         }
 
         return .{
             .span = self.spanOf(root),
+            .runner = runner,
             .decls = try decls.toOwnedSlice(self.arena),
+        };
+    }
+
+    fn lowerRunnerDecl(self: *Lowerer, node: ts.Node) LoweringError!ast.RunnerDecl {
+        const version_node = ts.childByFieldName(node, "version") orelse return error.MissingRequiredField;
+        return .{
+            .span = self.spanOf(node),
+            .version_raw = ts.sourceSlice(version_node, self.source),
+            .version_span = self.spanOf(version_node),
         };
     }
 

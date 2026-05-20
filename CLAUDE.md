@@ -136,6 +136,25 @@ what's deferred to the future full typechecker.
   `pnpm --filter @cmotion/tree-sitter-cmotion generate`. Don't hand-edit.
 - `apps/cli/.zig-cache/`, `apps/cli/zig-out/` — build artifacts.
 
+## Architectural invariants
+
+These survive across branches — respect them in every session.
+
+- **The value tree is renderer-agnostic.** Eval and the sampler produce
+  descriptions; the renderer interprets them. When the 3D pipeline wants a
+  new shape (`Mesh`, `Light`, …), add a `Value.<x>` variant *and* graduate
+  the corresponding `Constructed("x", ...)` callers — don't pre-bake
+  renderer concerns into eval.
+- **The sampler is shape-stable.** Its output is a Value tree with the
+  same shape as eval's output. The renderer is the only consumer that
+  knows about pixels, normals, transforms, lights.
+- **`check.zig` grows by pull, not push.** Stage 2 typechecking expands
+  when a renderer or downstream pass finds an ambiguity it needs
+  resolved — not as a standalone "let's add more rules" side quest.
+- **`apps/web`'s homepage `ScenePreview` is marketing.** The real preview
+  surface is `/editor` and `cmo render`. Don't pull the homepage Three.js
+  viewer into the production rendering path.
+
 ## Style
 
 - Diagnostic-first error handling. When a pass can't continue, emit a

@@ -22,9 +22,17 @@ pub fn format(
     errdefer buf.deinit(allocator);
 
     var cursor: u32 = 0;
-    for (program.decls, 0..) |decl, i| {
+    var first: bool = true;
+    if (program.runner) |r| {
+        try emitGap(allocator, &buf, source[cursor..r.span.start], true);
+        try buf.appendSlice(allocator, source[r.span.start..r.span.end]);
+        cursor = r.span.end;
+        first = false;
+    }
+    for (program.decls) |decl| {
         const span = topDeclSpan(decl);
-        try emitGap(allocator, &buf, source[cursor..span.start], i == 0);
+        try emitGap(allocator, &buf, source[cursor..span.start], first);
+        first = false;
 
         switch (decl) {
             .import => |imp| try writeImport(allocator, &buf, imp),

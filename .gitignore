@@ -156,3 +156,6 @@ apps/web/public/cmotion-render.wasm
 # are generated from grammar.js and ARE committed, per tree-sitter convention)
 packages/tree-sitter-cmotion/build/
 packages/tree-sitter-cmotion/bindings/node/build/
+
+# Wrangler local caches — anything under .wrangler/ at any depth
+.wrangler/

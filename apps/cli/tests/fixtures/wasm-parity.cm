@@ -5,6 +5,8 @@
 // Bg + fg geometry and colours must stay in sync with the WASM
 // helper for the parity test to pass.
 
+runner "0.0.1";
+
 use std.shapes.*;
 
 scene parity() -> Frame {

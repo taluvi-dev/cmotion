@@ -35,8 +35,20 @@ module.exports = grammar({
 
   rules: {
     program: $ => seq(
+      optional($.runner_decl),
       repeat($.import_decl),
       repeat($._top_decl),
+    ),
+
+    //
+    // Runner pin (optional, must precede imports). Pins the
+    // container-runner version this source targets. Absent → the
+    // API loader picks the latest available runner.
+    //
+    runner_decl: $ => seq(
+      'runner',
+      field('version', $.string_lit),
+      ';',
     ),
 
     //

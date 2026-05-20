@@ -17,9 +17,15 @@ A public endpoint that takes a `.cm` source plus its uploaded
 asset images and returns either a rendered video or a single
 frame. The renderer is a one-shot Cloudflare Container per job,
 capped at one concurrent instance; the Worker dispatches via the
-Containers binding and tracks every job in D1. Lives in a new
-`apps/api/` package — separate from `apps/web/` so the API and
-the docs site deploy independently.
+Containers binding and tracks every job in D1. The Worker lives
+in a new `apps/api/` package — separate from `apps/web/` so the
+API and the docs site deploy independently. The container itself
+lives at the repo root under `containers/<version>/`, versioned per
+runner generation (Chromium / ffmpeg / viewer-ABI bump = new
+folder, never mutate an existing one). A `.cm` source declares
+which runner it targets (`runner "0.0.1";`) so renders stay byte-stable
+across stack moves. See `containers/README.md` for the
+cross-version env contract.
 
 **Endpoints (v1):**
 
@@ -156,20 +162,25 @@ Entrypoint:  read job from env → start local asset server →
              each frame → pipe to ffmpeg → upload to R2 → callback Worker
 ```
 
-**Viewer assets are baked into the image** at build time (CI step
-that runs `pnpm --filter @cmotion/web build` then copies the
-relevant slice of `dist/` into the container). The image is the
-source of truth; the renderer version is exactly whatever the
-deployed image was built from. No runtime fetch from
-cmotion.org, no coupling between the container and whatever the
-site happens to be serving.
+**Viewer + WASM artifacts are committed into the runner folder**
+(`containers/<version>/cmotion-render.wasm` and
+`containers/<version>/viewer/`). The Dockerfile `COPY`s them in — no
+"build the latest at image time" step, no runtime fetch from
+cmotion.org. The git history is the source of truth for what each
+runner version actually renders, so a `runner "0.0.1";` source pinned
+today still produces identical bytes once the live CLI and viewer
+have moved on. New runners are produced by a `freeze:runner:<N+1>`
+script that builds + copies the current `apps/cli` WASM and
+`apps/web/dist/` slice into a fresh `containers/<N+1>/` (to be
+written when the first runner ships).
 
-**Image build.** `Dockerfile` lives in `apps/api/container/`,
-deployed via `wrangler containers deploy` from a GitHub Action
-on push to main affecting `apps/web/src/scripts/`,
-`apps/cli/src/wasm_entry.zig`, or `apps/api/container/`. Image
-tagged by git short SHA; `wrangler.toml` pins to a specific SHA
-so every Worker deploy maps to a known image.
+**Image build.** `Dockerfile` lives in `containers/<version>/`, deployed
+via `wrangler containers deploy` from a GitHub Action on push to
+main affecting `apps/web/src/scripts/`,
+`apps/cli/src/wasm_entry.zig`, or `containers/<version>/`. Image tagged
+by `runner-<version>-<gitshortsha>`; the Worker's `wrangler.toml` pins
+to a specific runner version + image SHA so every deploy maps to
+a known image.
 
 **Render loop (rough):**
 
@@ -407,3 +418,44 @@ their dependencies (mostly `Signal<T>`) exist:
 - **Export-format hints.** Annotations on the `scene` block that
   steer `cmo bounce` toward h264 / vp9 / image sequence / APNG
   without flag soup at the call site.
+
+---
+
+## Native renderer polish (deferred)
+
+These items only affect what `cmo render` produces locally. Cloud
+renders go through headless Chrome and the Three.js viewer, not
+`render.zig`, so the native renderer's visual gaps don't block any
+user-facing path. Listed in order of visible impact for whenever
+someone returns to this work.
+
+- **Bevels on `extrude` edges.** Single biggest visual jump for
+  the native renderer. For each outline vertex, compute the inset
+  position (moved inward by `bevel_radius` along the angle
+  bisector); generate `bevel_segments` rings whose z slopes from
+  `+half` to `+half − bevel_radius`. Front/back caps then
+  triangulate the inset polygon, not the original. Default bevel:
+  6 % of depth, 4 segments. Configurable via `extrude(..., bevel:
+  <px>, bevel_segments: N)`; toggle off with `bevel: 0px` for the
+  current sharp look. ~200 LOC.
+
+- **Smooth normals on curved side walls.** Per side-wall vertex,
+  store the average of the current outline edge's normal and its
+  neighbour's. Tiny change in `extrudeContours`; no new data
+  structures. ~30 LOC. Removes the faceted-curve appearance on
+  letters with curves.
+
+- **Real GGX + Fresnel + hemispheric ambient.** Replace the
+  Blinn-Phong specular with GGX/Trowbridge-Reitz normal
+  distribution + Smith geometric attenuation + Schlick Fresnel.
+  Replace the flat ambient pedestal with a sky-cool / ground-warm
+  hemispheric gradient (cheap IBL approximation that doesn't need
+  an HDR environment map). ~150 LOC.
+
+- **`cmo bounce --fps <n> --out scene.mp4`.** Local video export.
+  Wraps the existing sample-and-render loop, writes a PNG sequence
+  to a tmp dir, shells to ffmpeg for muxing. `--frames-dir` for
+  the PNG-only path. Audio mux via `--audio scene.wav` deferred
+  until `std.audio` lands. Distinct from the cloud render API
+  above — that path is headless Chromium + the JS viewer; this is
+  the Zig CLI rendering to disk.

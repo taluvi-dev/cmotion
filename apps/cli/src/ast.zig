@@ -415,6 +415,17 @@ pub const ImportDecl = struct {
     alias: ?Ident,
 };
 
+/// `runner "<semver>";` — optional metadata at the very top of a program
+/// that pins the container-runner version this source targets. Absent
+/// `program.runner` means "let the loader pick the latest runner."
+pub const RunnerDecl = struct {
+    span: Span,
+    /// Raw text of the string literal *including* surrounding quotes —
+    /// `"0.0.1"`. The loader unquotes when it actually needs the bytes.
+    version_raw: []const u8,
+    version_span: Span,
+};
+
 pub const TopDecl = union(enum) {
     import: ImportDecl,
     let: LetDecl,
@@ -426,6 +437,10 @@ pub const TopDecl = union(enum) {
 
 pub const Program = struct {
     span: Span,
+    /// Optional `runner "<semver>";` at the top of the file. `null`
+    /// means the source did not pin a runner — downstream consumers
+    /// (the cloud API loader, the local CLI) decide a default.
+    runner: ?RunnerDecl = null,
     decls: []const TopDecl,
 };
 

@@ -4747,6 +4747,10 @@
           "named": true
         },
         {
+          "type": "runner_decl",
+          "named": true
+        },
+        {
           "type": "scene_decl",
           "named": true
         }
@@ -4941,6 +4945,22 @@
           },
           {
             "type": "tuple_type",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "runner_decl",
+    "named": true,
+    "fields": {
+      "version": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string_lit",
             "named": true
           }
         ]
@@ -5286,8 +5306,7 @@
   },
   {
     "type": "block_comment",
-    "named": true,
-    "extra": true
+    "named": true
   },
   {
     "type": "component",
@@ -5327,8 +5346,7 @@
   },
   {
     "type": "line_comment",
-    "named": true,
-    "extra": true
+    "named": true
   },
   {
     "type": "match",
@@ -5344,6 +5362,10 @@
   },
   {
     "type": "oklch",
+    "named": false
+  },
+  {
+    "type": "runner",
     "named": false
   },
   {

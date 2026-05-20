@@ -3,7 +3,9 @@
 // build inlines them — the WASM viewer needs the source as a string,
 // and the docs pages re-render the same string in their code block.
 
-export const TITLE_SOURCE = `use std.shapes.*;
+export const TITLE_SOURCE = `runner "0.0.1";
+
+use std.shapes.*;
 use std.mesh3d.*;
 use std.text;
 use std.lighting.*;
@@ -45,7 +47,9 @@ scene title(duration: Duration = 6s) -> Frame {
 }
 `;
 
-export const BOUNCING_BALL_SOURCE = `use std.shapes.*;
+export const BOUNCING_BALL_SOURCE = `runner "0.0.1";
+
+use std.shapes.*;
 use std.anim.*;
 use std.scene3d.*;
 use std.lighting.*;

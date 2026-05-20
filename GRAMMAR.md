@@ -23,7 +23,18 @@ A typed creative programming language for video, motion, audio, animation, and c
 (* Cmotion Grammar v0.2                               *)
 (* -------------------------------------------------- *)
 
-program        = { import_decl } , { top_decl } ;
+program        = [ runner_decl ] , { import_decl } , { top_decl } ;
+
+(* -------------------------------------------------- *)
+(* Runner pin                                         *)
+(* -------------------------------------------------- *)
+
+(* Optional, must precede imports. Pins the runner-container       *)
+(* version this source targets. Absent → API loader picks latest.  *)
+(* Version is a string literal so it can carry semver pre-release  *)
+(* tags later (`"0.1.0-beta"`).                                    *)
+
+runner_decl    = "runner" , string_lit , ";" ;
 
 (* -------------------------------------------------- *)
 (* Imports                                            *)
