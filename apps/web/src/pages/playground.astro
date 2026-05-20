@@ -1,0 +1,345 @@
+---
+// /playground — interactive page that drives the live render API.
+//
+// Paste a `.cm` source, pick frame or video, hit render. The page
+// POSTs to https://api.cmotion.org/v1/{frame|render}, polls
+// /v1/jobs/<id> until done, then shows the result inline.
+//
+// Asset upload is in the UI but not yet wired through — the
+// `POST /v1/assets` endpoint isn't built. See the note next to
+// the file picker.
+//
+// Unlike `/editor`, the render happens *server-side* (Cloudflare
+// Container + Chromium + ffmpeg). Same output bytes the editor
+// would have produced, but doesn't tax the user's browser.
+
+const defaultSource = `runner "0.0.1";
+
+use std.shapes.*;
+use std.anim.*;
+
+scene quick(duration: Duration = 3s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
+  let hue = animate { 0s => 0deg, 3s => 360deg } with { repeat: forever };
+  let fg = rect(width: 300px, height: 300px, fill: oklch(0.65, 0.20, hue));
+  compose [bg, fg]
+}
+`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>cmotion · API playground</title>
+    <link rel="icon" href="/favicon.svg" />
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #fff;
+        --fg: #000;
+        --muted: #777;
+        --hair: #d8d8d8;
+        --accent: #000;
+        --accent-fg: #fff;
+        --panel: #fafafa;
+        --warn: #b00020;
+        --ok: #0a7a3a;
+        --soft: rgba(0,0,0,0.025);
+      }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+        font: 13px/1.45 ui-sans-serif, system-ui, sans-serif; }
+      body { display: grid; grid-template-rows: 44px 1fr; }
+      header { display: flex; align-items: center; gap: 10px; padding: 0 14px;
+        border-bottom: 1px solid var(--hair); background: var(--bg); }
+      header h1 { font-size: 13px; font-weight: 600; margin: 0; }
+      header h1 a { color: var(--fg); text-decoration: none; }
+      header h1 .sep { color: var(--muted); padding: 0 6px; font-weight: 400; }
+      header .spacer { flex: 1; }
+      header a.docs { color: var(--muted); font-size: 12px; text-decoration: none; }
+      header a.docs:hover { color: var(--fg); }
+      main { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+      .pane { display: flex; flex-direction: column; min-height: 0; min-width: 0;
+        overflow: auto; }
+      .pane + .pane { border-left: 1px solid var(--hair); }
+      .controls { display: flex; flex-direction: column; gap: 14px;
+        padding: 16px; }
+      .controls section { display: flex; flex-direction: column; gap: 6px; }
+      .controls h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+        color: var(--muted); margin: 0; font-weight: 600; }
+      textarea#src {
+        width: 100%; box-sizing: border-box; padding: 10px;
+        background: var(--panel); border: 1px solid var(--hair); border-radius: 4px;
+        outline: 0; resize: vertical; min-height: 260px;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        color: var(--fg); tab-size: 2;
+      }
+      .params { display: grid; grid-template-columns: auto auto auto auto;
+        gap: 8px 12px; align-items: center; }
+      .params label { font-size: 12px; color: var(--muted); }
+      .params input[type=number] {
+        width: 80px; padding: 4px 6px;
+        border: 1px solid var(--hair); border-radius: 4px; font: inherit;
+        background: var(--bg); color: var(--fg);
+      }
+      .assets { padding: 10px; border: 1px dashed var(--hair); border-radius: 4px;
+        background: var(--soft); color: var(--muted); font-size: 12px; }
+      .assets input[type=file] { display: block; margin-top: 6px; font-size: 12px; }
+      .assets .files { margin-top: 6px; }
+      .assets .files li { margin: 0; padding: 2px 0; font-family: ui-monospace, monospace;
+        font-size: 11px; color: var(--fg); }
+      .assets .note { font-style: italic; }
+      .buttons { display: flex; gap: 8px; align-items: center; }
+      button { background: var(--accent); color: var(--accent-fg); border: 0;
+        padding: 8px 14px; border-radius: 4px; cursor: pointer; font: inherit;
+        font-weight: 600; }
+      button.secondary { background: transparent; color: var(--fg);
+        border: 1px solid var(--hair); font-weight: 500; }
+      button:disabled { opacity: 0.4; cursor: progress; }
+      .status { padding: 14px 16px; border-top: 1px solid var(--hair);
+        background: var(--panel); font-size: 12px; color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
+      .status.ok { color: var(--ok); }
+      .status.err { color: var(--warn); }
+      .result { background: #111; flex: 1; min-height: 0;
+        display: flex; align-items: center; justify-content: center;
+        padding: 20px; box-sizing: border-box; overflow: hidden; }
+      .result img, .result video {
+        max-width: 100%; max-height: 100%;
+        box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+        background: #000;
+      }
+      .result .placeholder { color: #888; font-size: 13px; text-align: center;
+        max-width: 360px; line-height: 1.5; }
+      .meta { padding: 10px 16px; border-top: 1px solid var(--hair);
+        background: var(--bg); font-size: 11px; color: var(--muted);
+        font-family: ui-monospace, monospace; display: flex; gap: 14px;
+        flex-wrap: wrap; }
+      .meta .pill { background: var(--panel); padding: 2px 8px; border-radius: 10px;
+        border: 1px solid var(--hair); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>
+        <a href="/">cmotion</a>
+        <span class="sep">·</span>
+        API playground
+      </h1>
+      <span class="spacer"></span>
+      <a class="docs" href="/api/">API reference →</a>
+    </header>
+
+    <main>
+      <section class="pane">
+        <div class="controls">
+          <section>
+            <h2>Source</h2>
+            <textarea id="src" spellcheck="false" autocapitalize="off" autocorrect="off">{defaultSource}</textarea>
+          </section>
+
+          <section>
+            <h2>Params</h2>
+            <div class="params">
+              <label for="p-width">width</label>
+              <input id="p-width" type="number" value="1920" min="16" max="3840" />
+              <label for="p-height">height</label>
+              <input id="p-height" type="number" value="1080" min="16" max="2160" />
+              <label for="p-fps">fps</label>
+              <input id="p-fps" type="number" value="30" min="1" max="60" />
+              <label for="p-duration">duration (s)</label>
+              <input id="p-duration" type="number" value="3" min="0.1" max="60" step="0.1" />
+              <label for="p-at">at (s)</label>
+              <input id="p-at" type="number" value="0" min="0" max="60" step="0.1" />
+            </div>
+          </section>
+
+          <section>
+            <h2>Assets</h2>
+            <div class="assets">
+              <span class="note">
+                Image assets aren't wired through yet — <code>POST /v1/assets</code>
+                lands in a follow-up. Files you pick here are just shown for now;
+                the render won't see them. Sources that need uploaded images will
+                fail to find them. Gallery assets (under <code>/img/...</code>)
+                ship with the runner and do work.
+              </span>
+              <input id="assets" type="file" accept="image/*" multiple />
+              <ul class="files" id="asset-list"></ul>
+            </div>
+          </section>
+
+          <section>
+            <h2>Render</h2>
+            <div class="buttons">
+              <button id="btn-frame">Render frame</button>
+              <button id="btn-video">Render video</button>
+              <button class="secondary" id="btn-reset">Reset source</button>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="pane">
+        <div class="result" id="result">
+          <div class="placeholder">
+            Hit <strong>Render frame</strong> or <strong>Render video</strong>
+            to send the source to <code>api.cmotion.org</code>. The result
+            appears here once the job flips to <code>ready</code>.
+          </div>
+        </div>
+        <div class="meta" id="meta"></div>
+        <div class="status" id="status">idle</div>
+      </section>
+    </main>
+
+    <script>
+      const API_BASE = "https://api.cmotion.org";
+      const POLL_MS = 1500;
+
+      const $ = (id: string) => document.getElementById(id)!;
+      const srcEl = $("src") as HTMLTextAreaElement;
+      const initialSrc = srcEl.value;
+      const status = $("status");
+      const result = $("result");
+      const meta = $("meta");
+      const assetsInput = $("assets") as HTMLInputElement;
+      const assetList = $("asset-list");
+
+      function setStatus(msg: string, kind: "info" | "ok" | "err" = "info") {
+        status.className = "status" + (kind === "ok" ? " ok" : kind === "err" ? " err" : "");
+        status.textContent = msg;
+      }
+      function appendStatus(msg: string) {
+        status.textContent += "\n" + msg;
+        status.scrollTop = status.scrollHeight;
+      }
+      function setMeta(parts: Array<[string, string]>) {
+        meta.innerHTML = "";
+        for (const [k, v] of parts) {
+          const pill = document.createElement("span");
+          pill.className = "pill";
+          pill.textContent = `${k}: ${v}`;
+          meta.appendChild(pill);
+        }
+      }
+      function clearResult(placeholderHTML?: string) {
+        if (placeholderHTML) {
+          result.innerHTML = `<div class="placeholder">${placeholderHTML}</div>`;
+        } else {
+          result.innerHTML = "";
+        }
+      }
+      function setBusy(busy: boolean) {
+        ($("btn-frame") as HTMLButtonElement).disabled = busy;
+        ($("btn-video") as HTMLButtonElement).disabled = busy;
+      }
+
+      assetsInput.addEventListener("change", () => {
+        assetList.innerHTML = "";
+        for (const f of Array.from(assetsInput.files ?? [])) {
+          const li = document.createElement("li");
+          li.textContent = `${f.name} · ${(f.size / 1024).toFixed(1)} KB`;
+          assetList.appendChild(li);
+        }
+      });
+
+      $("btn-reset").addEventListener("click", () => { srcEl.value = initialSrc; });
+
+      async function enqueue(kind: "frame" | "video"): Promise<string> {
+        const source = srcEl.value;
+        const params: Record<string, number> = {};
+        const width = parseInt(($("p-width") as HTMLInputElement).value, 10);
+        const height = parseInt(($("p-height") as HTMLInputElement).value, 10);
+        if (width)  params.width  = width;
+        if (height) params.height = height;
+        if (kind === "frame") {
+          const at = parseFloat(($("p-at") as HTMLInputElement).value);
+          if (!Number.isNaN(at)) params.at = at;
+        } else {
+          const fps = parseInt(($("p-fps") as HTMLInputElement).value, 10);
+          const duration = parseFloat(($("p-duration") as HTMLInputElement).value);
+          if (fps) params.fps = fps;
+          if (!Number.isNaN(duration)) params.duration = duration;
+        }
+
+        const res = await fetch(`${API_BASE}/v1/${kind}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ source, params }),
+        });
+        if (!res.ok) {
+          const body = await res.text();
+          throw new Error(`enqueue failed: HTTP ${res.status} · ${body}`);
+        }
+        const body = await res.json() as { job_id: string };
+        return body.job_id;
+      }
+
+      async function poll(id: string): Promise<any> {
+        let n = 0;
+        while (true) {
+          await new Promise((r) => setTimeout(r, POLL_MS));
+          n += 1;
+          const res = await fetch(`${API_BASE}/v1/jobs/${id}`);
+          const body = await res.json();
+          appendStatus(`poll #${n} → ${body.status}`);
+          if (body.status === "ready") return body;
+          if (body.status === "error") {
+            throw new Error(body.message || "render failed");
+          }
+        }
+      }
+
+      async function render(kind: "frame" | "video") {
+        clearResult(`Rendering ${kind}…`);
+        setBusy(true);
+        setMeta([]);
+        const t0 = performance.now();
+        try {
+          setStatus(`POST /v1/${kind} …`);
+          const id = await enqueue(kind);
+          appendStatus(`job_id = ${id}`);
+          appendStatus(`polling every ${POLL_MS}ms …`);
+          const ready = await poll(id);
+          const url = `${API_BASE}${ready.url}`;
+          const ms = Math.round(performance.now() - t0);
+          appendStatus(`ready in ${ms} ms`);
+          setStatus(`done · ${kind} · ${ms} ms\n${url}`, "ok");
+          setMeta([
+            ["kind", ready.kind],
+            ["mime", ready.mime],
+            ["job_id", ready.job_id.slice(0, 8) + "…"],
+            ["render", `${ms} ms`],
+          ]);
+          clearResult();
+          if (ready.mime === "image/png") {
+            const img = document.createElement("img");
+            img.src = url;
+            img.alt = "rendered frame";
+            result.appendChild(img);
+          } else {
+            const v = document.createElement("video");
+            v.src = url;
+            v.controls = true;
+            v.autoplay = true;
+            v.loop = true;
+            v.muted = true;
+            v.playsInline = true;
+            result.appendChild(v);
+          }
+        } catch (e: any) {
+          setStatus(`error: ${e?.message ?? e}`, "err");
+          clearResult(`Failed — see status below.`);
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      $("btn-frame").addEventListener("click", () => render("frame"));
+      $("btn-video").addEventListener("click", () => render("video"));
+    </script>
+  </body>
+</html>

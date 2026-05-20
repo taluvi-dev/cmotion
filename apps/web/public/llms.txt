@@ -13,6 +13,9 @@ cmotion is a small, statically-typed programming language for video, motion grap
 - [Stdlib](https://cmotion.org/language/stdlib/): shapes, composition, animation, color, transport, audio.
 - [Reference interpreter](https://cmotion.org/impl/interpreter/): the executable spec.
 - [Backends](https://cmotion.org/impl/backends/): WASM components, CanvasKit, WGSL.
+- [Render API](https://cmotion.org/api/): hosted render endpoint reference. POST a `.cm` source, get back PNG or MP4. No auth. Base URL `https://api.cmotion.org`.
+- [OpenAPI spec](https://api.cmotion.org/openapi.json): machine-readable schema (OpenAPI 3.1) for the render endpoints. Use this to generate clients or feed an agent the structured contract.
+- [Playground](https://cmotion.org/playground/): interactive page to test the render API in a browser — paste a script, hit render, see the result.
 
 ## Source
 

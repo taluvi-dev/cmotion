@@ -55,6 +55,13 @@ export default defineConfig({
 						{ label: 'Bouncing ball', slug: 'examples/bouncing-ball' },
 					],
 				},
+				{
+					label: 'Render API',
+					items: [
+						{ label: 'Reference', slug: 'api' },
+						{ label: 'Playground', link: '/playground/' },
+					],
+				},
 			],
 		}),
 	],

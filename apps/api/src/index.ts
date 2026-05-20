@@ -49,6 +49,279 @@ scene quick() -> Frame {
 }
 `;
 
+// Machine-readable contract. Kept inline (not loaded from a file)
+// so every Worker deploy ships with a spec that matches the code
+// it's serving. Bump `info.version` when adding or removing
+// endpoints; the API is at v0 so additive shape changes don't
+// bump it.
+const OPENAPI_SPEC = {
+  openapi: "3.1.0",
+  info: {
+    title: "cmotion render API",
+    version: "0.0.1",
+    description:
+      "Hosted render service for cmotion sources. POST a `.cm` source, poll until the job is ready, then download the resulting PNG or MP4. No authentication in v0; protected by Cloudflare edge rate-limiting. See https://cmotion.org/api/ for the human-readable reference.",
+    license: { name: "MIT" },
+  },
+  servers: [{ url: "https://api.cmotion.org" }],
+  paths: {
+    "/v1/render": {
+      post: {
+        summary: "Enqueue a video render",
+        description:
+          "Schedules a video render job. Returns immediately with a `job_id`; poll `GET /v1/jobs/{id}` until status is `ready`, then fetch the URL it returns.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/RenderRequest" },
+            },
+          },
+        },
+        responses: {
+          "202": {
+            description: "Job accepted, rendering in the background.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/EnqueueResponse" },
+              },
+            },
+          },
+          "400": { $ref: "#/components/responses/BadRequest" },
+        },
+      },
+    },
+    "/v1/frame": {
+      post: {
+        summary: "Enqueue a single-frame render",
+        description:
+          "Schedules a single-frame render at the requested time. Returns immediately with a `job_id`.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/FrameRequest" },
+            },
+          },
+        },
+        responses: {
+          "202": {
+            description: "Job accepted, rendering in the background.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/EnqueueResponse" },
+              },
+            },
+          },
+          "400": { $ref: "#/components/responses/BadRequest" },
+        },
+      },
+    },
+    "/v1/jobs/{id}": {
+      get: {
+        summary: "Poll render job status",
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            schema: { type: "string", format: "uuid" },
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Current job state. Status is one of `pending` / `ready` / `error`.",
+            content: {
+              "application/json": {
+                schema: {
+                  oneOf: [
+                    { $ref: "#/components/schemas/JobPending" },
+                    { $ref: "#/components/schemas/JobReady" },
+                  ],
+                },
+              },
+            },
+          },
+          "404": { $ref: "#/components/responses/NotFound" },
+          "500": {
+            description: "Render failed.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/JobError" },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/v1/outputs/{filename}": {
+      get: {
+        summary: "Download a rendered output",
+        description:
+          "Streams the rendered PNG or MP4 inline. Returned by the `url` field of a `ready` job — clients shouldn't construct this URL manually.",
+        parameters: [
+          {
+            name: "filename",
+            in: "path",
+            required: true,
+            schema: { type: "string", pattern: "^[A-Za-z0-9._-]+$" },
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Rendered output.",
+            content: {
+              "image/png": { schema: { type: "string", format: "binary" } },
+              "video/mp4": { schema: { type: "string", format: "binary" } },
+            },
+          },
+          "404": { $ref: "#/components/responses/NotFound" },
+        },
+      },
+    },
+    "/healthz": {
+      get: {
+        summary: "Liveness probe",
+        responses: {
+          "200": {
+            description: "Worker is alive.",
+            content: { "text/plain": { schema: { type: "string" } } },
+          },
+        },
+      },
+    },
+  },
+  components: {
+    schemas: {
+      RenderRequest: {
+        type: "object",
+        required: ["source"],
+        properties: {
+          source: {
+            type: "string",
+            maxLength: 65536,
+            description:
+              "The `.cm` source. Should pin its target runner with a `runner \"<semver>\";` declaration at the top.",
+          },
+          params: {
+            type: "object",
+            properties: {
+              fps: { type: "integer", minimum: 1, maximum: 60, default: 30 },
+              duration: {
+                type: "number",
+                minimum: 0.1,
+                maximum: 300,
+                description:
+                  "Render duration in seconds. Defaults to the scene's declared duration.",
+              },
+              width: { type: "integer", minimum: 16, maximum: 3840, default: 1920 },
+              height: { type: "integer", minimum: 16, maximum: 2160, default: 1080 },
+            },
+          },
+        },
+      },
+      FrameRequest: {
+        type: "object",
+        required: ["source"],
+        properties: {
+          source: { type: "string", maxLength: 65536 },
+          params: {
+            type: "object",
+            properties: {
+              at: {
+                type: "number",
+                minimum: 0,
+                default: 0,
+                description: "Time in seconds to seek to before screenshotting.",
+              },
+              width: { type: "integer", minimum: 16, maximum: 3840, default: 1920 },
+              height: { type: "integer", minimum: 16, maximum: 2160, default: 1080 },
+            },
+          },
+        },
+      },
+      EnqueueResponse: {
+        type: "object",
+        required: ["job_id", "status", "kind"],
+        properties: {
+          job_id: { type: "string", format: "uuid" },
+          status: { type: "string", enum: ["pending"] },
+          kind: { type: "string", enum: ["video", "frame"] },
+        },
+      },
+      JobPending: {
+        type: "object",
+        required: ["job_id", "kind", "status", "created_at"],
+        properties: {
+          job_id: { type: "string", format: "uuid" },
+          kind: { type: "string", enum: ["video", "frame"] },
+          status: { type: "string", enum: ["pending"] },
+          created_at: { type: "integer", description: "Unix milliseconds." },
+        },
+      },
+      JobReady: {
+        type: "object",
+        required: ["job_id", "kind", "status", "url", "mime"],
+        properties: {
+          job_id: { type: "string", format: "uuid" },
+          kind: { type: "string", enum: ["video", "frame"] },
+          status: { type: "string", enum: ["ready"] },
+          url: {
+            type: "string",
+            description:
+              "Relative URL on this host pointing at the rendered file. Prepend the API base.",
+          },
+          mime: { type: "string", enum: ["image/png", "video/mp4"] },
+          created_at: { type: "integer" },
+          completed_at: { type: "integer" },
+        },
+      },
+      JobError: {
+        type: "object",
+        required: ["job_id", "kind", "status", "message"],
+        properties: {
+          job_id: { type: "string", format: "uuid" },
+          kind: { type: "string", enum: ["video", "frame"] },
+          status: { type: "string", enum: ["error"] },
+          message: {
+            type: "string",
+            description: "Human-readable error. CLI diagnostic prefixes (PAR…, LWR…, …) surface here verbatim when applicable.",
+          },
+          code: { type: "string", nullable: true },
+          created_at: { type: "integer" },
+          completed_at: { type: "integer" },
+        },
+      },
+      ErrorEnvelope: {
+        type: "object",
+        required: ["error"],
+        properties: {
+          error: { type: "string" },
+          code: { type: "string" },
+        },
+      },
+    },
+    responses: {
+      BadRequest: {
+        description: "Malformed request — missing `source`, bad JSON, or oversize body.",
+        content: {
+          "application/json": {
+            schema: { $ref: "#/components/schemas/ErrorEnvelope" },
+          },
+        },
+      },
+      NotFound: {
+        description: "Job id or output filename not found.",
+        content: {
+          "application/json": {
+            schema: { $ref: "#/components/schemas/ErrorEnvelope" },
+          },
+        },
+      },
+    },
+  },
+} as const;
+
 const JSON_HEADERS = { "content-type": "application/json" };
 
 function json(body: unknown, status = 200): Response {
@@ -250,8 +523,24 @@ async function handleSyncTest(env: Env): Promise<Response> {
   });
 }
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+// Allow the docs site (playground page) + arbitrary tools to call
+// the API from a browser. The endpoints don't read cookies and
+// don't do anything auth-sensitive in v0, so wide-open CORS is
+// fine. Once auth/rate-limit ladders land, narrow this to known
+// origins.
+const CORS_HEADERS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-headers": "content-type",
+  "access-control-max-age": "86400",
+};
+
+function withCors(res: Response): Response {
+  for (const [k, v] of Object.entries(CORS_HEADERS)) res.headers.set(k, v);
+  return res;
+}
+
+async function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -268,6 +557,17 @@ export default {
       return handleOutput(env, path.slice("/v1/outputs/".length));
     }
 
+    if (path === "/openapi.json") {
+      // Public spec — allow cross-origin reads so browser tools
+      // (Scalar, Stoplight Elements, Postman web) can fetch it.
+      return new Response(JSON.stringify(OPENAPI_SPEC), {
+        headers: {
+          "content-type": "application/json",
+          "access-control-allow-origin": "*",
+          "cache-control": "public, max-age=300",
+        },
+      });
+    }
     if (path === "/test")    return handleSyncTest(env);
     if (path === "/healthz") return new Response("ok\n", { headers: { "content-type": "text/plain" } });
 
@@ -277,9 +577,20 @@ export default {
         "POST /v1/frame           { source, params? }  →  202 { job_id }\n" +
         "GET  /v1/jobs/<id>                              →  status + url when ready\n" +
         "GET  /v1/outputs/<file>                          →  streams the render\n" +
+        "GET  /openapi.json                               →  OpenAPI 3.1 schema\n" +
         "GET  /test                                       →  synchronous smoke test\n" +
         "GET  /healthz                                    →  liveness\n",
       { headers: { "content-type": "text/plain" } },
     );
+}
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // CORS preflight — answered before any routing.
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+    const res = await route(request, env, ctx);
+    return withCors(res);
   },
 } satisfies ExportedHandler<Env>;
