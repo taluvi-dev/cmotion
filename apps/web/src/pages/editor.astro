@@ -1,5 +1,5 @@
 ---
-// /play — fresh, unlinked sandbox for the cmotion DSL.
+// /editor — fresh, unlinked sandbox for the cmotion DSL.
 //
 // This page intentionally bypasses Starlight's layout: it's a
 // full-bleed editor + live preview, not a docs page. It's unlisted
@@ -67,7 +67,7 @@ scene title(duration: Duration = 6s) -> Frame {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>cmotion · play</title>
+    <title>cmotion · editor</title>
     <link rel="icon" href="/favicon.svg" />
     <style>
       :root {
@@ -128,7 +128,7 @@ scene title(duration: Duration = 6s) -> Frame {
   </head>
   <body>
     <header>
-      <h1><a href="/">cmotion</a> · play</h1>
+      <h1><a href="/">cmotion</a> · editor</h1>
       <span class="status" id="status">booting…</span>
       <button class="secondary" id="btn-code" title="Hide code editor (⌘\\)">Hide code</button>
       <button id="btn-render">Render</button>
@@ -171,7 +171,7 @@ scene title(duration: Duration = 6s) -> Frame {
       const scrub = document.getElementById("scrub") as HTMLInputElement;
       const tVal = document.getElementById("tval") as HTMLElement;
 
-      // Deep link: /play/#source=<urlencoded .cm source> preloads the editor
+      // Deep link: /editor/#source=<urlencoded .cm source> preloads the editor
       // with that source. Used by the "Edit it →" link on the homepage.
       function preloadFromHash() {
         const hash = location.hash.startsWith("#") ? location.hash.slice(1) : "";

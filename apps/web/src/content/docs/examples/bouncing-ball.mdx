@@ -1,14 +1,23 @@
 ---
 title: Bouncing ball
-description: A 2D circle whose vertical position is driven by a looping keyframe animation.
+description: A textured 3D sphere bouncing on a starry background, with squash on impact.
 ---
 
 import ExampleScene from '../../../components/ExampleScene.astro';
 import { BOUNCING_BALL_SOURCE } from '../../../examples/sources.ts';
 
-A flat-shaded `circle` over a near-white background. The ball's `y`
-position is bound to a three-keyframe `animate` block that
-ping-pongs between two extremes and loops `forever`. No 3D, no
-lighting — just a 2D layer with a `translate` postfix.
+An Earth-textured `sphere` bouncing in front of a starry-night
+`image` background. The vertical motion comes from `bounce(...)` —
+a parabolic arc per period that returns both the current
+`position` and the list of `impacts`. The squash is keyed off
+those impacts via `on_event(...)`: an exponential-decay envelope
+that spikes at each floor contact and relaxes between hits. Lit by
+an ambient + directional pair through `render3d`.
+
+`image(...).as_texture(...)` paints the sphere; `image(...).fit(cover)`
+becomes the scene background. The squash is anisotropic — y
+compresses by `factor`, x/z widen to roughly preserve volume. Field
+access on a sampler-deferred value (`bounce_y.impacts`) lowers to a
+`field_of` staging form that the sampler resolves at sample time.
 
 <ExampleScene source={BOUNCING_BALL_SOURCE} />

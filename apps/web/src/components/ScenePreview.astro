@@ -1,8 +1,8 @@
 ---
 // ScenePreview.astro — inline cmotion playground on the homepage.
 // Renders an editable source textarea + a live preview, both driven by
-// cmotion-render.wasm. Same renderer /play uses; this is just the
-// minimal control surface (no PNG/video save — those are /play's job).
+// cmotion-render.wasm. Same renderer /editor uses; this is just the
+// minimal control surface (no PNG/video save — those are /editor's job).
 ---
 
 <figure class="scene-preview">
@@ -11,7 +11,7 @@
     <canvas data-scene-preview aria-label="Live preview of the sample scene"></canvas>
   </div>
   <figcaption>
-    <span>Edit above, click <strong>Render</strong> to apply. <a href="/play/">Open in /play →</a></span>
+    <span>Edit above, click <strong>Render</strong> to apply. <a href="/editor/">Open in /editor →</a></span>
     <button type="button" data-scene-render>Render</button>
   </figcaption>
 </figure>
@@ -73,11 +73,11 @@
   import { boot } from "../scripts/cmotion-viewer.ts";
   import { TITLE_SOURCE as HOMEPAGE_SOURCE } from "../examples/sources.ts";
 
-  // Update every "Open in /play →" link with the current homepage source so a
-  // visitor lands on /play with whatever they were just editing.
+  // Update every "Open in /editor →" link with the current homepage source so a
+  // visitor lands on /editor with whatever they were just editing.
   function updatePlayLinks(source: string) {
-    for (const a of document.querySelectorAll<HTMLAnchorElement>('a[href^="/play/"]')) {
-      a.href = `/play/#source=${encodeURIComponent(source)}`;
+    for (const a of document.querySelectorAll<HTMLAnchorElement>('a[href^="/editor/"]')) {
+      a.href = `/editor/#source=${encodeURIComponent(source)}`;
     }
   }
 

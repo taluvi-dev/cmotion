@@ -187,7 +187,7 @@ What's *not* shipped yet, in order of likely-future-impact:
   scene.mp4` yet. Frame loop is trivial; muxing PNG → MP4 needs
   ffmpeg as an external process today, WebCodecs in the browser
   later. Audio is a separate workstream.
-- **Browser editor / `/play` page.** The WASM artifact exists and
+- **Browser editor / `/editor` page.** The WASM artifact exists and
   passes parity, but only exports `render_taste()` against a
   hand-built scene. Full `render_cm(source, t, w, h, out)` is
   blocked on tree-sitter cross-compiling to WASM (`lib.c` uses
@@ -242,7 +242,7 @@ lands.
 ### 5. Browser editor (further deferred)
 
 Cross-compile tree-sitter to WASM, expose `render_cm(source, t,
-w, h, out)`, wire `/play` page in `apps/web`. ~600 LOC + build
+w, h, out)`, wire `/editor` page in `apps/web`. ~600 LOC + build
 gymnastics. The motion-graphics editor surface the user has
 named as the primary product target.
 
@@ -427,7 +427,7 @@ negligible.
 
 ## What's deferred
 
-- **Browser editor / `/play` page.** No point until the renderer
+- **Browser editor / `/editor` page.** No point until the renderer
   looks right. `cmotion-render.wasm` continues building green via
   the existing parity test; we don't expand its surface.
 - **Full `render_cm(source, t, w, h, out)` in WASM.** Needs

@@ -155,6 +155,40 @@ function toThreeColor(v: JsonNode): THREE.Color {
   }
 }
 
+// ---- Texture loading --------------------------------------------
+//
+// Each `image("/path.jpg")` resolves to a Three.js texture loaded
+// from /public via the WebGL texture loader, cached per-path. The
+// loader is async — the texture object is returned immediately, with
+// pixels arriving on the next render after the fetch completes.
+
+const textureCache = new Map<string, THREE.Texture>();
+const textureLoader = new THREE.TextureLoader();
+
+function loadTexture(path: string): THREE.Texture {
+  const cached = textureCache.get(path);
+  if (cached) return cached;
+  const tex = textureLoader.load(path);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  textureCache.set(path, tex);
+  return tex;
+}
+
+// Walk an `as_texture(image(...))` (or a bare `image(...)`) and return
+// the texture path, or null if the value isn't an image at all.
+function imagePath(node: JsonNode): string | null {
+  if (!node || node.kind !== "constructed") return null;
+  if (node.name === "as_texture" || node.name === "fit") {
+    return imagePath(positionalArgs(node)[0]);
+  }
+  if (node.name === "image") {
+    const raw = positionalArgs(node)[0];
+    if (!raw || raw.kind !== "string") return null;
+    return String(raw.raw).replace(/^"|"$/g, "");
+  }
+  return null;
+}
+
 // ---- Font loading (for text.glyph) ------------------------------
 
 let fontPromise: Promise<opentype.Font> | null = null;
@@ -214,15 +248,23 @@ function glyphShape(font: opentype.Font, char: string): THREE.Shape {
 
 // ---- 2D/3D translators -------------------------------------------
 
-// Set by the top-level compose from the first rect layer's width.
-// 1920px wide bg → 2.0 world units across (matches a perspective camera
-// at z=6 / FOV 28° / aspect 16:9 — the bg fills the visible frustum).
-let pxToWorld = 1 / 540;
+// Camera config is pinned here (mirrored at the `boot()` call site).
+// pxToWorld is derived from the camera's vertical view extent so a
+// background of <bgH> cmotion-px exactly fills the viewport height —
+// i.e. `floor: -bgH/2` lands on the bottom edge of the image, not at
+// 19 % of the way down.
+const CAMERA_Z = 6;
+const CAMERA_FOV_DEG = 28;
+const VIEW_HEIGHT_WORLD = 2 * CAMERA_Z * Math.tan((CAMERA_FOV_DEG * Math.PI) / 360);
+
+// Default assumes a 1080-px tall canvas (16:9). Overwritten by
+// buildCompose once the bg's actual height is known.
+let pxToWorld = VIEW_HEIGHT_WORLD / 1080;
 
 interface BuildCtx {
   font: opentype.Font;
   lights: THREE.Light[];
-  background: THREE.Color | null;
+  background: THREE.Color | THREE.Texture | null;
   glyphScale: number;
   // Set from the first rect layer's width/height — defines the
   // letterbox aspect of the rendered viewport.
@@ -248,6 +290,73 @@ function buildCircle(node: JsonNode): THREE.Object3D {
   const geom = new THREE.CircleGeometry(r, 64);
   const mat = new THREE.MeshBasicMaterial({ color: toThreeColor(f.fill) });
   return new THREE.Mesh(geom, mat);
+}
+
+// sphere(r: <px>) → SphereGeometry with a placeholder white standard
+// material. Wrap in `.material(...)` to fill or texture it. The
+// geometry carries its source radius on `userData.radius_world` so
+// `pivot` can find it without re-computing the bounding sphere.
+function buildSphere(node: JsonNode): THREE.Object3D {
+  const f = namedFields(node);
+  const args = positionalArgs(node);
+  const rPx = numberOf(f.r ?? f.radius ?? args[0], 50);
+  const r = rPx * pxToWorld;
+  const geom = new THREE.SphereGeometry(r, 64, 32);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1 });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.userData.radiusWorld = r;
+  return mesh;
+}
+
+// .pivot(anchor) — shift the inner object so the named anchor lands at
+// the group's origin. Today only `bottom` is wired up: translate the
+// inner up by its bounding radius, so subsequent transforms (squash,
+// translate) pivot around the bottom of the geometry.
+function buildPivot(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
+  const args = positionalArgs(node);
+  const inner = buildLayer(args[0], ctx);
+  if (!inner) return null;
+  const anchor = args[1];
+  const name = anchor?.kind === "constructed" ? anchor.name : null;
+  const r = findRadius(inner);
+  const group = new THREE.Group();
+  if (name === "bottom") inner.position.y += r;
+  else if (name === "top") inner.position.y -= r;
+  else if (name === "left") inner.position.x += r;
+  else if (name === "right") inner.position.x -= r;
+  group.add(inner);
+  group.userData.radiusWorld = r;
+  return group;
+}
+
+function findRadius(obj: THREE.Object3D): number {
+  if (typeof obj.userData?.radiusWorld === "number") return obj.userData.radiusWorld;
+  let r = 0;
+  obj.traverse((o: any) => {
+    if (o.isMesh && o.geometry) {
+      o.geometry.computeBoundingSphere?.();
+      const s = o.geometry.boundingSphere?.radius ?? 0;
+      if (s > r) r = s;
+    }
+  });
+  return r;
+}
+
+// .squash(factor: f) — anisotropic scale that compresses y by `f` and
+// expands x/z to roughly preserve volume. `f = 0` is a no-op; `f = 0.5`
+// halves height and widens by ~1.41×. Negative factors stretch instead.
+function buildSquash(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
+  const args = positionalArgs(node);
+  const f = namedFields(node);
+  const inner = buildLayer(args[0], ctx);
+  if (!inner) return null;
+  const factor = numberOf(f.factor ?? args[1], 0);
+  const sy = Math.max(0.02, 1 - factor);
+  const widen = factor >= 0 ? Math.sqrt(1 / sy) : 1 / Math.sqrt(Math.max(0.02, 1 + factor));
+  inner.scale.x *= widen;
+  inner.scale.y *= sy;
+  inner.scale.z *= widen;
+  return inner;
 }
 
 // .translate(x?, y?, z?) on a layer. px units → world units via pxToWorld
@@ -322,13 +431,24 @@ function buildMaterial(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   const f = namedFields(node);
   const inner = buildLayer(args[0], ctx);
   if (!inner) return null;
-  const mat = new THREE.MeshStandardMaterial({
-    color: toThreeColor(f.fill),
+  // `fill: image(...).as_texture(...)` resolves to a texture map; everything
+  // else falls back to a flat colour. SphereGeometry's default UVs are
+  // already equirectangular, so `projection: equirectangular` is a no-op for
+  // the only mesh we accept here.
+  const fillTexture = imagePath(f.fill);
+  const opts: THREE.MeshStandardMaterialParameters = {
     metalness: numberOf(f.metalness, 0),
     roughness: numberOf(f.roughness, 1),
     emissive: toThreeColor(f.emissive),
     emissiveIntensity: numberOf(f.emissive_intensity, 0),
-  });
+  };
+  if (fillTexture) {
+    opts.color = 0xffffff;
+    opts.map = loadTexture(fillTexture);
+  } else {
+    opts.color = toThreeColor(f.fill);
+  }
+  const mat = new THREE.MeshStandardMaterial(opts);
   inner.traverse((o: any) => {
     if (o.isMesh) {
       o.material?.dispose?.();
@@ -400,6 +520,8 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       return buildRect(node);
     case "circle":
       return buildCircle(node);
+    case "sphere":
+      return buildSphere(node);
     case "render3d":
       return buildRender3d(node, ctx);
     case "extrude":
@@ -412,6 +534,19 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       return buildScale(node, ctx);
     case "translate":
       return buildTranslate(node, ctx);
+    case "pivot":
+      return buildPivot(node, ctx);
+    case "squash":
+      return buildSquash(node, ctx);
+    // `image`, `fit`, `as_texture` only render as part of a material's
+    // `fill` slot or as the first layer of `compose` (background) — see
+    // buildMaterial and buildCompose. Reaching them via buildLayer means
+    // they were placed somewhere the viewer can't render them yet.
+    case "image":
+    case "fit":
+    case "as_texture":
+      console.warn(`[cmotion-viewer] "${node.name}" only renders as a material fill or compose background`);
+      return null;
     default:
       console.warn(`[cmotion-viewer] no translator for "${node.name}"`);
       return null;
@@ -421,14 +556,27 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
 function buildCompose(node: JsonNode, ctx: BuildCtx): THREE.Object3D {
   const group = new THREE.Group();
   const layers = arrayElems(namedFields(node).layers);
-  if (layers[0]?.kind === "constructed" && layers[0].name === "rect") {
-    const bgFields = namedFields(layers[0]);
+  const head = layers[0];
+  if (head?.kind === "constructed" && head.name === "rect") {
+    const bgFields = namedFields(head);
     const bgW = numberOf(bgFields.width, 1920);
     const bgH = numberOf(bgFields.height, 1080);
-    pxToWorld = 2.0 / bgW;
+    // pxToWorld pinned so bgH cmotion-px = camera view height: a layer
+    // at y = ±bgH/2 lands on the top/bottom edge of the image.
+    pxToWorld = VIEW_HEIGHT_WORLD / (bgH > 0 ? bgH : 1080);
     ctx.sceneAspect = bgH > 0 ? bgW / bgH : 16 / 9;
     // Promote the first full-bleed rect to the scene background.
     ctx.background = toThreeColor(bgFields.fill);
+  } else if (head?.kind === "constructed" && (head.name === "fit" || head.name === "image")) {
+    // Image used as a layer — load as a scene background texture.
+    // No size info on `image(path)` alone, so fall back to the default
+    // 1080-px tall, 16:9 canvas.
+    const path = imagePath(head);
+    if (path) {
+      pxToWorld = VIEW_HEIGHT_WORLD / 1080;
+      ctx.sceneAspect = 16 / 9;
+      ctx.background = loadTexture(path);
+    }
   }
   layers.forEach((layer, i) => {
     // Skip the layer we just promoted to background.
@@ -487,8 +635,8 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-  const camera = new THREE.PerspectiveCamera(28, sceneAspect, 0.1, 100);
-  camera.position.set(0, 0, 6);
+  const camera = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, sceneAspect, 0.1, 100);
+  camera.position.set(0, 0, CAMERA_Z);
   camera.lookAt(0, 0, 0);
 
   const scene = new THREE.Scene();

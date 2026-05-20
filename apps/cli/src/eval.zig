@@ -504,6 +504,17 @@ pub const Evaluator = struct {
                 try self.fieldMissing(fa.span, fa.name.name);
                 return .nil;
             },
+            .constructed => {
+                // The receiver is a staged value (e.g. `bounce(...)`) that
+                // won't be a real record until the sampler resolves it.
+                // Defer the access: emit `field_of(self, name)`; the sampler
+                // samples `self` first and then extracts the field.
+                const fields = try self.arena.alloc(value.Field, 2);
+                fields[0] = .{ .name = "self", .value = receiver };
+                const quoted = try std.fmt.allocPrint(self.arena, "\"{s}\"", .{fa.name.name});
+                fields[1] = .{ .name = "name", .value = .{ .string = quoted } };
+                return .{ .constructed = .{ .name = "field_of", .fields = fields } };
+            },
             else => {
                 try self.typeError(fa.span, "field access", "record", receiver);
                 return .nil;
