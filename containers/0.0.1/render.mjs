@@ -24,7 +24,19 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { chromium } from "playwright-core";
+
+// Lazy-import Playwright so the HTTP server can bind to its port
+// *before* we incur Chromium's startup cost — Cloudflare Containers
+// pings the port to mark the instance healthy, and a slow / failing
+// playwright import on the import line would prevent that ping
+// from ever succeeding.
+let chromiumPromise = null;
+function getChromium() {
+  if (!chromiumPromise) {
+    chromiumPromise = import("playwright-core").then((m) => m.chromium);
+  }
+  return chromiumPromise;
+}
 
 const VIEWER_DIR = path.join(import.meta.dirname, "viewer");
 
@@ -95,6 +107,7 @@ async function bootViewer(env) {
   const width  = env.params.width  ?? 1920;
   const height = env.params.height ?? 1080;
 
+  const chromium = await getChromium();
   const browser = await chromium.launch({
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });
@@ -259,18 +272,13 @@ async function runHttpServer() {
 }
 
 async function main() {
-  // Cloudflare Containers always sets PORT; local `docker run` with
-  // env vars (SOURCE / JOB_ID / KIND) keeps using the one-shot path.
-  if (process.env.PORT) {
-    await runHttpServer();
-    return;
-  }
-  const env = readEnv();
-  if (env.kind === "frame") {
-    await renderFrame(env);
-  } else {
-    await renderVideo(env);
-  }
+  // HTTP server is the only run mode. CF Containers doesn't set
+  // PORT by default (that's a load-balancer pattern, not a
+  // Containers SDK one), so we'd previously fall into a one-shot
+  // mode and exit immediately — the whole reason the binding
+  // looked broken on the first deploy. Listen on $PORT if set
+  // (CF binding uses it), else 8080.
+  await runHttpServer();
 }
 
 main().catch((e) => fail("CRASH", e?.stack ?? e?.message ?? String(e)));

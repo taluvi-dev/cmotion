@@ -33,6 +33,5 @@ COPY render.mjs ./render.mjs
 
 # Default output goes to /out — caller bind-mounts to capture.
 ENV OUT_DIR=/out
-ENV KIND=frame
 
 ENTRYPOINT ["node", "/runner/render.mjs"]

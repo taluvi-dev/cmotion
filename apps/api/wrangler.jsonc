@@ -1,0 +1,60 @@
+// Cloudflare Worker config for @cmotion/api.
+//
+// IMPORTANT: the Cloudflare account ID is intentionally NOT baked
+// into this file. The image path below uses the placeholder
+// `CF_ACCOUNT_PLACEHOLDER`, which `pnpm deploy` substitutes from
+// `$CLOUDFLARE_ACCOUNT_ID` at deploy time. See scripts/deploy.sh.
+//
+// Why: the repo is public; while account IDs aren't credentials,
+// the user has asked we don't bake any account-specific info into
+// committed files. Pass `CLOUDFLARE_ACCOUNT_ID=…` in the env when
+// deploying.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cmotion-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "observability": {
+    "enabled": true
+  },
+
+  // Custom domain — DNS already pointed at the Worker via the CF
+  // dashboard. The route picks it up on the next deploy.
+  "routes": [
+    { "pattern": "api.cmotion.org", "custom_domain": true }
+  ],
+
+  // One render container, ever. Bumping `max_instances` would also
+  // require bumping the cost ceiling baked into TODO.md's "max 1
+  // concurrent" rule — don't do it casually.
+  "containers": [
+    {
+      "class_name": "RenderRunner",
+      "image": "registry.cloudflare.com/CF_ACCOUNT_PLACEHOLDER/cmotion-runner:0.0.1-amd64",
+      "max_instances": 1,
+      "instance_type": "standard-2",
+      // Enable `wrangler containers ssh <id>` for diagnosing
+      // runtime crashes (Playwright/Chromium kernel feature
+      // checks etc.). Safe — auth still goes via CF SSO.
+      "ssh": { "enabled": true }
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RENDER_RUNNER",
+        "class_name": "RenderRunner"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RenderRunner"]
+    }
+  ]
+}

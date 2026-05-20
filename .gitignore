@@ -159,3 +159,7 @@ packages/tree-sitter-cmotion/bindings/node/build/
 
 # Wrangler local caches — anything under .wrangler/ at any depth
 .wrangler/
+
+# Rendered wrangler config (substitutes $CLOUDFLARE_ACCOUNT_ID into
+# the committed wrangler.jsonc — see apps/api/scripts/deploy.sh).
+apps/api/.wrangler-deploy.jsonc
