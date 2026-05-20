@@ -248,10 +248,18 @@ function glyphShape(font: opentype.Font, char: string): THREE.Shape {
 
 // ---- 2D/3D translators -------------------------------------------
 
-// Set by the top-level compose from the first rect layer's width.
-// 1920px wide bg → 2.0 world units across (matches a perspective camera
-// at z=6 / FOV 28° / aspect 16:9 — the bg fills the visible frustum).
-let pxToWorld = 1 / 540;
+// Camera config is pinned here (mirrored at the `boot()` call site).
+// pxToWorld is derived from the camera's vertical view extent so a
+// background of <bgH> cmotion-px exactly fills the viewport height —
+// i.e. `floor: -bgH/2` lands on the bottom edge of the image, not at
+// 19 % of the way down.
+const CAMERA_Z = 6;
+const CAMERA_FOV_DEG = 28;
+const VIEW_HEIGHT_WORLD = 2 * CAMERA_Z * Math.tan((CAMERA_FOV_DEG * Math.PI) / 360);
+
+// Default assumes a 1080-px tall canvas (16:9). Overwritten by
+// buildCompose once the bg's actual height is known.
+let pxToWorld = VIEW_HEIGHT_WORLD / 1080;
 
 interface BuildCtx {
   font: opentype.Font;
@@ -553,17 +561,19 @@ function buildCompose(node: JsonNode, ctx: BuildCtx): THREE.Object3D {
     const bgFields = namedFields(head);
     const bgW = numberOf(bgFields.width, 1920);
     const bgH = numberOf(bgFields.height, 1080);
-    pxToWorld = 2.0 / bgW;
+    // pxToWorld pinned so bgH cmotion-px = camera view height: a layer
+    // at y = ±bgH/2 lands on the top/bottom edge of the image.
+    pxToWorld = VIEW_HEIGHT_WORLD / (bgH > 0 ? bgH : 1080);
     ctx.sceneAspect = bgH > 0 ? bgW / bgH : 16 / 9;
     // Promote the first full-bleed rect to the scene background.
     ctx.background = toThreeColor(bgFields.fill);
   } else if (head?.kind === "constructed" && (head.name === "fit" || head.name === "image")) {
     // Image used as a layer — load as a scene background texture.
-    // No size info on `image(path)` alone, so fall back to 1920×1080
-    // for the pxToWorld scale + 16:9 letterbox aspect.
+    // No size info on `image(path)` alone, so fall back to the default
+    // 1080-px tall, 16:9 canvas.
     const path = imagePath(head);
     if (path) {
-      pxToWorld = 2.0 / 1920;
+      pxToWorld = VIEW_HEIGHT_WORLD / 1080;
       ctx.sceneAspect = 16 / 9;
       ctx.background = loadTexture(path);
     }
@@ -625,8 +635,8 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-  const camera = new THREE.PerspectiveCamera(28, sceneAspect, 0.1, 100);
-  camera.position.set(0, 0, 6);
+  const camera = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, sceneAspect, 0.1, 100);
+  camera.position.set(0, 0, CAMERA_Z);
   camera.lookAt(0, 0, 0);
 
   const scene = new THREE.Scene();
