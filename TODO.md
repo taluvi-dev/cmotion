@@ -13,66 +13,99 @@ Ordered by leverage, not by what's easy.
 
 ### Hosted render API on Cloudflare
 
-A public endpoint that takes a `.cm` source and returns a rendered
-video. Processed through a queue in front of a single Cloudflare
-Container — the queue itself is the rate limiter, no separate
-token bucket. The container runs `cmo bounce` unchanged.
+A public endpoint that takes a `.cm` source and returns either a
+rendered video or a single frame. The renderer is a one-shot
+Cloudflare Container per job; the Worker dispatches via the
+Containers binding and tracks every job in D1. Lives in a new
+`apps/api/` package — separate from `apps/web/` so the API and
+the docs site deploy independently.
 
-**Shape:**
+**Endpoints (v1):**
 
-- `POST /render` — body is the `.cm` source plus optional render
-  params (`fps`, `duration`, `format`). Enqueues the job, returns
-  `{ job_id }`.
-- `GET /render/:job_id` — polls D1 for status. Returns one of:
+- `POST /v1/render` — `{ source, fps?, duration?, format? }` →
+  `202 { job_id, kind: "video" }`. Default format `mp4`.
+- `POST /v1/frame` — `{ source, at, width?, height? }` →
+  `202 { job_id, kind: "frame" }`. Output is PNG.
+- `GET /v1/jobs/:job_id` — poll. Returns one of:
   - `{ status: "pending" }` — still queued or rendering
-  - `{ status: "ready", url: "<r2 signed link>" }` — done
+  - `{ status: "ready", kind, url: "<r2 signed link>" }` — done
   - `{ status: "error", code, message }` — failed; surfaces the
-    underlying `cmo` diagnostic verbatim
+    `cmo` diagnostic code (`PAR100`, `EVL002`, …) verbatim
+  - `404 { error: "not_found" }` for unknown ids
 
 **Topology:**
 
 ```
-client → Worker (Hono) → Queue → Container ─→ R2  (rendered video)
-                       ↘                    ↘
-                          D1 (script + status + link)
+client → Worker (Hono) ──┬──→ Container (one-shot) ──→ R2  (<guid>.mp4 / .png)
+                         │           ↑
+                         └──→ D1 (source + params + status + key)
 ```
 
-**Why this shape.** A single container means one renderer at a
-time — no concurrency bugs in `cmo bounce` (which already shells
-out to ffmpeg) and a queue depth that's trivially observable. R2
-is the only sensible blob store on Cloudflare. D1 sits next to
-the queue so the same row records what was submitted, what came
-out, and any error — one source of truth, easy to debug, easy to
-replay.
+**Assets.** `.cm` may reference external image URLs
+(`image("https://…/earth.jpg")`). The container fetches them at
+render time — *we never persist input assets*. Outputs only
+(`<guid>.mp4`, `<guid>.png`) live in R2. The container's
+entrypoint enforces:
+
+- `--max-asset-bytes` per fetched URL (~25 MiB) and per job
+  (~100 MiB)
+- per-fetch wall-clock timeout (~15 s)
+- private-IP block (refuse RFC1918, link-local, IPv6 ULAs, and
+  resolve-then-recheck against DNS-rebinding)
+
+**Auth.** None in v0. Protected solely by Cloudflare Rate
+Limiting Rules per-IP at the edge, plus app-level clamps on the
+expensive render params (`duration`, `fps`, output dimensions).
+Turnstile / API keys land before the API goes public.
+
+**Container.** One-shot per job (not a long-lived poller), so the
+process gets a clean `/tmp` every time and no state hygiene logic
+to maintain. Cold start runs ~1–2 s; revisit with a warm pool if
+that becomes a perceptible drag. Image bundles a pinned `cmo`
+release + ffmpeg + the DM Sans font set; CI rebuilds on each
+release tag.
 
 **D1 schema (initial):**
 
-```
-renders (
-  id           TEXT PRIMARY KEY,   -- job_id, uuid
-  source       TEXT NOT NULL,      -- the submitted .cm text
-  status       TEXT NOT NULL,      -- pending | ready | error
-  output_url   TEXT,               -- R2 link, when ready
-  error_code   TEXT,               -- e.g. PAR100, EVL002
+```sql
+CREATE TABLE jobs (
+  id            TEXT PRIMARY KEY,   -- guid
+  kind          TEXT NOT NULL,      -- 'video' | 'frame'
+  source        TEXT NOT NULL,      -- raw .cm
+  params        TEXT NOT NULL,      -- JSON: fps/duration/at/width/height/format
+  status        TEXT NOT NULL,      -- 'pending' | 'ready' | 'error'
+  output_key    TEXT,               -- '<guid>.mp4' or '<guid>.png'
+  error_code    TEXT,               -- e.g. PAR100, EVL002
   error_message TEXT,
-  created_at   INTEGER NOT NULL,
-  completed_at INTEGER
-)
+  created_at    INTEGER NOT NULL,
+  completed_at  INTEGER
+);
+CREATE INDEX idx_jobs_created_at ON jobs(created_at);
 ```
 
-**R2** holds the rendered videos. No lifecycle policy initially.
-Cleanup is a follow-up script — sweep anything older than N days
-or whose D1 row was deleted.
+**R2** holds the rendered outputs only. No lifecycle policy
+initially. Cleanup is a follow-up cron Worker — sweep anything
+older than N days, or whose D1 row was already deleted.
 
-**Open questions** (none are blockers for v0):
+**CLI gap.** `cmo render --at <t>` writes PPM today, not PNG.
+Trivial extension (the APNG encoder in `cmo bounce` already
+emits PNG IDAT chunks) — ~20 lines in `apps/cli/src/commands/render.zig`.
+Lands in the same PR that ships `POST /v1/frame`.
 
-- Auth — none for v0, but anonymous endpoints draw abuse.
-  Turnstile + a simple API key before going public.
-- Container image — bundle the released `cmo` + ffmpeg into a
-  pinned image. CI rebuilds on each release tag.
-- Streaming progress — out of scope. Polling is enough; SSE /
-  websocket lands only if the editor wants live render
-  progress, not just success/fail.
+**Open questions** (none block v0):
+
+- **Output URL signing.** Public R2 (with unguessable guid keys)
+  vs. signed URLs with TTL. Signed URLs cost nothing extra and
+  let us narrow the abuse window — go with signed.
+- **Streaming progress.** Polling is enough for v0; SSE /
+  websocket if the editor wants live render progress later.
+- **CI image build.** A Dockerfile + GitHub Action rebuilding on
+  release tag, pushing to Cloudflare's registry.
+- **Editor integration.** The `/editor` page's "Save video"
+  button currently uses in-browser `canvas.captureStream`; once
+  the API exists we'd offer a "Render in cloud" option that
+  hits `POST /v1/render` and polls — better quality, no laptop
+  GPU dependency.
 
 ---
 
