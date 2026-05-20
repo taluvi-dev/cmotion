@@ -36,6 +36,76 @@ export class RenderRunner extends Container<Env> {
   // back renders share the same warm Chromium, short enough that
   // we don't pay for hours of idle.
   sleepAfter = "5m";
+
+  // RPC entry point called from the Worker. We kick off the actual
+  // render work via the DO's own `ctx.waitUntil()` so the calling
+  // Worker request can return 202 immediately. The DO's waitUntil
+  // budget is bounded by the DO's lifetime (minutes-to-hours when
+  // active), not the Worker request's ~30 s cap that bit us when
+  // we tried to render inline.
+  async runJob(
+    id: string,
+    kind: "video" | "frame",
+    source: string,
+    params: Record<string, unknown>,
+  ): Promise<void> {
+    this.ctx.waitUntil(this.executeJob(id, kind, source, params));
+  }
+
+  // The actual render lifecycle — runs inside the DO via waitUntil,
+  // so it doesn't share the Worker request's deadline.
+  private async executeJob(
+    id: string,
+    kind: "video" | "frame",
+    source: string,
+    params: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      const containerRes = await this.containerFetch(
+        new Request("http://container/", {
+          method: "POST",
+          headers: JSON_HEADERS,
+          body: JSON.stringify({ jobId: id, source, kind, params }),
+        }),
+      );
+
+      if (!containerRes.ok) {
+        const errBody = await containerRes.text();
+        await markErrorInDb(this.env, id, errBody.slice(0, 500));
+        return;
+      }
+
+      const ext = kind === "frame" ? "png" : "mp4";
+      const mime = kind === "frame" ? "image/png" : "video/mp4";
+      const key = `outputs/${id}.${ext}`;
+
+      const bytes = await containerRes.arrayBuffer();
+      await this.env.R2.put(key, bytes, { httpMetadata: { contentType: mime } });
+
+      await this.env.DB.prepare(
+        `UPDATE jobs
+         SET status='ready', output_key=?, output_mime=?, completed_at=?
+         WHERE id=?`,
+      )
+        .bind(key, mime, Date.now(), id)
+        .run();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      await markErrorInDb(this.env, id, message.slice(0, 500));
+    }
+  }
+}
+
+// Standalone DB-update helper so both the DO and any future
+// non-DO error path can call it.
+async function markErrorInDb(env: Env, id: string, message: string): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE jobs
+     SET status='error', error_message=?, completed_at=?
+     WHERE id=?`,
+  )
+    .bind(message, Date.now(), id)
+    .run();
 }
 
 const TEST_SOURCE = `runner "0.0.1";
@@ -377,63 +447,22 @@ async function handleEnqueue(
     .bind(id, kind, body.source, params_json, now)
     .run();
 
-  ctx.waitUntil(runJob(id, kind, body.source!, body.params ?? {}, env));
+  // Hand the work off to the singleton RenderRunner DO via an
+  // RPC call. The DO method returns immediately because it
+  // schedules the actual render inside its *own* waitUntil; the
+  // Worker request's lifecycle ends with the 202 below. This
+  // dodges the ~30 s cap on Worker-level waitUntil that was
+  // cancelling longer videos before they could upload to R2.
+  const stub = env.RENDER_RUNNER.get(env.RENDER_RUNNER.idFromName("singleton"));
+  ctx.waitUntil(stub.runJob(id, kind, body.source!, body.params ?? {}));
 
   return json({ job_id: id, status: "pending", kind }, 202);
 }
 
-async function runJob(
-  id: string,
-  kind: "video" | "frame",
-  source: string,
-  params: Record<string, unknown>,
-  env: Env,
-): Promise<void> {
-  try {
-    const container = getContainer(env.RENDER_RUNNER, "singleton");
-    const containerRes = await container.fetch("http://container/", {
-      method: "POST",
-      headers: JSON_HEADERS,
-      body: JSON.stringify({ jobId: id, source, kind, params }),
-    });
-
-    if (!containerRes.ok) {
-      const errBody = await containerRes.text();
-      await markError(env, id, errBody.slice(0, 500));
-      return;
-    }
-
-    const ext = kind === "frame" ? "png" : "mp4";
-    const mime = kind === "frame" ? "image/png" : "video/mp4";
-    const key = `outputs/${id}.${ext}`;
-
-    const bytes = await containerRes.arrayBuffer();
-    await env.R2.put(key, bytes, {
-      httpMetadata: { contentType: mime },
-    });
-
-    await env.DB.prepare(
-      `UPDATE jobs
-       SET status='ready', output_key=?, output_mime=?, completed_at=?
-       WHERE id=?`,
-    )
-      .bind(key, mime, Date.now(), id)
-      .run();
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    await markError(env, id, message.slice(0, 500));
-  }
-}
-
-async function markError(env: Env, id: string, message: string): Promise<void> {
-  await env.DB.prepare(
-    `UPDATE jobs
-     SET status='error', error_message=?, completed_at=?
-     WHERE id=?`,
-  )
-    .bind(message, Date.now(), id)
-    .run();
-}
+// The actual render orchestration lives on the RenderRunner DO
+// (see `executeJob` above). The Worker just enqueues a row and
+// kicks the DO; this keeps the long-running work out of the
+// Worker request's lifetime.
 
 async function handleJobGet(env: Env, id: string): Promise<Response> {
   const row = await env.DB.prepare(
@@ -571,17 +600,25 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (path === "/test")    return handleSyncTest(env);
     if (path === "/healthz") return new Response("ok\n", { headers: { "content-type": "text/plain" } });
 
-    return new Response(
-      "cmotion api\n\n" +
-        "POST /v1/render          { source, params? }  →  202 { job_id }\n" +
-        "POST /v1/frame           { source, params? }  →  202 { job_id }\n" +
-        "GET  /v1/jobs/<id>                              →  status + url when ready\n" +
-        "GET  /v1/outputs/<file>                          →  streams the render\n" +
-        "GET  /openapi.json                               →  OpenAPI 3.1 schema\n" +
-        "GET  /test                                       →  synchronous smoke test\n" +
-        "GET  /healthz                                    →  liveness\n",
-      { headers: { "content-type": "text/plain" } },
-    );
+    // Root "/" gets the help text. Any other unknown path is a 404
+    // — returning 200 with help text would let a bad client URL
+    // silently land on the help page, which then trips up
+    // `await response.json()` parsers with the cryptic
+    // "Unexpected token 'c', 'cmotion ap'…" error.
+    if (path === "/" || path === "") {
+      return new Response(
+        "cmotion api\n\n" +
+          "POST /v1/render          { source, params? }  →  202 { job_id }\n" +
+          "POST /v1/frame           { source, params? }  →  202 { job_id }\n" +
+          "GET  /v1/jobs/<id>                              →  status + url when ready\n" +
+          "GET  /v1/outputs/<file>                          →  streams the render\n" +
+          "GET  /openapi.json                               →  OpenAPI 3.1 schema\n" +
+          "GET  /test                                       →  synchronous smoke test\n" +
+          "GET  /healthz                                    →  liveness\n",
+        { headers: { "content-type": "text/plain" } },
+      );
+    }
+    return err(404, `unknown route: ${path}`);
 }
 
 export default {

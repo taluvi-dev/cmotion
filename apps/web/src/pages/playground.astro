@@ -197,7 +197,10 @@ scene quick(duration: Duration = 3s) -> Frame {
 
     <script>
       const API_BASE = "https://api.cmotion.org";
-      const POLL_MS = 1500;
+      // Polling cadence — videos render slow (~3× duration + cold
+      // start), so we don't want to hammer /v1/jobs/<id> every 1.5s
+      // for a job we know will take 20+ seconds.
+      const POLL_MS = { frame: 1500, video: 3000 } as const;
 
       const $ = (id: string) => document.getElementById(id)!;
       const srcEl = $("src") as HTMLTextAreaElement;
@@ -265,7 +268,13 @@ scene quick(duration: Duration = 3s) -> Frame {
           if (!Number.isNaN(duration)) params.duration = duration;
         }
 
-        const res = await fetch(`${API_BASE}/v1/${kind}`, {
+        // Note the endpoint and the "kind" disagree by design:
+        //   POST /v1/frame    → kind=frame
+        //   POST /v1/render   → kind=video
+        // The API endpoint name follows the verb (render / frame);
+        // the kind on the job is what's stored.
+        const endpoint = kind === "frame" ? "/v1/frame" : "/v1/render";
+        const res = await fetch(`${API_BASE}${endpoint}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ source, params }),
@@ -278,14 +287,15 @@ scene quick(duration: Duration = 3s) -> Frame {
         return body.job_id;
       }
 
-      async function poll(id: string): Promise<any> {
+      async function poll(id: string, kind: "frame" | "video"): Promise<any> {
         let n = 0;
+        const interval = POLL_MS[kind];
         while (true) {
-          await new Promise((r) => setTimeout(r, POLL_MS));
+          await new Promise((r) => setTimeout(r, interval));
           n += 1;
           const res = await fetch(`${API_BASE}/v1/jobs/${id}`);
           const body = await res.json();
-          appendStatus(`poll #${n} → ${body.status}`);
+          appendStatus(`poll #${n} (${interval}ms) → ${body.status}`);
           if (body.status === "ready") return body;
           if (body.status === "error") {
             throw new Error(body.message || "render failed");
@@ -302,8 +312,8 @@ scene quick(duration: Duration = 3s) -> Frame {
           setStatus(`POST /v1/${kind} …`);
           const id = await enqueue(kind);
           appendStatus(`job_id = ${id}`);
-          appendStatus(`polling every ${POLL_MS}ms …`);
-          const ready = await poll(id);
+          appendStatus(`polling every ${POLL_MS[kind]}ms …`);
+          const ready = await poll(id, kind);
           const url = `${API_BASE}${ready.url}`;
           const ms = Math.round(performance.now() - t0);
           appendStatus(`ready in ${ms} ms`);
