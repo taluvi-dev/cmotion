@@ -41,6 +41,21 @@ that aren't always obvious from the source.
 - From the repo root, `pnpm install` covers `apps/web` and the
   tree-sitter package; `pnpm dev` runs the web app.
 
+## Deploy
+
+There is **no automated git-triggered deploy** for cmotion.org. The
+site ships only when someone runs the deploy manually from a checkout
+that has `wrangler` auth and access to the Cloudflare account that
+owns the Pages project. Pushing to `main` does **not** publish.
+
+- `pnpm deploy:web` (from the repo root) — builds `apps/web` (the
+  `prebuild` hook copies the WASM artifact into `public/`) and runs
+  `wrangler pages deploy apps/web/dist --project-name cmotion-web`.
+- The repo is public, so the Cloudflare account ID is **not** baked
+  into any file. Set `CLOUDFLARE_ACCOUNT_ID` in the environment
+  before running `deploy:web` if your wrangler login is associated
+  with more than one account.
+
 ## Where things live in `apps/cli/src/`
 
 - `main.zig` — entry point, stdio + arg plumbing, `refAllDecls` smoke

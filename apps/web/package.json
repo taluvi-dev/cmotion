@@ -16,8 +16,12 @@
   },
   "dependencies": {
     "@astrojs/starlight": "^0.39.2",
+    "@codemirror/commands": "^6.7.1",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.36.4",
     "@types/three": "^0.184.1",
     "astro": "^6.3.1",
+    "codemirror": "^6.0.1",
     "opentype.js": "^2.0.0",
     "sharp": "^0.34.5",
     "three": "^0.184.0"

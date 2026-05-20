@@ -103,12 +103,18 @@ scene title(duration: Duration = 6s) -> Frame {
       .pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
       .pane + .pane { border-left: 1px solid var(--hair); }
       .editor { position: relative; }
-      .editor textarea {
-        flex: 1; width: 100%; height: 100%; box-sizing: border-box;
-        padding: 16px; border: 0; outline: 0; resize: none; background: var(--panel);
-        font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-        color: var(--fg); tab-size: 2;
-      }
+      .code-toolbar { display: flex; align-items: center; gap: 6px;
+        padding: 6px 10px; border-bottom: 1px solid var(--hair); background: var(--bg);
+        flex-shrink: 0; }
+      .code-toolbar .ic { background: transparent; color: var(--fg);
+        border: 1px solid var(--hair); padding: 3px 9px; border-radius: 4px;
+        font-size: 12px; font-weight: 500; cursor: pointer; font-family: inherit; }
+      .code-toolbar .ic:hover:not(:disabled) { background: var(--panel); }
+      .code-toolbar .ic:disabled { opacity: 0.35; cursor: not-allowed; }
+      .code-toolbar .sep { width: 1px; height: 16px; background: var(--hair); margin: 0 4px; }
+      .code-toolbar .spacer { flex: 1; }
+      .editor .cm-host { flex: 1; width: 100%; min-height: 0;
+        background: var(--panel); }
       .stage { position: relative; background: #111; display: flex;
         align-items: center; justify-content: center; padding: 20px; box-sizing: border-box;
         overflow: hidden; }
@@ -125,6 +131,46 @@ scene title(duration: Duration = 6s) -> Frame {
       .controls .t { font-variant-numeric: tabular-nums; color: var(--muted);
         min-width: 88px; font-size: 12px; text-align: right; }
     </style>
+
+    <!--
+      CodeMirror's DOM (`.cm-editor`, `.cm-content`, …) is created by JS
+      after the Astro markup is rendered, so it has no `data-astro-cid`
+      scope attribute. The completion popover (`.cm-cmotion-*`) is also
+      JS-created. Both have to be styled in a global block — scoped rules
+      simply don't match.
+    -->
+    <style is:global>
+      .cm-editor { height: 100%; outline: none; background: var(--panel); }
+      .cm-editor.cm-focused { outline: none; }
+      .cm-scroller {
+        font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        padding: 16px 0;
+      }
+      .cm-content { caret-color: var(--fg); color: var(--fg); }
+      .cm-gutters { background: var(--panel); border-right: 1px solid var(--hair);
+        color: var(--muted); }
+      .cm-activeLine { background: rgba(0,0,0,0.025); }
+      .cm-activeLineGutter { background: rgba(0,0,0,0.04); }
+      .cm-selectionBackground { background: rgba(0,0,0,0.12) !important; }
+      .cm-cursor { border-left-color: var(--fg); }
+
+      .cm-cmotion-popover {
+        position: fixed; z-index: 50;
+        background: #fff; border: 1px solid #d8d8d8; border-radius: 6px;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        max-height: 240px; overflow-y: auto;
+        min-width: 200px; padding: 4px 0;
+        color: #000;
+      }
+      .cm-cmotion-item { display: flex; gap: 10px; padding: 3px 10px; cursor: pointer;
+        white-space: nowrap; align-items: baseline; }
+      .cm-cmotion-item.sel { background: #000; color: #fff; }
+      .cm-cmotion-item.sel .cm-cmotion-sig { color: rgba(255,255,255,0.65); }
+      .cm-cmotion-name { font-weight: 600; }
+      .cm-cmotion-sig { color: #777; font-size: 11px; }
+      .cm-cmotion-empty { padding: 6px 10px; color: #777; font-style: italic; }
+    </style>
   </head>
   <body>
     <header>
@@ -139,7 +185,14 @@ scene title(duration: Duration = 6s) -> Frame {
 
     <main id="layout">
       <section class="pane editor">
-        <textarea id="src" spellcheck="false" autocapitalize="off" autocorrect="off">{initialSource}</textarea>
+        <div class="code-toolbar">
+          <button class="ic" id="btn-undo" title="Undo (⌘Z)" disabled>↶ Undo</button>
+          <button class="ic" id="btn-redo" title="Redo (⌘⇧Z)" disabled>↷ Redo</button>
+          <span class="sep"></span>
+          <button class="ic" id="btn-copy" title="Copy all to clipboard">Copy</button>
+          <button class="ic" id="btn-clear" title="Clear the editor">Clear</button>
+        </div>
+        <div id="src" class="cm-host" data-initial-source={initialSource}></div>
       </section>
 
       <section class="pane stage">
@@ -157,9 +210,78 @@ scene title(duration: Duration = 6s) -> Frame {
     <script>
       import { boot } from "../scripts/cmotion-viewer.ts";
       import { saveOrShare } from "../scripts/save.ts";
+      import { EditorView, keymap, lineNumbers, highlightActiveLine,
+        highlightActiveLineGutter, drawSelection } from "@codemirror/view";
+      import { EditorState } from "@codemirror/state";
+      import { history, defaultKeymap, historyKeymap, indentWithTab,
+        undo, redo, undoDepth, redoDepth } from "@codemirror/commands";
+      import { cmotionCompletion } from "../scripts/cmotion-completion.ts";
 
       const canvas = document.getElementById("stage") as HTMLCanvasElement;
-      const srcEl = document.getElementById("src") as HTMLTextAreaElement;
+      const srcHost = document.getElementById("src") as HTMLDivElement;
+      // The initial program lives on the host element as a data attribute so
+      // we keep one server-rendered source of truth between SSR and the CM
+      // initial doc.
+      const initialDoc = srcHost.dataset.initialSource ?? "";
+      delete srcHost.dataset.initialSource;
+      const btnUndo = document.getElementById("btn-undo") as HTMLButtonElement;
+      const btnRedo = document.getElementById("btn-redo") as HTMLButtonElement;
+      const btnCopy = document.getElementById("btn-copy") as HTMLButtonElement;
+      const btnClear = document.getElementById("btn-clear") as HTMLButtonElement;
+
+      function refreshHistoryButtons() {
+        btnUndo.disabled = undoDepth(cmView.state) === 0;
+        btnRedo.disabled = redoDepth(cmView.state) === 0;
+      }
+      const cmView = new EditorView({
+        parent: srcHost,
+        state: EditorState.create({
+          doc: initialDoc,
+          extensions: [
+            lineNumbers(),
+            highlightActiveLine(),
+            highlightActiveLineGutter(),
+            drawSelection(),
+            history(),
+            EditorState.tabSize.of(2),
+            EditorView.lineWrapping,
+            cmotionCompletion(),
+            keymap.of([indentWithTab, ...historyKeymap, ...defaultKeymap]),
+            EditorView.updateListener.of((u) => {
+              if (u.docChanged || u.transactions.some((t) => t.isUserEvent("undo") || t.isUserEvent("redo"))) {
+                refreshHistoryButtons();
+              }
+            }),
+          ],
+        }),
+      });
+      refreshHistoryButtons();
+
+      btnUndo.addEventListener("click", () => { undo(cmView); cmView.focus(); });
+      btnRedo.addEventListener("click", () => { redo(cmView); cmView.focus(); });
+      btnCopy.addEventListener("click", async () => {
+        const text = cmView.state.doc.toString();
+        try {
+          await navigator.clipboard.writeText(text);
+          setStatus(`copied ${text.length} chars to clipboard`);
+        } catch (e: any) {
+          setStatus(`copy failed: ${e.message}`, true);
+        }
+      });
+      btnClear.addEventListener("click", () => {
+        cmView.dispatch({ changes: { from: 0, to: cmView.state.doc.length, insert: "" } });
+        cmView.focus();
+      });
+      // Adapter so the rest of the file can keep reading/writing `srcEl.value`
+      // exactly as it did with the textarea.
+      const srcEl = {
+        get value() { return cmView.state.doc.toString(); },
+        set value(v: string) {
+          cmView.dispatch({
+            changes: { from: 0, to: cmView.state.doc.length, insert: v },
+          });
+        },
+      };
       const statusEl = document.getElementById("status") as HTMLElement;
       const btnRender = document.getElementById("btn-render") as HTMLButtonElement;
       const btnPlay = document.getElementById("btn-play") as HTMLButtonElement;
@@ -318,8 +440,19 @@ scene title(duration: Duration = 6s) -> Frame {
         btnWebm.textContent = "recording…";
         setStatus(`recording ${view.durationSeconds.toFixed(1)}s clip…`);
         setPlaying(false);
+        // Reset the timeline so the recording starts from t=0 and the scrub
+        // bar visibly tracks playback as the clip is captured.
+        const d = view.durationSeconds;
+        view.seek(0);
+        scrub.value = "0";
+        tVal.textContent = formatTime(0, d);
         try {
-          const { blob, ext } = await view.captureClip();
+          const { blob, ext } = await view.captureClip({
+            onProgress: (t) => {
+              scrub.value = String(t);
+              tVal.textContent = formatTime(t, d);
+            },
+          });
           if (!blob.size) throw new Error("recording produced 0 bytes");
           pendingClip = {
             blob,

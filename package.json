@@ -7,7 +7,8 @@
     "dev": "pnpm --filter @cmotion/web dev",
     "build": "pnpm -r build",
     "check": "pnpm -r check",
-    "lint": "pnpm -r lint"
+    "lint": "pnpm -r lint",
+    "deploy:web": "pnpm --filter @cmotion/web build && wrangler pages deploy apps/web/dist --project-name cmotion-web"
   },
   "packageManager": "pnpm@10.33.0",
   "engines": {

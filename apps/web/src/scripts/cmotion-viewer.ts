@@ -611,7 +611,11 @@ export interface ViewerHandle {
   durationSeconds: number;
   versions: { cmotion: string; three: string };
   captureFrame(): Promise<Blob | null>;
-  captureClip(durationSeconds?: number, fps?: number): Promise<{ blob: Blob; ext: string; mime: string }>;
+  captureClip(opts?: {
+    duration?: number;
+    fps?: number;
+    onProgress?: (t: number) => void;
+  }): Promise<{ blob: Blob; ext: string; mime: string }>;
   destroy(): void;
 }
 
@@ -744,7 +748,10 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
         canvas.toBlob((b) => resolve(b), "image/png"),
       );
     },
-    captureClip(duration = durationSeconds, fps = 30) {
+    captureClip(opts: { duration?: number; fps?: number; onProgress?: (t: number) => void } = {}) {
+      const duration = opts.duration ?? durationSeconds;
+      const fps = opts.fps ?? 30;
+      const onProgress = opts.onProgress;
       // iOS (all iPad/iPhone browsers use WebKit) can't play WebM and its
       // MediaRecorder only outputs MP4, so we hard-skip WebM there. Elsewhere
       // (Chromium/Firefox desktop) WebM/VP9 is the most reliable canvas
@@ -783,12 +790,13 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
         const tick = () => {
           const elapsed = (performance.now() - t0) / 1000;
           if (elapsed >= duration) {
-            try { applyFrame(duration); } catch {}
+            try { applyFrame(duration); onProgress?.(duration); } catch {}
             setTimeout(() => rec.stop(), 100);
             return;
           }
           try {
             applyFrame(elapsed);
+            onProgress?.(elapsed);
           } catch (err: any) {
             rec.stop();
             reject(err);
