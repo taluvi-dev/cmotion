@@ -36,6 +36,11 @@ const Mesh = mesh_mod.Mesh;
 pub const Light = union(enum) {
     ambient: struct { intensity: f32, color: [3]u8 = .{ 255, 255, 255 } },
     directional: struct { direction: Vec3, intensity: f32, color: [3]u8 = .{ 255, 255, 255 } },
+    /// Positional light with smooth distance falloff — a soft pool that
+    /// brightens surfaces near `position` and fades out by `range`. Used
+    /// for the title's sweeping "spotlight". Needs the fragment's world
+    /// position, so shading interpolates it per fragment.
+    point: struct { position: Vec3, intensity: f32, range: f32 = 600, color: [3]u8 = .{ 255, 255, 255 } },
 };
 
 pub const Material = struct {
@@ -134,6 +139,7 @@ pub fn drawMesh(
     const n = mesh.positions.len;
     const screen = try arena.alloc(Vec3, n); // (x_screen, y_screen, depth)
     const world_normal = try arena.alloc(Vec3, n);
+    const world_pos = try arena.alloc(Vec3, n); // model-space → world, for point lights
     var v: usize = 0;
     while (v < n) : (v += 1) {
         const p = mesh.positions[v];
@@ -144,6 +150,7 @@ pub fn drawMesh(
         const sy = (1.0 - (ndc.y * 0.5 + 0.5)) * @as(f32, @floatFromInt(fb.height));
         screen[v] = .{ .x = sx, .y = sy, .z = ndc.z };
         world_normal[v] = model.mulDirection(mesh.normals[v]).normalise();
+        world_pos[v] = model.mulPoint(p);
     }
 
     // Pre-compute each triangle's screen-space y-extent. Each worker
@@ -180,6 +187,7 @@ pub fn drawMesh(
             .zbuf = zbuf,
             .screen = screen,
             .normals = world_normal,
+            .world_pos = world_pos,
             .indices = mesh.indices,
             .tri_y_min = tri_y_min,
             .tri_y_max = tri_y_max,
@@ -202,6 +210,7 @@ pub fn drawMesh(
             .zbuf = zbuf,
             .screen = screen,
             .normals = world_normal,
+            .world_pos = world_pos,
             .indices = mesh.indices,
             .tri_y_min = tri_y_min,
             .tri_y_max = tri_y_max,
@@ -220,6 +229,7 @@ const BandArgs = struct {
     zbuf: []f32,
     screen: []const Vec3,
     normals: []const Vec3,
+    world_pos: []const Vec3,
     indices: []const u32,
     tri_y_min: []const f32,
     tri_y_max: []const f32,
@@ -254,6 +264,9 @@ fn rasteriseBand(args: BandArgs) void {
             args.normals[ia],
             args.normals[ib],
             args.normals[ic],
+            args.world_pos[ia],
+            args.world_pos[ib],
+            args.world_pos[ic],
             args.material,
             args.lights,
             args.y_start,
@@ -363,6 +376,9 @@ fn rasteriseTriangleClipped(
     na: Vec3,
     nb: Vec3,
     nc: Vec3,
+    wpa: Vec3,
+    wpb: Vec3,
+    wpc: Vec3,
     material: Material,
     lights: []const Light,
     y_start: u32,
@@ -425,7 +441,12 @@ fn rasteriseTriangleClipped(
                 .y = wa * na.y + wb * nb.y + wc * nc.y,
                 .z = wa * na.z + wb * nb.z + wc * nc.z,
             };
-            const shaded = shade(n.normalise(), material, lights);
+            const frag_pos = Vec3{
+                .x = wa * wpa.x + wb * wpb.x + wc * wpc.x,
+                .y = wa * wpa.y + wb * wpb.y + wc * wpc.y,
+                .z = wa * wpa.z + wb * wpb.z + wc * wpc.z,
+            };
+            const shaded = shade(n.normalise(), frag_pos, material, lights);
             writePixel(fb, @intCast(px), @intCast(py), shaded);
         }
     }
@@ -448,7 +469,7 @@ const Vec3F = @Vector(3, f32);
 /// procedural environment (sky/horizon/ground + HDR sun) sampled
 /// along N and R for ambient + reflection. ACES filmic tone
 /// mapping + sRGB gamma encoding produces the final 8-bit output.
-fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
+fn shade(normal: Vec3, frag_pos: Vec3, material: Material, lights: []const Light) [4]u8 {
     const albedo: Vec3F = .{
         srgbDecode(material.albedo[0]),
         srgbDecode(material.albedo[1]),
@@ -550,6 +571,27 @@ fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
                 const diffuse = k_d * albedo * inv_pi;
 
                 lit += (diffuse + specular) * irradiance * tint;
+            },
+            .point => |pt| {
+                const to = pt.position.sub(frag_pos);
+                const dist = to.length();
+                const L = to.normalise();
+                const n_dot_l = normal.dot(L);
+                if (n_dot_l <= 0) continue;
+                // Smooth windowed falloff: full at the centre, zero by `range`.
+                const fall = @max(0.0, 1.0 - dist / pt.range);
+                const atten = fall * fall;
+                if (atten <= 0) continue;
+                const tint = Vec3F{
+                    srgbDecode(pt.color[0]),
+                    srgbDecode(pt.color[1]),
+                    srgbDecode(pt.color[2]),
+                };
+                const e: Vec3F = @splat(pt.intensity * n_dot_l * atten);
+                const H = L.add(view).normalise();
+                const n_dot_h = @max(0.0, normal.dot(H));
+                const spec_v: Vec3F = @splat(std.math.pow(f32, n_dot_h, 32.0) * 0.5);
+                lit += (albedo * one_minus_m + spec_v) * e * tint;
             },
         }
     }
@@ -724,7 +766,7 @@ test "shade: a face pointed away from a directional light stays black under no a
         .intensity = 1.0,
     } }};
     // Surface normal points -z → away from the incoming light.
-    const rgba = shade(.{ .x = 0, .y = 0, .z = -1 }, .{ .albedo = .{ 255, 0, 0, 255 } }, &lights);
+    const rgba = shade(.{ .x = 0, .y = 0, .z = -1 }, .{ .x = 0, .y = 0, .z = 0 }, .{ .albedo = .{ 255, 0, 0, 255 } }, &lights);
     try std.testing.expectEqual(@as(u8, 0), rgba[0]);
 }
 
@@ -740,7 +782,7 @@ test "shade: a face pointed into a directional light receives bright red" {
     // and dominates over the other channels. The tiny green/blue
     // spill (~10) is the dielectric Schlick Fresnel — F0=0.04
     // white means ~4 % of the specular tints toward white.
-    const rgba = shade(.{ .x = 0, .y = 0, .z = 1 }, .{ .albedo = .{ 255, 0, 0, 255 } }, &lights);
+    const rgba = shade(.{ .x = 0, .y = 0, .z = 1 }, .{ .x = 0, .y = 0, .z = 0 }, .{ .albedo = .{ 255, 0, 0, 255 } }, &lights);
     try std.testing.expect(rgba[0] > 150);
     try std.testing.expect(rgba[0] > rgba[1] * 5);
     try std.testing.expect(rgba[0] > rgba[2] * 5);
@@ -761,11 +803,13 @@ test "shade: a metallic surface tints its specular highlight with the albedo" {
     } }};
     const metal = shade(
         .{ .x = 0, .y = 0, .z = 1 },
+        .{ .x = 0, .y = 0, .z = 0 },
         .{ .albedo = .{ 255, 0, 0, 255 }, .metalness = 1.0, .roughness = 0.2 },
         &lights,
     );
     const plastic = shade(
         .{ .x = 0, .y = 0, .z = 1 },
+        .{ .x = 0, .y = 0, .z = 0 },
         .{ .albedo = .{ 255, 0, 0, 255 }, .metalness = 0.0, .roughness = 0.2 },
         &lights,
     );
@@ -792,11 +836,13 @@ test "shade: roughness widens the specular highlight" {
     const normal = Vec3{ .x = 0.259, .y = 0, .z = 0.966 };
     const mirror = shade(
         normal,
+        .{ .x = 0, .y = 0, .z = 0 },
         .{ .albedo = .{ 200, 200, 200, 255 }, .metalness = 1.0, .roughness = 0.04 },
         &lights,
     );
     const rough = shade(
         normal,
+        .{ .x = 0, .y = 0, .z = 0 },
         .{ .albedo = .{ 200, 200, 200, 255 }, .metalness = 1.0, .roughness = 0.5 },
         &lights,
     );

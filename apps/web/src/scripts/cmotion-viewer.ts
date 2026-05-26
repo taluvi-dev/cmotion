@@ -666,6 +666,20 @@ function buildDirectional(node: JsonNode): THREE.Light {
   return light;
 }
 
+// spotlight(at: vec3, intensity:, range:, color:?) — a positional pool with
+// distance falloff (the title's drifting highlight). px → world via pxToWorld;
+// physical decay localises it so it brightens letters near `at` and fades out.
+function buildPointLight(node: JsonNode): THREE.Light {
+  const f = namedFields(node);
+  const at = (f.at ?? f.position)?.kind === "constructed" && (f.at ?? f.position)!.name === "vec3"
+    ? buildVec3(f.at ?? f.position)
+    : new THREE.Vector3();
+  const range = numberOf(f.range, 600) * pxToWorld;
+  const light = new THREE.PointLight(lightColor(node), numberOf(f.intensity, 1), range, 2);
+  light.position.set(at.x * pxToWorld, at.y * pxToWorld, at.z * pxToWorld);
+  return light;
+}
+
 function buildRender3d(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   const args = positionalArgs(node);
   const f = namedFields(node);
@@ -674,6 +688,7 @@ function buildRender3d(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
     if (ln?.kind !== "constructed") continue;
     if (ln.name === "ambient") ctx.lights.push(buildAmbient(ln));
     else if (ln.name === "directional") ctx.lights.push(buildDirectional(ln));
+    else if (ln.name === "spotlight" || ln.name === "point") ctx.lights.push(buildPointLight(ln));
   }
   return buildLayer(args[0], ctx);
 }

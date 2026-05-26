@@ -98,7 +98,10 @@ scene title(duration: Duration = 12s) -> Frame {
   // wobble on the key keeps the highlights alive.
   let key  = directional(from: vec3(wave(amplitude: 3, period: 8s), 4, 6), intensity: 1.7);
   let fill = directional(from: vec3(-4, -2, 4), intensity: 0.8);
-  let lights = [ ambient(0.40), key, fill ];
+  // A subtle spotlight pool drifts across the word (most visible at rest).
+  let sweepx = animate { 0s => -1100px, 6s => 1100px, 12s => -1100px } with { easing: easing.in_out_cubic };
+  let spot   = spotlight(at: vec3(sweepx, 120px, 360px), intensity: 4.0, range: 820px, color: oklch(0.98, 0.01, 95));
+  let lights = [ ambient(0.40), key, fill, spot ];
 
   // Each letter a different bright colour, scattered (not a smooth ramp).
   let c0 = extrude(text.glyph("c", size: 430px), depth: 43px).material(fill: oklch(0.70, 0.20,  25), metalness: 0.0, roughness: 0.45).rotate(y: r0).translate(x: -567px);

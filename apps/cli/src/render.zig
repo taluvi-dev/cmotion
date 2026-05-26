@@ -835,6 +835,20 @@ fn parseLights(arena: std.mem.Allocator, lights_v: ?value.Value) ![]const render
                 }
             }
             try out.append(.{ .directional = .{ .direction = direction, .intensity = intensity, .color = readLightColor(lc) } });
+        } else if (std.mem.eql(u8, lc.name, "spotlight") or std.mem.eql(u8, lc.name, "point")) {
+            var position: mesh_mod.Vec3 = .{ .x = 0, .y = 0, .z = 0 };
+            var intensity: f32 = 1.0;
+            var range: f32 = 600;
+            for (lc.fields) |f| {
+                if (std.mem.eql(u8, f.name, "at") or std.mem.eql(u8, f.name, "position")) {
+                    if (readVec3(f.value)) |v| position = v;
+                } else if (std.mem.eql(u8, f.name, "intensity")) {
+                    if (numberAsF32(f.value)) |n| intensity = n;
+                } else if (std.mem.eql(u8, f.name, "range")) {
+                    if (numberAsF32(f.value)) |n| range = n;
+                }
+            }
+            try out.append(.{ .point = .{ .position = position, .intensity = intensity, .range = range, .color = readLightColor(lc) } });
         }
     }
     return try out.toOwnedSlice();
