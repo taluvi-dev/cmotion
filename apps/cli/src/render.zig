@@ -499,6 +499,19 @@ fn paint3DTree(
     if (v != .constructed) return;
     const c = v.constructed;
 
+    // A `compose [...]` inside a 3D scene groups several objects under
+    // one camera + light rig (e.g. a title built from one extrude per
+    // letter). Paint each child with the same accumulated state.
+    if (std.mem.eql(u8, c.name, "compose")) {
+        for (c.fields) |f| {
+            if (std.mem.eql(u8, f.name, "layers") and f.value == .array) {
+                for (f.value.array.elems) |layer| {
+                    try paint3DTree(arena, layer, fb, transform, style, lights, camera, off);
+                }
+            }
+        }
+        return;
+    }
     if (std.mem.eql(u8, c.name, "rotate")) {
         const new_transform = applyRotateArgs(c, transform);
         if (firstPositional(c)) |child| try paint3DTree(arena, child, fb, new_transform, style, lights, camera, off);
@@ -810,7 +823,7 @@ fn parseLights(arena: std.mem.Allocator, lights_v: ?value.Value) ![]const render
         const lc = elem.constructed;
         if (std.mem.eql(u8, lc.name, "ambient")) {
             const intensity = readIntensityArg(lc) orelse 0.3;
-            try out.append(.{ .ambient = .{ .intensity = intensity } });
+            try out.append(.{ .ambient = .{ .intensity = intensity, .color = readLightColor(lc) } });
         } else if (std.mem.eql(u8, lc.name, "directional")) {
             var direction: mesh_mod.Vec3 = .{ .x = 0, .y = 0, .z = -1 };
             var intensity: f32 = 1.0;
@@ -821,10 +834,23 @@ fn parseLights(arena: std.mem.Allocator, lights_v: ?value.Value) ![]const render
                     if (numberAsF32(f.value)) |n| intensity = n;
                 }
             }
-            try out.append(.{ .directional = .{ .direction = direction, .intensity = intensity } });
+            try out.append(.{ .directional = .{ .direction = direction, .intensity = intensity, .color = readLightColor(lc) } });
         }
     }
     return try out.toOwnedSlice();
+}
+
+/// Read an optional `color:`/`tint:` on a light into an sRGB triple
+/// (white when absent). Animated colours arrive here already sampled
+/// to a concrete value at `t`, so a wave/animate on the hue just works.
+fn readLightColor(c: value.Constructed) [3]u8 {
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "color") or std.mem.eql(u8, f.name, "tint")) {
+            const rgba = valueToRgba(f.value);
+            return .{ rgba[0], rgba[1], rgba[2] };
+        }
+    }
+    return .{ 255, 255, 255 };
 }
 
 fn readIntensityArg(c: value.Constructed) ?f32 {

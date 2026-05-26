@@ -51,16 +51,19 @@ scene title(duration: Duration = 6s) -> Frame {
 }
 `;
 
-// The title example: a whole word extruded into 3D. `text.glyph`
-// lays the string out glyph-by-glyph, so a full 360° spin would leave
-// it mirrored for half the loop — a gentle y-sway keeps it readable
-// while the hue cycles, the scale pulses, and a slow x-wave nods it.
+// The title example: "cmotion" built from one extruded glyph per
+// letter, so each can turn on its own Y axis. The letters spin in,
+// staggered, settle by ~4s, then sit quiet while two coloured lights
+// sweep the hue wheel and wobble their direction.
 //
-// Every motion is tuned to loop seamlessly over the 12s duration: a
-// `wave` is `sin(2π·t/period)`, so it only returns to its start (value
-// *and* slope) when `period` divides the loop evenly. sway = 12s/2,
-// wobble = 12s/1, and the 4s hue cycle fits 3×. A mismatched period
-// snaps back mid-swing at the loop point.
+// `camera(distance: 2166)` makes the native 3D view exactly 1080 world-
+// px tall, so `size:` and `translate(x:)` are real fractions of the
+// background — the same pixel-honest mapping the web viewer uses. That's
+// what lets the hand-placed per-letter advances line up identically in
+// both renderers. (The homepage keeps the default camera and is
+// untouched.) Everything is tuned to loop seamlessly over 12s: each
+// 360° spin lands back at 0°, and the hue cycle + wobble waves (periods
+// 6s, 4s) all divide 12 evenly.
 export const TITLE_SOURCE = `runner "0.0.1";
 
 use std.shapes.*;
@@ -72,34 +75,35 @@ use std.anim.*;
 
 scene title(duration: Duration = 12s) -> Frame {
   let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
+  let m  = oklch(0.66, 0.01, 290deg);
 
-  let sway   = wave(amplitude: 14deg, period: 6s);
-  let hue    = animate { 0s => 280deg, 4s => 640deg } with { repeat: forever };
-  let pulse  = animate {
-                 0s    => 1.00,
-                 500ms => 1.03,
-                 1s    => 1.00,
-               } with { easing: easing.out_cubic, repeat: forever };
-  let wobble = wave(amplitude: 5deg, period: 12s);
+  // Per-letter Y spin, staggered by 0.3s, each 360° over 2s then held.
+  let r0 = animate { 0s => 0deg, 2.0s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
+  let r1 = animate { 0s => 0deg, 0.3s => 0deg, 2.3s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
+  let r2 = animate { 0s => 0deg, 0.6s => 0deg, 2.6s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
+  let r3 = animate { 0s => 0deg, 0.9s => 0deg, 2.9s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
+  let r4 = animate { 0s => 0deg, 1.2s => 0deg, 3.2s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
+  let r5 = animate { 0s => 0deg, 1.5s => 0deg, 3.5s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
+  let r6 = animate { 0s => 0deg, 1.8s => 0deg, 3.8s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
 
-  let title = extrude(text.glyph("cmotion"), depth: 16px)
-                .material(fill: oklch(0.78, 0.20, hue),
-                          metalness: 0.25,
-                          roughness: 0.35,
-                          emissive: oklch(0.65, 0.18, hue),
-                          emissive_intensity: 0.6)
-                .rotate(x: wobble, y: sway)
-                .scale(pulse);
+  // Two coloured lights sweep the hue wheel (analogous, +60°) and wobble.
+  let hue1 = animate { 0s => 0deg,  12s => 360deg } with { repeat: forever };
+  let hue2 = animate { 0s => 60deg, 12s => 420deg } with { repeat: forever };
+  let key  = directional(from: vec3(wave(amplitude: 4, period: 6s), 2, 6),  intensity: 2.4, color: oklch(0.70, 0.27, hue1));
+  let fill = directional(from: vec3(wave(amplitude: 3, period: 4s), -3, 4), intensity: 1.5, color: oklch(0.70, 0.27, hue2));
+  let lights = [ ambient(0.16), key, fill ];
 
-  let lights = [
-    ambient(0.35),
-    directional(from: vec3(3, 4, 5),    intensity: 1.6),
-    directional(from: vec3(-4, -2, -3), intensity: 0.9),
-  ];
+  let c0 = extrude(text.glyph("c", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r0).translate(x: -475px);
+  let c1 = extrude(text.glyph("m", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r1).translate(x: -262px);
+  let c2 = extrude(text.glyph("o", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r2).translate(x: -49px);
+  let c3 = extrude(text.glyph("t", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r3).translate(x: 90px);
+  let c4 = extrude(text.glyph("i", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r4).translate(x: 188px);
+  let c5 = extrude(text.glyph("o", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r5).translate(x: 308px);
+  let c6 = extrude(text.glyph("n", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r6).translate(x: 477px);
 
   compose [
     bg,
-    render3d(title, lights: lights),
+    render3d(compose [c0, c1, c2, c3, c4, c5, c6], lights: lights, camera: camera(distance: 2166)),
   ]
 }
 `;
