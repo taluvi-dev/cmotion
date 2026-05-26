@@ -74,8 +74,8 @@ use std.scene3d.*;
 use std.anim.*;
 
 scene title(duration: Duration = 12s) -> Frame {
-  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.93, 0.015, 280));
-  let m  = oklch(0.50, 0.04, 290deg);
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.97, 0.012, 95));
+  let m  = oklch(0.52, 0.02, 95deg);
 
   // Per-letter Y spin, staggered by 0.3s, each 360° over 2s then held.
   let r0 = animate { 0s => 0deg, 2.0s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
@@ -85,22 +85,23 @@ scene title(duration: Duration = 12s) -> Frame {
   let r5 = animate { 0s => 0deg, 1.5s => 0deg, 3.5s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
   let r6 = animate { 0s => 0deg, 1.8s => 0deg, 3.8s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
 
-  // The "i" hops up and down instead of spinning, and rests a little raised.
+  // The "i" hops up and down instead of spinning, and rests slightly raised.
   let ijump = animate {
-                0s   =>  60px,
+                0s   =>  30px,
                 1.3s => 250px,
-                2.1s =>  60px,
+                2.1s =>  30px,
                 2.8s => 165px,
-                3.5s =>  60px,
-                12s  =>  60px,
+                3.5s =>  30px,
+                12s  =>  30px,
               } with { easing: easing.in_out_cubic };
 
-  // Two coloured lights sweep the hue wheel (analogous, +60°) and wobble.
-  let hue1 = animate { 0s => 0deg,  12s => 360deg } with { repeat: forever };
-  let hue2 = animate { 0s => 60deg, 12s => 420deg } with { repeat: forever };
-  let key  = directional(from: vec3(wave(amplitude: 4, period: 6s), 2, 6),  intensity: 2.1, color: oklch(0.70, 0.27, hue1));
-  let fill = directional(from: vec3(wave(amplitude: 3, period: 4s), -3, 4), intensity: 1.4, color: oklch(0.70, 0.27, hue2));
-  let lights = [ ambient(0.22), key, fill ];
+  // Sunshine-reggae / coral-reef palette: one strong key light sweeps a warm
+  // tropical hue band (coral → gold → green → turquoise) while a soft warm
+  // fill + ambient keep it sunny. A single colour avoids muddy mixing.
+  let hue  = animate { 0s => 25deg, 6s => 200deg, 12s => 25deg } with { easing: easing.in_out_cubic, repeat: forever };
+  let key  = directional(from: vec3(wave(amplitude: 4, period: 6s), 2, 6),  intensity: 2.6, color: oklch(0.80, 0.22, hue));
+  let fill = directional(from: vec3(wave(amplitude: 3, period: 4s), -3, 4), intensity: 0.7, color: oklch(0.92, 0.04, 95));
+  let lights = [ ambient(0.26, color: oklch(0.93, 0.05, 95)), key, fill ];
 
   let c0 = extrude(text.glyph("c", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r0).translate(x: -567px);
   let c1 = extrude(text.glyph("m", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r1).translate(x: -313px);
