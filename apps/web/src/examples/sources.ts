@@ -74,32 +74,41 @@ use std.scene3d.*;
 use std.anim.*;
 
 scene title(duration: Duration = 12s) -> Frame {
-  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
-  let m  = oklch(0.66, 0.01, 290deg);
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.93, 0.015, 280));
+  let m  = oklch(0.50, 0.04, 290deg);
 
   // Per-letter Y spin, staggered by 0.3s, each 360° over 2s then held.
   let r0 = animate { 0s => 0deg, 2.0s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
   let r1 = animate { 0s => 0deg, 0.3s => 0deg, 2.3s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
   let r2 = animate { 0s => 0deg, 0.6s => 0deg, 2.6s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
   let r3 = animate { 0s => 0deg, 0.9s => 0deg, 2.9s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
-  let r4 = animate { 0s => 0deg, 1.2s => 0deg, 3.2s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
   let r5 = animate { 0s => 0deg, 1.5s => 0deg, 3.5s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
   let r6 = animate { 0s => 0deg, 1.8s => 0deg, 3.8s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
+
+  // The "i" hops up and down instead of spinning, and rests a little raised.
+  let ijump = animate {
+                0s   =>  60px,
+                1.3s => 250px,
+                2.1s =>  60px,
+                2.8s => 165px,
+                3.5s =>  60px,
+                12s  =>  60px,
+              } with { easing: easing.in_out_cubic };
 
   // Two coloured lights sweep the hue wheel (analogous, +60°) and wobble.
   let hue1 = animate { 0s => 0deg,  12s => 360deg } with { repeat: forever };
   let hue2 = animate { 0s => 60deg, 12s => 420deg } with { repeat: forever };
-  let key  = directional(from: vec3(wave(amplitude: 4, period: 6s), 2, 6),  intensity: 2.4, color: oklch(0.70, 0.27, hue1));
-  let fill = directional(from: vec3(wave(amplitude: 3, period: 4s), -3, 4), intensity: 1.5, color: oklch(0.70, 0.27, hue2));
-  let lights = [ ambient(0.16), key, fill ];
+  let key  = directional(from: vec3(wave(amplitude: 4, period: 6s), 2, 6),  intensity: 2.1, color: oklch(0.70, 0.27, hue1));
+  let fill = directional(from: vec3(wave(amplitude: 3, period: 4s), -3, 4), intensity: 1.4, color: oklch(0.70, 0.27, hue2));
+  let lights = [ ambient(0.22), key, fill ];
 
-  let c0 = extrude(text.glyph("c", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r0).translate(x: -475px);
-  let c1 = extrude(text.glyph("m", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r1).translate(x: -262px);
-  let c2 = extrude(text.glyph("o", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r2).translate(x: -49px);
-  let c3 = extrude(text.glyph("t", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r3).translate(x: 90px);
-  let c4 = extrude(text.glyph("i", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r4).translate(x: 188px);
-  let c5 = extrude(text.glyph("o", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r5).translate(x: 308px);
-  let c6 = extrude(text.glyph("n", size: 360px), depth: 36px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r6).translate(x: 477px);
+  let c0 = extrude(text.glyph("c", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r0).translate(x: -567px);
+  let c1 = extrude(text.glyph("m", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r1).translate(x: -313px);
+  let c2 = extrude(text.glyph("o", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r2).translate(x: -59px);
+  let c3 = extrude(text.glyph("t", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r3).translate(x: 108px);
+  let c4 = extrude(text.glyph("i", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).translate(x: 225px, y: ijump);
+  let c5 = extrude(text.glyph("o", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r5).translate(x: 368px);
+  let c6 = extrude(text.glyph("n", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r6).translate(x: 570px);
 
   compose [
     bg,
