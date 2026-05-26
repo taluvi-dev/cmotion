@@ -1,0 +1,20 @@
+---
+title: Lava lamp
+description: A raymarched smooth-union metaball field — blobs that merge and split while each keeps its volume.
+---
+
+import ExampleScene from '../../../../components/ExampleScene.astro';
+import { LAVA_LAMP_SOURCE } from '../../../../examples/sources.ts';
+
+A field of `metaballs` rendered as a raymarched signed-distance surface.
+Each `blob` keeps a constant radius — so it preserves its own volume —
+and bobs on its own `y` animation; where two blobs come close, the
+smooth-union (`smoothing:`) fuses them into one organic mass, and they
+pull apart again as they drift. The glossy red body, orange fresnel rim,
+and speculars come from the shader's lighting; the dark background reads
+through the gaps.
+
+The live preview below is the Three.js viewer raymarching the SDF in a
+fragment shader (the same path the cloud render service uses).
+
+<ExampleScene source={LAVA_LAMP_SOURCE} />

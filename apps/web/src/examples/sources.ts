@@ -165,3 +165,35 @@ scene bouncing_ball(
   compose [bg, scene]
 }
 `;
+
+// Lava lamp: a raymarched smooth-union metaball field (the Three.js viewer
+// renders `metaballs` as an SDF fragment shader). Each blob keeps a constant
+// radius — so it deforms by merging/separating from its neighbours while its
+// own volume is preserved — and bobs on its own y `animate` so the cluster
+// fuses and splits over the 12s loop. The dark background reads through the
+// gaps; the glossy red body + orange fresnel rim come from the shader's lights.
+export const LAVA_LAMP_SOURCE = `runner "0.0.1";
+
+use std.shapes.*;
+use std.scene3d.*;
+use std.anim.*;
+
+scene lava(duration: Duration = 12s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.08, 0.03, 285));
+
+  let blobs = [
+    blob(at: vec3(  10px, animate { 0s =>   30px, 6s =>  -70px, 12s =>   30px } with { easing: easing.in_out_cubic }, 0px), radius: 250px),
+    blob(at: vec3(-280px, animate { 0s =>  150px, 6s =>  270px, 12s =>  150px } with { easing: easing.in_out_cubic }, 0px), radius: 160px),
+    blob(at: vec3( 300px, animate { 0s =>  -10px, 6s =>  110px, 12s =>  -10px } with { easing: easing.in_out_cubic }, 0px), radius: 170px),
+    blob(at: vec3(-160px, animate { 0s => -240px, 6s => -110px, 12s => -240px } with { easing: easing.in_out_cubic }, 0px), radius: 150px),
+    blob(at: vec3( 230px, animate { 0s => -280px, 6s => -150px, 12s => -280px } with { easing: easing.in_out_cubic }, 0px), radius: 145px),
+    blob(at: vec3(-470px, animate { 0s =>   40px, 4s =>  -90px, 8s =>  140px, 12s =>   40px } with { easing: easing.in_out_cubic }, 0px), radius: 120px),
+    blob(at: vec3( 500px, animate { 0s =>  -90px, 4s =>   70px, 8s => -200px, 12s =>  -90px } with { easing: easing.in_out_cubic }, 0px), radius: 115px),
+  ];
+
+  compose [
+    bg,
+    metaballs(blobs, smoothing: 90px).material(roughness: 0.18),
+  ]
+}
+`;

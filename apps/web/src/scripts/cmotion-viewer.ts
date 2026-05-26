@@ -446,11 +446,149 @@ function buildExtrude(node: JsonNode, ctx: BuildCtx): THREE.Mesh | null {
   return new THREE.Mesh(geom, mat);
 }
 
+// metaballs([blob(at: vec3, radius:), ...], smoothing: <px>) — a raymarched
+// smooth-union SDF (lava-lamp blobs that merge/split). Rendered as a single
+// fragment shader on a camera-facing quad that fills the viewport; misses are
+// discarded so the scene background shows through. Blob centres/radii are px
+// (1080-frame) → world via pxToWorld, so it shares the title's pixel-honest
+// frame. `.material(fill, roughness, emissive)` feeds the shader uniforms
+// (see buildMaterial); the warm key/fill/rim rig is baked.
+const MAX_BLOBS = 24;
+
+const METABALL_VERT = /* glsl */ `
+  varying vec3 vWorldPos;
+  void main() {
+    vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const METABALL_FRAG = /* glsl */ `
+  precision highp float;
+  varying vec3 vWorldPos;
+  uniform vec4 uBlobs[${MAX_BLOBS}];   // xyz = centre (world), w = radius (world)
+  uniform int  uCount;
+  uniform float uK;
+  uniform vec3 uAlbedo;                 // linear
+  uniform vec3 uRim;                    // linear
+  uniform float uSpecExp;
+  uniform vec3 uKeyDir;  uniform vec3 uKeyCol;
+  uniform vec3 uFillDir; uniform vec3 uFillCol;
+
+  float smin(float a, float b, float k) {
+    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+  }
+  float map(vec3 p) {
+    float d = 1e9;
+    for (int i = 0; i < ${MAX_BLOBS}; i++) {
+      if (i >= uCount) break;
+      d = smin(d, length(p - uBlobs[i].xyz) - uBlobs[i].w, uK);
+    }
+    return d;
+  }
+  vec3 calcNormal(vec3 p) {
+    vec2 e = vec2(1.0, -1.0) * 0.0012;
+    return normalize(
+      e.xyy * map(p + e.xyy) + e.yyx * map(p + e.yyx) +
+      e.yxy * map(p + e.yxy) + e.xxx * map(p + e.xxx));
+  }
+  void main() {
+    vec3 ro = cameraPosition;
+    vec3 rd = normalize(vWorldPos - cameraPosition);
+    float t = 0.0;
+    bool hit = false;
+    vec3 p;
+    for (int i = 0; i < 180; i++) {
+      p = ro + rd * t;
+      float d = map(p);
+      if (d < 0.0006) { hit = true; break; }
+      t += d;
+      if (t > 16.0) break;
+    }
+    if (!hit) discard;
+    vec3 N = calcNormal(p);
+    vec3 V = -rd;
+    float dK = max(dot(N, uKeyDir), 0.0);
+    float dF = max(dot(N, uFillDir), 0.0);
+    vec3 H = normalize(uKeyDir + V);
+    float spec = pow(max(dot(N, H), 0.0), uSpecExp);
+    float fres = pow(1.0 - max(dot(N, V), 0.0), 2.5);
+    float amb = 0.10;
+    vec3 col = uAlbedo * (amb + dK * uKeyCol + dF * uFillCol)
+             + spec * 1.05
+             + fres * uRim * 1.4;
+    gl_FragColor = vec4(col, 1.0);
+    #include <colorspace_fragment>
+  }
+`;
+
+function buildMetaballs(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
+  const f = namedFields(node);
+  const args = positionalArgs(node);
+  const blobNodes = arrayElems(f.blobs ?? args[0]);
+  const blobs: THREE.Vector4[] = [];
+  for (const bn of blobNodes) {
+    if (bn?.kind !== "constructed" || bn.name !== "blob") continue;
+    const bf = namedFields(bn);
+    const at = bf.at?.kind === "constructed" && bf.at.name === "vec3"
+      ? buildVec3(bf.at)
+      : new THREE.Vector3();
+    const r = numberOf(bf.radius, 100) * pxToWorld;
+    blobs.push(new THREE.Vector4(at.x * pxToWorld, at.y * pxToWorld, at.z * pxToWorld, r));
+    if (blobs.length >= MAX_BLOBS) break;
+  }
+  if (blobs.length === 0) return null;
+  const padded = blobs.slice();
+  while (padded.length < MAX_BLOBS) padded.push(new THREE.Vector4(0, 0, 0, 0));
+
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: METABALL_VERT,
+    fragmentShader: METABALL_FRAG,
+    uniforms: {
+      uBlobs: { value: padded },
+      uCount: { value: blobs.length },
+      uK: { value: numberOf(f.smoothing, 80) * pxToWorld },
+      uAlbedo: { value: new THREE.Color(0.40, 0.035, 0.012) },
+      uRim: { value: new THREE.Color(1.0, 0.45, 0.10) },
+      uSpecExp: { value: 80 },
+      uKeyDir: { value: new THREE.Vector3(-0.45, 0.8, 0.5).normalize() },
+      uKeyCol: { value: new THREE.Color(1.0, 0.5, 0.22) },
+      uFillDir: { value: new THREE.Vector3(0.6, -0.3, 0.5).normalize() },
+      uFillCol: { value: new THREE.Color(0.9, 0.25, 0.08) },
+    },
+  });
+
+  // A camera-facing quad 1 unit in front of the camera, sized to fill the
+  // viewport, so every screen pixel casts a ray. Geometry depth is irrelevant
+  // (the surface is found by marching); misses discard to the background.
+  const dist = 1.0;
+  const qh = 2 * dist * Math.tan((CAMERA_FOV_DEG * Math.PI) / 360);
+  const qw = qh * ctx.sceneAspect;
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(qw, qh), mat);
+  mesh.position.set(0, 0, CAMERA_Z - dist);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 1;
+  mesh.userData.raymarch = true;
+  return mesh;
+}
+
 function buildMaterial(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   const args = positionalArgs(node);
   const f = namedFields(node);
   const inner = buildLayer(args[0], ctx);
   if (!inner) return null;
+
+  // Raymarched metaballs carry a ShaderMaterial — feed its uniforms instead of
+  // replacing it with a MeshStandardMaterial. fill → albedo, emissive → rim
+  // glow, roughness → specular sharpness.
+  if ((inner as any).userData?.raymarch && (inner as THREE.Mesh).material) {
+    const u = ((inner as THREE.Mesh).material as THREE.ShaderMaterial).uniforms;
+    if (f.fill) u.uAlbedo.value = toThreeColor(f.fill).convertSRGBToLinear();
+    if (f.emissive) u.uRim.value = toThreeColor(f.emissive).convertSRGBToLinear();
+    if (f.roughness) u.uSpecExp.value = THREE.MathUtils.lerp(100, 16, numberOf(f.roughness, 0.2));
+    return inner;
+  }
   // `fill: image(...).as_texture(...)` resolves to a texture map; everything
   // else falls back to a flat colour. SphereGeometry's default UVs are
   // already equirectangular, so `projection: equirectangular` is a no-op for
@@ -563,6 +701,8 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       return buildCircle(node);
     case "sphere":
       return buildSphere(node);
+    case "metaballs":
+      return buildMetaballs(node, ctx);
     case "render3d":
       return buildRender3d(node, ctx);
     case "extrude":
