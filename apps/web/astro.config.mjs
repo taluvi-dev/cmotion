@@ -52,6 +52,7 @@ export default defineConfig({
 					label: 'Examples',
 					items: [
 						{ label: 'Title sequence', slug: 'examples/title' },
+						{ label: 'Lava lamp', slug: 'examples/lava-lamp' },
 						{ label: 'Bouncing ball', slug: 'examples/bouncing-ball' },
 					],
 				},
