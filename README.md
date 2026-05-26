@@ -55,6 +55,17 @@ cd apps/web
 pnpm dev
 ```
 
+### `apps/api` — api.cmotion.org
+
+The hosted render API: a Cloudflare Worker that takes a `.cm` source (plus
+optional image assets) and renders it to a video or a single frame via a
+headless-Chrome container, with async jobs (D1) and outputs (R2).
+`POST /v1/render`, `POST /v1/frame`, `GET /v1/jobs/:id`, `GET /v1/outputs/:file`.
+
+A thin MCP server (`@cmotion/mcp`) is planned on top, to wrap the
+upload → render → poll flow into a single `render_video` / `render_frame`
+tool call for agents — see [`TODO.md`](./TODO.md).
+
 ## Roadmap
 
 The language and toolchain are being built in stages, from the parser up to

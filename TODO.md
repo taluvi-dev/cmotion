@@ -243,12 +243,9 @@ reference into the source, the file is held in IndexedDB for
 the browser preview, and a "Render in cloud" button uploads to
 `POST /v1/assets` + submits the `.cm` unchanged.
 
-**LLM / Claude consumption.** Ship a small MCP server
-(`@cmotion/mcp` npm) alongside the REST API that wraps the
-two-step (upload-then-render) into one tool call:
-`render_video({ source, image_files })` and
-`render_frame({ source, image_files, at })`. Hides the polling
-loop too. ~150 lines once the REST API works.
+**LLM / Claude consumption.** A thin MCP server wraps the REST API
+for one-shot agent rendering — promoted to its own item below (see
+*MCP server*), now that the API is live.
 
 **Open questions** (none block v0):
 
@@ -261,6 +258,19 @@ loop too. ~150 lines once the REST API works.
 - **Persistent user galleries.** v0 scopes uploads per-job. A
   v1 feature: tie uploads to a user account so the editor can
   keep a personal asset library. Needs auth first.
+
+### MCP server (`@cmotion/mcp`)
+
+Unblocked — the hosted render API above is live at `api.cmotion.org`.
+Ship a small stdio MCP server that wraps the upload → render → poll
+flow into one tool call so an agent can render a cmotion scene
+directly:
+
+- `render_video({ source, image_files? })` → finished video URL
+- `render_frame({ source, image_files?, at? })` → finished frame URL
+
+Hides the asset upload and the job-polling loop. ~150 lines; lands as
+`apps/mcp` and publishes to npm as `@cmotion/mcp`.
 
 ---
 
