@@ -81,5 +81,13 @@ Worker can surface the diagnostic to the client.
 
 ## Status
 
-- `0.0.1/` — scaffolding only. Real Dockerfile + driver land
-  after the Worker stub + dispatch wiring exist.
+- `0.0.1/` — deployed (`cmotion-runner:0.0.1-amd64`). Headless-Chromium
+  driver + frozen viewer; renders the original examples.
+- `0.0.2/` — adds the `metaballs` SDF shader, coloured + spot lights,
+  and the per-letter title to the frozen viewer, so the lava-lamp
+  example and the updated title render in the cloud. `apps/api/
+  wrangler.jsonc` already pins `0.0.2-amd64`; to ship it, build the
+  image from this directory and push it to the Cloudflare registry as
+  `cmotion-runner:0.0.2-amd64` (the same way `0.0.1` was published),
+  then redeploy the worker with `apps/api/scripts/deploy.sh`. Sources
+  opt into the new features with `runner "0.0.2";`.
