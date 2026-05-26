@@ -55,6 +55,12 @@ scene title(duration: Duration = 6s) -> Frame {
 // lays the string out glyph-by-glyph, so a full 360° spin would leave
 // it mirrored for half the loop — a gentle y-sway keeps it readable
 // while the hue cycles, the scale pulses, and a slow x-wave nods it.
+//
+// Every motion is tuned to loop seamlessly over the 12s duration: a
+// `wave` is `sin(2π·t/period)`, so it only returns to its start (value
+// *and* slope) when `period` divides the loop evenly. sway = 12s/2,
+// wobble = 12s/1, and the 4s hue cycle fits 3×. A mismatched period
+// snaps back mid-swing at the loop point.
 export const TITLE_SOURCE = `runner "0.0.1";
 
 use std.shapes.*;
@@ -64,10 +70,10 @@ use std.lighting.*;
 use std.scene3d.*;
 use std.anim.*;
 
-scene title(duration: Duration = 6s) -> Frame {
+scene title(duration: Duration = 12s) -> Frame {
   let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
 
-  let sway   = wave(amplitude: 14deg, period: 9s);
+  let sway   = wave(amplitude: 14deg, period: 6s);
   let hue    = animate { 0s => 280deg, 4s => 640deg } with { repeat: forever };
   let pulse  = animate {
                  0s    => 1.00,
