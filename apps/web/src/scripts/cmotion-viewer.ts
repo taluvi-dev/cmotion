@@ -206,44 +206,39 @@ function loadFont(): Promise<opentype.Font> {
   return fontPromise;
 }
 
-// Build a centred THREE.Shape for `char` at unit-em size (cap height is
-// roughly 0.7 of em). The caller scales as needed.
-function glyphShape(font: opentype.Font, char: string): THREE.Shape {
-  const glyph = font.charToGlyph(char);
-  // fontSize = 1 → glyph laid out in [0..1] em coordinates, y-down.
-  const path = glyph.getPath(0, 0, 1);
-  const shape = new THREE.Shape();
-  const holes: THREE.Path[] = [];
-  let current: THREE.Shape | THREE.Path = shape;
-  let started = false;
-  for (const cmd of path.commands) {
-    switch (cmd.type) {
-      case "M":
-        if (started) {
-          const h = new THREE.Path();
-          h.moveTo(cmd.x, -cmd.y);
-          holes.push(h);
-          current = h;
-        } else {
-          current.moveTo(cmd.x, -cmd.y);
-          started = true;
-        }
-        break;
-      case "L":
-        current.lineTo(cmd.x, -cmd.y);
-        break;
-      case "C":
-        current.bezierCurveTo(cmd.x1, -cmd.y1, cmd.x2, -cmd.y2, cmd.x, -cmd.y);
-        break;
-      case "Q":
-        current.quadraticCurveTo(cmd.x1, -cmd.y1, cmd.x, -cmd.y);
-        break;
-      case "Z":
-        break;
+// Build extrude-ready THREE.Shapes for the whole string, laid out
+// left-to-right by each glyph's advance. Routed through THREE.ShapePath
+// so disjoint contours (the dot of an "i") and counters (the hole of an
+// "o") are classified by containment — not the naive "first contour
+// fills, the rest are holes", which drops the i's dot. Coordinates are
+// em units (cap height ≈ 0.7), y-up; the caller scales as needed.
+function stringShapes(font: opentype.Font, text: string): THREE.Shape[] {
+  const sp = new THREE.ShapePath();
+  let penX = 0;
+  for (const ch of text) {
+    const glyph = font.charToGlyph(ch);
+    // fontSize = 1 → em coordinates, baseline at y=0, y-down; flip to y-up.
+    for (const cmd of glyph.getPath(penX, 0, 1).commands) {
+      switch (cmd.type) {
+        case "M":
+          sp.moveTo(cmd.x, -cmd.y);
+          break;
+        case "L":
+          sp.lineTo(cmd.x, -cmd.y);
+          break;
+        case "Q":
+          sp.quadraticCurveTo(cmd.x1, -cmd.y1, cmd.x, -cmd.y);
+          break;
+        case "C":
+          sp.bezierCurveTo(cmd.x1, -cmd.y1, cmd.x2, -cmd.y2, cmd.x, -cmd.y);
+          break;
+      }
     }
+    penX += (glyph.advanceWidth ?? font.unitsPerEm) / font.unitsPerEm;
   }
-  shape.holes = holes;
-  return shape;
+  // After the y-flip, solid contours wind clockwise → holes are CCW, so
+  // `isCCW = false` marks the clockwise outlines as the filled shapes.
+  return sp.toShapes(false);
 }
 
 // ---- 2D/3D translators -------------------------------------------
@@ -388,29 +383,15 @@ function buildExtrude(node: JsonNode, ctx: BuildCtx): THREE.Mesh | null {
     return null;
   }
   const glyphArgs = positionalArgs(inner);
-  const ch = String(glyphArgs[0]?.raw ?? '""').replace(/^"|"$/g, "")[0] ?? "?";
-  const rawShape = glyphShape(ctx.font, ch);
-  // Centre + scale: cap height ≈ 0.7em → after glyphScale ≈ 1.75 world.
-  const tmpGeo = new THREE.ShapeGeometry(rawShape);
-  tmpGeo.computeBoundingBox();
-  const bb = tmpGeo.boundingBox!;
-  const cx = (bb.min.x + bb.max.x) / 2;
-  const cy = (bb.min.y + bb.max.y) / 2;
-  tmpGeo.dispose();
-  const centeredPoints = rawShape.getPoints().map((p) => p.clone().sub(new THREE.Vector2(cx, cy)));
-  const centered = new THREE.Shape(centeredPoints);
-  centered.holes = rawShape.holes.map((h) => {
-    const pts = h.getPoints().map((p) => p.clone().sub(new THREE.Vector2(cx, cy)));
-    const np = new THREE.Path();
-    pts.forEach((p, i) => (i === 0 ? np.moveTo(p.x, p.y) : np.lineTo(p.x, p.y)));
-    return np;
-  });
+  const text = String(glyphArgs[0]?.raw ?? '""').replace(/^"|"$/g, "") || "?";
+  const shapes = stringShapes(ctx.font, text);
+  if (shapes.length === 0) return null;
 
   // depth in px → world units. Tuned so 16px ≈ 0.4 (matches ScenePreview).
   const depthPx = numberOf(f.depth, 16);
   const depth = depthPx * 0.025;
 
-  const geom = new THREE.ExtrudeGeometry(centered, {
+  const geom = new THREE.ExtrudeGeometry(shapes, {
     depth,
     bevelEnabled: true,
     bevelThickness: 0.04,
@@ -418,7 +399,17 @@ function buildExtrude(node: JsonNode, ctx: BuildCtx): THREE.Mesh | null {
     bevelSegments: 4,
     curveSegments: 32,
   });
-  geom.scale(ctx.glyphScale, ctx.glyphScale, 1);
+
+  // Keep the per-glyph reference scale (cap height ≈ 0.7em → ≈ 1.75
+  // world) unless the word is too wide for the frame, then shrink it to
+  // span ~82 % of the viewport width. A single glyph (the homepage "C")
+  // is below the threshold, so its size is unchanged.
+  geom.computeBoundingBox();
+  const bb = geom.boundingBox!;
+  const wRaw = bb.max.x - bb.min.x; // em-space width, before scaling
+  const maxW = VIEW_HEIGHT_WORLD * ctx.sceneAspect * 0.82;
+  const scale = wRaw * ctx.glyphScale > maxW ? maxW / wRaw : ctx.glyphScale;
+  geom.scale(scale, scale, 1);
   geom.center();
 
   // Placeholder material — replaced when wrapped in material(...).

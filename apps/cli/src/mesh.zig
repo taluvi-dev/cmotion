@@ -749,10 +749,91 @@ pub fn extrudeContours(
     };
 }
 
+/// Ray-cast point-in-polygon (even-odd rule). Used to classify a
+/// glyph's contours into solid regions vs holes by containment.
+fn pointInPolygon(p: Vec2, poly: []const Vec2) bool {
+    var inside = false;
+    var j: usize = poly.len - 1;
+    for (poly, 0..) |a, i| {
+        const b = poly[j];
+        if (((a.y > p.y) != (b.y > p.y)) and
+            (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x))
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    return inside;
+}
+
+/// Split a glyph's raw contours into independent fill regions. A
+/// contour nested inside an odd number of others is a hole; even
+/// (including zero) is a solid outer. Each hole is attached to the
+/// outer that immediately contains it. Each returned region is
+/// `[outer, hole?, ...]`, ready for `extrudeContoursBeveled` (which
+/// re-normalises winding by index).
+///
+/// Why this exists: glyphs like "i", "j", "=", "%", ":" carry several
+/// *disjoint* solid contours, not one outer plus holes. The naive
+/// "contour[0] is the outer, the rest are holes" assumption baked into
+/// `extrudeContoursBeveled` mis-classifies the dot of an "i" as a hole
+/// and drops it. Grouping by containment first keeps every solid piece.
+fn glyphRegions(arena: std.mem.Allocator, contours: []const []const Vec2) ![]const []const []const Vec2 {
+    const n = contours.len;
+    const depth = try arena.alloc(usize, n);
+    for (contours, 0..) |ci, i| {
+        var d: usize = 0;
+        for (contours, 0..) |cj, k| {
+            if (k == i) continue;
+            if (pointInPolygon(ci[0], cj)) d += 1;
+        }
+        depth[i] = d;
+    }
+
+    var regions = std.array_list.Managed([]const []const Vec2).init(arena);
+    for (contours, 0..) |ci, i| {
+        if (depth[i] % 2 != 0) continue; // hole — attached to its outer below
+        var region = std.array_list.Managed([]const Vec2).init(arena);
+        try region.append(ci);
+        for (contours, 0..) |cj, k| {
+            if (k == i) continue;
+            if (depth[k] == depth[i] + 1 and pointInPolygon(cj[0], ci)) {
+                try region.append(cj);
+            }
+        }
+        try regions.append(try region.toOwnedSlice());
+    }
+    return try regions.toOwnedSlice();
+}
+
+/// Concatenate meshes into one, rebasing each mesh's indices.
+fn mergeMeshes(arena: std.mem.Allocator, meshes: []const Mesh) !Mesh {
+    var nv: usize = 0;
+    var ni: usize = 0;
+    for (meshes) |m| {
+        nv += m.positions.len;
+        ni += m.indices.len;
+    }
+    const positions = try arena.alloc(Vec3, nv);
+    const normals = try arena.alloc(Vec3, nv);
+    const indices = try arena.alloc(u32, ni);
+    var vo: usize = 0;
+    var io: usize = 0;
+    for (meshes) |m| {
+        const base: u32 = @intCast(vo);
+        @memcpy(positions[vo .. vo + m.positions.len], m.positions);
+        @memcpy(normals[vo .. vo + m.normals.len], m.normals);
+        for (m.indices, 0..) |idx, k| indices[io + k] = idx + base;
+        vo += m.positions.len;
+        io += m.indices.len;
+    }
+    return .{ .positions = positions, .normals = normals, .indices = indices };
+}
+
 /// Extrude a TTF glyph outline. Convenience over `extrudeContours`
-/// — fetches every contour the font carries for the codepoint
-/// (outer + any interior holes) and extrudes the whole shape.
-/// Returns null for codepoints the font doesn't carry.
+/// — fetches every contour the font carries for the codepoint, groups
+/// them into solid regions + holes by containment, and extrudes each
+/// region. Returns null for codepoints the font doesn't carry.
 pub fn extrudeGlyph(
     arena: std.mem.Allocator,
     codepoint: u32,
@@ -771,7 +852,59 @@ pub fn extrudeGlyph(
         for (fc, 0..) |p, j| buf[j] = .{ .x = p.x, .y = p.y };
         converted[i] = buf;
     }
-    return try extrudeContoursBeveled(arena, converted, depth, bevel, bevel_segments);
+
+    const regions = try glyphRegions(arena, converted);
+    if (regions.len == 1) {
+        return try extrudeContoursBeveled(arena, regions[0], depth, bevel, bevel_segments);
+    }
+    const meshes = try arena.alloc(Mesh, regions.len);
+    for (regions, 0..) |r, i| {
+        meshes[i] = try extrudeContoursBeveled(arena, r, depth, bevel, bevel_segments);
+    }
+    return try mergeMeshes(arena, meshes);
+}
+
+/// Extrude a whole string of glyphs laid out left-to-right. Each glyph
+/// is extruded independently (so its outer/hole structure stays
+/// self-contained — combining every contour into one extrude call
+/// would break the outer-vs-hole assumption in
+/// `extrudeContoursBeveled`) and then merged into one mesh, with each
+/// glyph's vertices shifted right by the running pen advance. The
+/// result sits in glyph-pixel space with the string's left edge near
+/// x=0; the caller (`render.centreMesh`) recentres it.
+///
+/// Bytes are treated as Latin-1 codepoints, matching the 2D text path
+/// in `render.zig`. Spaces and codepoints the font lacks only advance
+/// the pen. Returns null when nothing rendered (empty / all-missing).
+pub fn extrudeText(
+    arena: std.mem.Allocator,
+    text: []const u8,
+    size_px: f32,
+    depth: f32,
+    bevel: f32,
+    bevel_segments: u32,
+    curve_segments: u32,
+) !?Mesh {
+    var positions = std.array_list.Managed(Vec3).init(arena);
+    var normals = std.array_list.Managed(Vec3).init(arena);
+    var indices = std.array_list.Managed(u32).init(arena);
+
+    var cursor: f32 = 0;
+    for (text) |ch| {
+        if (try extrudeGlyph(arena, ch, size_px, depth, bevel, bevel_segments, curve_segments)) |g| {
+            const base: u32 = @intCast(positions.items.len);
+            for (g.positions) |p| try positions.append(.{ .x = p.x + cursor, .y = p.y, .z = p.z });
+            try normals.appendSlice(g.normals);
+            for (g.indices) |idx| try indices.append(idx + base);
+        }
+        cursor += font.advance(ch, size_px);
+    }
+    if (positions.items.len == 0) return null;
+    return Mesh{
+        .positions = try positions.toOwnedSlice(),
+        .normals = try normals.toOwnedSlice(),
+        .indices = try indices.toOwnedSlice(),
+    };
 }
 
 /// Move every vertex of a contour along its angle bisector by
@@ -1261,4 +1394,61 @@ test "extrudeContours: square-with-hole extrudes to a mesh with hole walls" {
         }
     }
     try std.testing.expect(has_inward_normal);
+}
+
+test "glyphRegions: two disjoint outlines are separate solid regions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Two non-overlapping squares — like the stem and dot of an "i".
+    const left = [_]Vec2{ .{ .x = 0, .y = 0 }, .{ .x = 4, .y = 0 }, .{ .x = 4, .y = 4 }, .{ .x = 0, .y = 4 } };
+    const right = [_]Vec2{ .{ .x = 10, .y = 0 }, .{ .x = 14, .y = 0 }, .{ .x = 14, .y = 4 }, .{ .x = 10, .y = 4 } };
+    const contours = [_][]const Vec2{ &left, &right };
+
+    const regions = try glyphRegions(a, &contours);
+    try std.testing.expectEqual(@as(usize, 2), regions.len);
+    try std.testing.expectEqual(@as(usize, 1), regions[0].len);
+    try std.testing.expectEqual(@as(usize, 1), regions[1].len);
+}
+
+test "glyphRegions: an outline with a counter is one region of outer + hole" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Big square with a smaller square nested inside — like an "o".
+    const outer = [_]Vec2{ .{ .x = 0, .y = 0 }, .{ .x = 10, .y = 0 }, .{ .x = 10, .y = 10 }, .{ .x = 0, .y = 10 } };
+    const hole = [_]Vec2{ .{ .x = 3, .y = 3 }, .{ .x = 7, .y = 3 }, .{ .x = 7, .y = 7 }, .{ .x = 3, .y = 7 } };
+    const contours = [_][]const Vec2{ &outer, &hole };
+
+    const regions = try glyphRegions(a, &contours);
+    try std.testing.expectEqual(@as(usize, 1), regions.len);
+    try std.testing.expectEqual(@as(usize, 2), regions[0].len); // outer + its hole
+}
+
+test "extrudeText: lays glyphs out so a word is wider than one letter" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const one = (try extrudeText(a, "n", 96, 16, 1.5, 4, 16)) orelse return error.NoMesh;
+    const many = (try extrudeText(a, "nnn", 96, 16, 1.5, 4, 16)) orelse return error.NoMesh;
+
+    const xspan = struct {
+        fn f(m: Mesh) f32 {
+            var lo = m.positions[0].x;
+            var hi = lo;
+            for (m.positions) |p| {
+                lo = @min(lo, p.x);
+                hi = @max(hi, p.x);
+            }
+            return hi - lo;
+        }
+    }.f;
+    // Three glyphs span noticeably wider than one — they're not stacked.
+    try std.testing.expect(xspan(many) > xspan(one) * 2.0);
+    // The "i" carries a disjoint dot; extruding it must still produce a mesh.
+    const dotted = (try extrudeText(a, "i", 96, 16, 1.5, 4, 16)) orelse return error.NoMesh;
+    try std.testing.expect(dotted.positions.len > 0);
 }

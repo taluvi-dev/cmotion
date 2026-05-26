@@ -3,7 +3,11 @@
 // build inlines them — the WASM viewer needs the source as a string,
 // and the docs pages re-render the same string in their code block.
 
-export const TITLE_SOURCE = `runner "0.0.1";
+// The homepage preview: a single extruded glyph that spins a full
+// 360°. One letter, three independent animations — the minimal taste
+// sample. The multi-letter title example below shares the same
+// extrude → material → render3d pipeline.
+export const HOMEPAGE_SOURCE = `runner "0.0.1";
 
 use std.shapes.*;
 use std.mesh3d.*;
@@ -43,6 +47,53 @@ scene title(duration: Duration = 6s) -> Frame {
   compose [
     bg,
     render3d(glyph, lights: lights),
+  ]
+}
+`;
+
+// The title example: a whole word extruded into 3D. `text.glyph`
+// lays the string out glyph-by-glyph, so a full 360° spin would leave
+// it mirrored for half the loop — a gentle y-sway keeps it readable
+// while the hue cycles, the scale pulses, and a slow x-wave nods it.
+export const TITLE_SOURCE = `runner "0.0.1";
+
+use std.shapes.*;
+use std.mesh3d.*;
+use std.text;
+use std.lighting.*;
+use std.scene3d.*;
+use std.anim.*;
+
+scene title(duration: Duration = 6s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
+
+  let sway   = wave(amplitude: 14deg, period: 9s);
+  let hue    = animate { 0s => 280deg, 4s => 640deg } with { repeat: forever };
+  let pulse  = animate {
+                 0s    => 1.00,
+                 500ms => 1.03,
+                 1s    => 1.00,
+               } with { easing: easing.out_cubic, repeat: forever };
+  let wobble = wave(amplitude: 5deg, period: 12s);
+
+  let title = extrude(text.glyph("cmotion"), depth: 16px)
+                .material(fill: oklch(0.78, 0.20, hue),
+                          metalness: 0.25,
+                          roughness: 0.35,
+                          emissive: oklch(0.65, 0.18, hue),
+                          emissive_intensity: 0.6)
+                .rotate(x: wobble, y: sway)
+                .scale(pulse);
+
+  let lights = [
+    ambient(0.35),
+    directional(from: vec3(3, 4, 5),    intensity: 1.6),
+    directional(from: vec3(-4, -2, -3), intensity: 0.9),
+  ];
+
+  compose [
+    bg,
+    render3d(title, lights: lights),
   ]
 }
 `;
