@@ -75,7 +75,6 @@ use std.anim.*;
 
 scene title(duration: Duration = 12s) -> Frame {
   let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.97, 0.012, 95));
-  let m  = oklch(0.52, 0.02, 95deg);
 
   // Per-letter Y spin, staggered by 0.3s, each 360° over 2s then held.
   let r0 = animate { 0s => 0deg, 2.0s => 360deg, 12s => 360deg } with { easing: easing.in_out_cubic };
@@ -95,21 +94,20 @@ scene title(duration: Duration = 12s) -> Frame {
                 12s  =>  30px,
               } with { easing: easing.in_out_cubic };
 
-  // Sunshine-reggae / coral-reef palette: one strong key light sweeps a warm
-  // tropical hue band (coral → gold → green → turquoise) while a soft warm
-  // fill + ambient keep it sunny. A single colour avoids muddy mixing.
-  let hue  = animate { 0s => 25deg, 6s => 200deg, 12s => 25deg } with { easing: easing.in_out_cubic, repeat: forever };
-  let key  = directional(from: vec3(wave(amplitude: 4, period: 6s), 2, 6),  intensity: 2.6, color: oklch(0.80, 0.22, hue));
-  let fill = directional(from: vec3(wave(amplitude: 3, period: 4s), -3, 4), intensity: 0.7, color: oklch(0.92, 0.04, 95));
-  let lights = [ ambient(0.26, color: oklch(0.93, 0.05, 95)), key, fill ];
+  // Bright neutral lighting so each letter shows its own colour; a slow
+  // wobble on the key keeps the highlights alive.
+  let key  = directional(from: vec3(wave(amplitude: 3, period: 8s), 4, 6), intensity: 1.7);
+  let fill = directional(from: vec3(-4, -2, 4), intensity: 0.8);
+  let lights = [ ambient(0.40), key, fill ];
 
-  let c0 = extrude(text.glyph("c", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r0).translate(x: -567px);
-  let c1 = extrude(text.glyph("m", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r1).translate(x: -313px);
-  let c2 = extrude(text.glyph("o", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r2).translate(x: -59px);
-  let c3 = extrude(text.glyph("t", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r3).translate(x: 108px);
-  let c4 = extrude(text.glyph("i", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).translate(x: 225px, y: ijump);
-  let c5 = extrude(text.glyph("o", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r5).translate(x: 368px);
-  let c6 = extrude(text.glyph("n", size: 430px), depth: 43px).material(fill: m, metalness: 0.2, roughness: 0.45).rotate(y: r6).translate(x: 570px);
+  // Each letter a different bright colour, scattered (not a smooth ramp).
+  let c0 = extrude(text.glyph("c", size: 430px), depth: 43px).material(fill: oklch(0.70, 0.20,  25), metalness: 0.0, roughness: 0.45).rotate(y: r0).translate(x: -567px);
+  let c1 = extrude(text.glyph("m", size: 430px), depth: 43px).material(fill: oklch(0.83, 0.16,  92), metalness: 0.0, roughness: 0.45).rotate(y: r1).translate(x: -313px);
+  let c2 = extrude(text.glyph("o", size: 430px), depth: 43px).material(fill: oklch(0.70, 0.19, 150), metalness: 0.0, roughness: 0.45).rotate(y: r2).translate(x: -59px);
+  let c3 = extrude(text.glyph("t", size: 430px), depth: 43px).material(fill: oklch(0.66, 0.16, 245), metalness: 0.0, roughness: 0.45).rotate(y: r3).translate(x: 108px);
+  let c4 = extrude(text.glyph("i", size: 430px), depth: 43px).material(fill: oklch(0.70, 0.23, 350), metalness: 0.0, roughness: 0.45).translate(x: 225px, y: ijump);
+  let c5 = extrude(text.glyph("o", size: 430px), depth: 43px).material(fill: oklch(0.74, 0.20,  55), metalness: 0.0, roughness: 0.45).rotate(y: r5).translate(x: 368px);
+  let c6 = extrude(text.glyph("n", size: 430px), depth: 43px).material(fill: oklch(0.72, 0.17, 195), metalness: 0.0, roughness: 0.45).rotate(y: r6).translate(x: 570px);
 
   compose [
     bg,
