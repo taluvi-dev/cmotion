@@ -1,18 +1,21 @@
 ---
 title: Title sequence
-description: A word extruded into 3D — glyph layout, PBR material, and three independent animations.
+description: A word built from one extruded glyph per letter — each turns on its own axis, then a coloured light show.
 ---
 
 import ExampleScene from '../../../components/ExampleScene.astro';
 import { TITLE_SOURCE } from '../../../examples/sources.ts';
 
-A close cousin of the [homepage](/) glyph, scaled up to a whole word.
-`text.glyph("cmotion")` lays the string out glyph-by-glyph and
-`extrude` turns the outlines into one 3D mesh; a 2D background
-composes behind it. Three independent animations drive the hue, the
-scale pulse, and a low-amplitude `wave` that nods it on `x`, while a
-second `wave` gives the `y`-axis a gentle sway — a full spin would
-leave the word mirrored for half the loop. Lighting is one ambient
-plus two opposing directionals.
+"cmotion" assembled from one `extrude(text.glyph(...))` per letter, so
+each turns on its own `y` axis. The spins are staggered and settle by
+about four seconds; then the word sits quiet while two coloured lights
+sweep the hue wheel and wobble their direction. A 2D background
+composes behind the 3D scene.
+
+Because the letters are placed by hand with `translate(x:)`, the scene
+sets `camera(distance: 2166)` so the native renderer's 3D view is
+exactly 1080 world-px tall — the same pixel-honest mapping the web
+viewer uses — and the per-letter advances line up in both. Every motion
+is tuned to loop seamlessly over the 12-second duration.
 
 <ExampleScene source={TITLE_SOURCE} />

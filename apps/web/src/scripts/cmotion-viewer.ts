@@ -387,10 +387,39 @@ function buildExtrude(node: JsonNode, ctx: BuildCtx): THREE.Mesh | null {
   const shapes = stringShapes(ctx.font, text);
   if (shapes.length === 0) return null;
 
-  // depth in px → world units. Tuned so 16px ≈ 0.4 (matches ScenePreview).
   const depthPx = numberOf(f.depth, 16);
-  const depth = depthPx * 0.025;
 
+  // Explicit `size:` → pixel-honest sizing: a glyph's px height is a real
+  // fraction of the 1080-px background, the same mapping the native
+  // renderer gets from `camera(distance: 2166)`. This is what the
+  // multi-letter title uses so its hand-placed `translate(x:)` advances
+  // line up identically in both renderers. Without `size:` we fall back
+  // to the standalone-glyph auto-fit (the homepage "C", unchanged).
+  const sizeField = namedFields(inner).size;
+  if (sizeField && sizeField.kind === "number") {
+    // 1 em of shape → world: px × (unitsPerEm / (ascender−descender)) × pxToWorld.
+    // The hhea metric matches stb_truetype's ScaleForPixelHeight basis.
+    const hhea = (ctx.font as any).tables.hhea;
+    const emFactor = ctx.font.unitsPerEm / (hhea.ascender - hhea.descender);
+    const scale = sizeField.value * emFactor * pxToWorld;
+    const depth = depthPx * pxToWorld;
+    const bevel = depth * 0.3;
+    const geom = new THREE.ExtrudeGeometry(shapes, {
+      depth,
+      bevelEnabled: true,
+      bevelThickness: bevel,
+      bevelSize: bevel / scale, // xy bevel is in em (pre-scale); /scale → ≈ bevel world
+      bevelSegments: 4,
+      curveSegments: 32,
+    });
+    geom.scale(scale, scale, 1);
+    geom.center();
+    return new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0xffffff }));
+  }
+
+  // Auto-fit fallback (no explicit size): the standalone homepage glyph.
+  // depth in px → world units. Tuned so 16px ≈ 0.4 (matches ScenePreview).
+  const depth = depthPx * 0.025;
   const geom = new THREE.ExtrudeGeometry(shapes, {
     depth,
     bevelEnabled: true,
@@ -474,9 +503,18 @@ function buildVec3(node: JsonNode): THREE.Vector3 {
   return new THREE.Vector3(numberOf(args[0]), numberOf(args[1]), numberOf(args[2]));
 }
 
+// Optional `color:`/`tint:` on a light (white when absent). Animated
+// colours arrive already sampled to a concrete value at the current t.
+function lightColor(node: JsonNode): THREE.Color {
+  const f = namedFields(node);
+  const c = f.color ?? f.tint;
+  return c ? toThreeColor(c) : new THREE.Color(0xffffff);
+}
+
 function buildAmbient(node: JsonNode): THREE.Light {
-  const intensity = numberOf(positionalArgs(node)[0], 0.3);
-  return new THREE.AmbientLight(0xffffff, intensity);
+  const f = namedFields(node);
+  const intensity = numberOf(positionalArgs(node)[0] ?? f.intensity, 0.3);
+  return new THREE.AmbientLight(lightColor(node), intensity);
 }
 
 function buildDirectional(node: JsonNode): THREE.Light {
@@ -485,7 +523,7 @@ function buildDirectional(node: JsonNode): THREE.Light {
     ? buildVec3(f.from)
     : new THREE.Vector3(0, 1, 0);
   const intensity = numberOf(f.intensity, 1);
-  const light = new THREE.DirectionalLight(0xffffff, intensity);
+  const light = new THREE.DirectionalLight(lightColor(node), intensity);
   light.position.copy(from);
   return light;
 }
@@ -507,6 +545,18 @@ function buildRender3d(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
 function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   if (!node || node.kind !== "constructed") return null;
   switch (node.name) {
+    case "compose": {
+      // A `compose [...]` nested inside render3d groups several 3D objects
+      // (e.g. one extrude per letter) under one camera + light rig. The
+      // top-level compose is handled by buildCompose (bg promotion); this
+      // branch is the plain-group case.
+      const group = new THREE.Group();
+      for (const layer of arrayElems(namedFields(node).layers)) {
+        const obj = buildLayer(layer, ctx);
+        if (obj) group.add(obj);
+      }
+      return group;
+    }
     case "rect":
       return buildRect(node);
     case "circle":

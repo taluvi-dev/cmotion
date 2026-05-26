@@ -34,8 +34,8 @@ const Mat4 = mesh_mod.Mat4;
 const Mesh = mesh_mod.Mesh;
 
 pub const Light = union(enum) {
-    ambient: struct { intensity: f32 },
-    directional: struct { direction: Vec3, intensity: f32 },
+    ambient: struct { intensity: f32, color: [3]u8 = .{ 255, 255, 255 } },
+    directional: struct { direction: Vec3, intensity: f32, color: [3]u8 = .{ 255, 255, 255 } },
 };
 
 pub const Material = struct {
@@ -495,12 +495,17 @@ fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
                 const fres_v: Vec3F = @splat(fres_n5);
                 const rough_v: Vec3F = @splat(rough_atten);
                 const intensity_v: Vec3F = @splat(amb.intensity);
+                const tint = Vec3F{
+                    srgbDecode(amb.color[0]),
+                    srgbDecode(amb.color[1]),
+                    srgbDecode(amb.color[2]),
+                };
 
                 const diff = albedo * env_diffuse * one_minus_m;
                 const F_env = f0 + (ones - f0) * fres_v;
                 const spec = env_specular * F_env * rough_v;
 
-                lit += (diff + spec) * intensity_v;
+                lit += (diff + spec) * intensity_v * tint;
             },
             .directional => |dir| {
                 const L = dir.direction.scale(-1).normalise();
@@ -534,12 +539,17 @@ fn shade(normal: Vec3, material: Material, lights: []const Light) [4]u8 {
                 const spec_scale: Vec3F = @splat(D * G / denom);
                 const inv_pi: Vec3F = @splat(1.0 / std.math.pi);
                 const irradiance: Vec3F = @splat(dir.intensity * n_dot_l);
+                const tint = Vec3F{
+                    srgbDecode(dir.color[0]),
+                    srgbDecode(dir.color[1]),
+                    srgbDecode(dir.color[2]),
+                };
 
                 const specular = F * spec_scale;
                 const k_d = (ones - F) * one_minus_m;
                 const diffuse = k_d * albedo * inv_pi;
 
-                lit += (diffuse + specular) * irradiance;
+                lit += (diffuse + specular) * irradiance * tint;
             },
         }
     }
