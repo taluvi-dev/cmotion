@@ -91,7 +91,7 @@ pub fn rasterise(codepoint: u32, size_px: f32) ?GlyphBitmap {
     var advance_raw: c_int = 0;
     var lsb_raw: c_int = 0;
     c.stbtt_GetCodepointHMetrics(&info, @intCast(codepoint), &advance_raw, &lsb_raw);
-    const advance = @as(f32, @floatFromInt(advance_raw)) * scale;
+    const advance_px = @as(f32, @floatFromInt(advance_raw)) * scale;
 
     const total: usize = @as(usize, @intCast(w)) * @as(usize, @intCast(h));
     return .{
@@ -100,7 +100,7 @@ pub fn rasterise(codepoint: u32, size_px: f32) ?GlyphBitmap {
         .height = @intCast(h),
         .x_offset = @intCast(xoff),
         .y_offset = @intCast(yoff),
-        .advance = advance,
+        .advance = advance_px,
     };
 }
 
@@ -142,6 +142,19 @@ pub fn measureWidth(text: []const u8, size_px: f32) f32 {
         total += @as(f32, @floatFromInt(adv)) * scale;
     }
     return total;
+}
+
+/// Horizontal advance for a single codepoint at `size_px`, in pixels.
+/// Used by the 3D text layout (`mesh.extrudeText`) to step the cursor
+/// from one extruded glyph to the next. Codepoints the font lacks
+/// return 0, so callers don't open a gap for a missing glyph.
+pub fn advance(codepoint: u32, size_px: f32) f32 {
+    ensureInit();
+    const scale = c.stbtt_ScaleForPixelHeight(&info, size_px);
+    var adv: c_int = 0;
+    var lsb: c_int = 0;
+    c.stbtt_GetCodepointHMetrics(&info, @intCast(codepoint), &adv, &lsb);
+    return @as(f32, @floatFromInt(adv)) * scale;
 }
 
 pub fn freeBitmap(bitmap: GlyphBitmap) void {

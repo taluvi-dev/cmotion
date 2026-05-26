@@ -1,15 +1,18 @@
 ---
 title: Title sequence
-description: The animated 3D glyph used on the cmotion homepage — extrusion, PBR material, three independent animations.
+description: A word extruded into 3D — glyph layout, PBR material, and three independent animations.
 ---
 
 import ExampleScene from '../../../components/ExampleScene.astro';
 import { TITLE_SOURCE } from '../../../examples/sources.ts';
 
-The example on the [homepage](/). A 2D background composes with a 3D
-scene built from one extruded glyph: three independent animations
-drive its `y` rotation, hue, and scale; a low-amplitude `wave`
-adds a slow `x`-axis sway. Lighting is one ambient plus two opposing
-directionals.
+A close cousin of the [homepage](/) glyph, scaled up to a whole word.
+`text.glyph("cmotion")` lays the string out glyph-by-glyph and
+`extrude` turns the outlines into one 3D mesh; a 2D background
+composes behind it. Three independent animations drive the hue, the
+scale pulse, and a low-amplitude `wave` that nods it on `x`, while a
+second `wave` gives the `y`-axis a gentle sway — a full spin would
+leave the word mirrored for half the loop. Lighting is one ambient
+plus two opposing directionals.
 
 <ExampleScene source={TITLE_SOURCE} />

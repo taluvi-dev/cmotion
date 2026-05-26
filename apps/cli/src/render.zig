@@ -766,7 +766,7 @@ fn meshFromShape(
         }
         const text = stripQuotes(text_raw);
         if (text.len == 0) return null;
-        return try mesh_mod.extrudeGlyph(arena, text[0], size_px, depth, bevel, bevel_segments, curve_segments);
+        return try mesh_mod.extrudeText(arena, text, size_px, depth, bevel, bevel_segments, curve_segments);
     }
     return null;
 }
