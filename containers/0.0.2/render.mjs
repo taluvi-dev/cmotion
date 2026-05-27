@@ -207,6 +207,12 @@ async function renderFrame(env) {
   try {
     const at = env.params.at ?? 0;
     await page.evaluate((t) => window.__viewer.seek(t), at);
+    // Async textures (icon/svg/image) load after the first render, so let the
+    // fetches settle and re-seek to composite them in before the screenshot —
+    // otherwise the frame captures before the icons/images arrive.
+    await page.waitForLoadState("networkidle").catch(() => {});
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 400)));
+    await page.evaluate((t) => window.__viewer.seek(t), at);
     await page.evaluate(() => new Promise(requestAnimationFrame));
 
     fs.mkdirSync(env.outDir, { recursive: true });
@@ -227,6 +233,12 @@ async function renderVideo(env) {
     const duration = env.params.duration
       ?? await page.evaluate(() => window.__viewer.durationSeconds);
     const totalFrames = Math.max(1, Math.round(duration * fps));
+
+    // Warm up async textures (icon/svg/image) before the first frame so the
+    // clip doesn't open on a half-loaded composite.
+    await page.evaluate(() => window.__viewer.seek(0));
+    await page.waitForLoadState("networkidle").catch(() => {});
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 400)));
 
     fs.mkdirSync(env.outDir, { recursive: true });
     const outPath = path.join(env.outDir, `${env.jobId}.mp4`);
