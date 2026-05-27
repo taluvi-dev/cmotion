@@ -628,6 +628,7 @@ async function handleAssets(request: Request, env: Env): Promise<Response> {
 
   const out: Record<string, string> = {};
   let count = 0;
+  const clientIp = request.headers.get("CF-Connecting-IP");
 
   for (const [, value] of form) {
     // `value` is FormDataEntryValue (string | File-like). In Workers
@@ -646,6 +647,13 @@ async function handleAssets(request: Request, env: Env): Promise<Response> {
       httpMetadata: { contentType: file.type || "application/octet-stream" },
       customMetadata: { original_name: file.name },
     });
+    // Ledger row for the sweep + per-IP quota (see migrations/0002_assets.sql).
+    await env.DB.prepare(
+      `INSERT INTO assets (key, original_name, size, content_type, client_ip, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(key, file.name, file.size, file.type || null, clientIp, Date.now())
+      .run();
     out[file.name] = key;
   }
 

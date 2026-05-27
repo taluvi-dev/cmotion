@@ -55,16 +55,24 @@ cd apps/web
 pnpm dev
 ```
 
-### `apps/api` — api.cmotion.org
+### `apps/api` — the render service (open source; run your own)
 
-The hosted render API: a Cloudflare Worker that takes a `.cm` source (plus
-optional image assets) and renders it to a video or a single frame via a
+A Cloudflare Worker that takes a `.cm` source (plus optional image assets
+or external URLs) and renders it to a video or a single frame via a
 headless-Chrome container, with async jobs (D1) and outputs (R2).
 `POST /v1/render`, `POST /v1/frame`, `GET /v1/jobs/:id`, `GET /v1/outputs/:file`.
 
-A thin MCP server (`@cmotion/mcp`) is planned on top, to wrap the
-upload → render → poll flow into a single `render_video` / `render_frame`
-tool call for agents — see [`TODO.md`](./TODO.md).
+**This is meant to be deployed by you, on your own Cloudflare account.**
+Our `api.cmotion.org` instance — together with the `/editor` on
+cmotion.org and the planned `@cmotion/mcp` — is a **playground/demo**, not
+a hosted render-as-a-service: rate-limited, asset-capped, and swept
+aggressively. For real or sustained use, stand up your own (`apps/api`
+plus a `containers/<version>/` image).
+
+A thin MCP server (`@cmotion/mcp`) is planned on top, wrapping the
+upload → render → poll flow into single `render_video` / `render_frame`
+tool calls — a playground convenience pointed at your own API, see
+[`TODO.md`](./TODO.md).
 
 ## Roadmap
 

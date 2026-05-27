@@ -1,8 +1,10 @@
 # @cmotion/api
 
-Hosted render API for cmotion. A Cloudflare Worker that accepts a
-`.cm` source + uploaded assets and returns a rendered video or a
-single frame. Spec: `TODO.md` → "Hosted render API on Cloudflare".
+Open-source render service for cmotion: a Cloudflare Worker that accepts
+a `.cm` source + assets (uploads or external URLs) and returns a rendered
+video or a single frame. **Deploy your own** — the `api.cmotion.org`
+instance is a rate-limited playground, not a hosted service to build
+against. Spec: `TODO.md` → "Hosted render API on Cloudflare".
 
 ## Layout
 

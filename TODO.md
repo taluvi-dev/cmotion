@@ -13,9 +13,16 @@ Ordered by leverage, not by what's easy.
 
 ### Hosted render API on Cloudflare
 
+The renderer is **open source — anyone deploys this Worker + container
+on their own Cloudflare account**. Our `api.cmotion.org` instance (and
+the cmotion.org `/editor` + the planned `@cmotion/mcp`) is a
+**playground/demo**, not a render-as-a-service: the caps, quotas, and
+sweeps below are playground guardrails, not a pricing tier. For real
+use, run your own.
+
 A public endpoint that takes a `.cm` source plus its uploaded
-asset images and returns either a rendered video or a single
-frame. The renderer is a one-shot Cloudflare Container per job,
+asset images (or external URLs) and returns either a rendered video or a
+single frame. The renderer is a one-shot Cloudflare Container per job,
 capped at one concurrent instance; the Worker dispatches via the
 Containers binding and tracks every job in D1. The Worker lives
 in a new `apps/api/` package — separate from `apps/web/` so the
@@ -56,14 +63,25 @@ client → Worker (Hono) ──┬──→ Container (Playwright + Chromium, on
                          └──→ D1 (source + params + manifest + status + key)
 ```
 
-**Assets.** Users upload images directly via `POST /v1/assets`;
-the `.cm` source references them by friendly path (`image("/earth.png")`),
-not by URL or opaque UUID. No external URL fetching anywhere in
-the request path — container has zero outbound network
-requirements, no SSRF / DNS-rebinding surface, deterministic
-renders, no third-party hosts to allowlist or moderate.
+**Assets.** A `.cm` references images two ways: an **external URL**
+(`image("https://…")`) or a **user upload** staged in R2 (`POST
+/v1/assets`, referenced by friendly path). The source stays small —
+code that points at assets, never inlined base64 — so the size budget
+lives on the assets, not the source (the 64 KiB source cap is for code).
+The render container fetches both at render time and **bakes the pixels
+into the output** PNG/MP4: nothing is linked in the result, so a remote
+URL never leaks into a live document.
 
-Naming rules:
+Allowing remote fetch reintroduces an outbound surface the first cut
+deliberately avoided, so guard it: require an `http(s)` scheme and
+**block private / link-local / loopback ranges** (10/8, 172.16/12,
+192.168/16, 169.254/16, `::1`, …) so a source can't aim the renderer at
+internal endpoints (SSRF). Uploads keep flowing through the R2 staging +
+NSFW path below; remote URLs lean on the range guard, with content
+moderation layered on later if abuse shows up. (Tighten to a host
+allowlist if needed.)
+
+Upload naming rules (the friendly path of an R2-staged asset):
 
 - Leading slash optional, normalised to present: `earth.png` and
   `/earth.png` are the same key.
@@ -83,11 +101,17 @@ API (assets uploaded, `.cm` submitted verbatim). No source
 rewriting on the "Render in cloud" path.
 
 **Asset lifecycle.** Uploaded assets land in an R2 staging
-prefix (`staging/<job_id>/<asset_uuid>`). After a job is marked
-`ready` or `error`, its staging assets are deleted eagerly. A
-nightly cron Worker sweeps anything still in `staging/` older
-than 6 h, so orphans from failed-before-status-update paths
-don't accumulate.
+prefix (`staging/asset_<uuid>`) **and get a row in a D1 `assets`
+table** (key, original_name, size, content_type, created_at,
+client_ip). The table is the sweep + quota ledger: without it we
+can't enumerate what's in R2 or attribute uploads to a caller.
+A nightly cron Worker deletes assets older than the retention
+window (start ~24 h) from both R2 and the table, so a few users
+hammering the free tier can't fill the bucket indefinitely. The
+`client_ip` column also backs a coarse per-IP upload quota
+(count rows in the last hour/day before accepting more).
+External-URL assets aren't stored — they're fetched fresh each
+render and never persisted, so only uploads need this ledger.
 
 **Input moderation.** Every uploaded asset runs through an NSFW
 classifier (Cloudflare Workers AI image-classification, or
