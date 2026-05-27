@@ -353,13 +353,15 @@ scene composition(duration: Duration = 8s) -> Frame {
   ];
 
   // Cell D — the homepage glyph reused (extruded "C", spin + hue cycle).
-  let rotG   = animate { 0s => 0deg,   6s => 360deg } with { repeat: forever };
+  // Every period divides the 8s scene loop so the cell wraps seamlessly:
+  // one full y-turn over 8s, the x-wave over 8s, hue over 4s, pulse over 1s.
+  let rotG   = animate { 0s => 0deg,   8s => 360deg } with { repeat: forever };
   let hueG   = animate { 0s => 280deg, 4s => 640deg } with { repeat: forever };
   let pulseG = animate { 0s => 1.00, 500ms => 1.06, 1s => 1.00 } with { easing: easing.out_cubic, repeat: forever };
   let glyph = extrude(text.glyph("C", font: "Inter Bold"), depth: 16px)
     .material(fill: oklch(0.78, 0.20, hueG), metalness: 0.25, roughness: 0.35,
               emissive: oklch(0.65, 0.18, hueG), emissive_intensity: 0.6)
-    .rotate(x: wave(amplitude: 8.6deg, period: 12s), y: rotG).scale(pulseG);
+    .rotate(x: wave(amplitude: 8.6deg, period: 8s), y: rotG).scale(pulseG);
   let cellD = compose [
     render3d(glyph, lights: [ ambient(0.35), directional(from: vec3(3, 4, 5), intensity: 1.6), directional(from: vec3(-4, -2, -3), intensity: 0.9) ]),
   ];
