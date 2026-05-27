@@ -35,7 +35,8 @@ const MODULES: Record<string, Member[]> = {
     { name: "path", sig: "(d: String, fill?: Color)" },
     { name: "image", sig: "(src: String, width?: Length, height?: Length)" },
     { name: "sprite", sig: "(src, width?, height?, cols?, rows?, frame?, key?: Color, anchor?, opacity?)" },
-    { name: "svg", sig: "(source: String, size?: Length, color?: Color, opacity?)" },
+    { name: "svg", sig: "(source: String, size?: Length, color?: Color, weight?, opacity?)" },
+    { name: "icon", sig: "(name: String, size?: Length, color?: Color, weight?, opacity?)" },
   ],
   "std.text": [
     { name: "glyph", sig: "(string: String, font: String, size?: Length)" },

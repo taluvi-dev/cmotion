@@ -5,10 +5,10 @@
   "version": "0.0.0",
   "description": "cmotion.org — site and docs for the cmotion DSL",
   "scripts": {
-    "predev": "bash scripts/copy-wasm.sh",
+    "predev": "bash scripts/copy-wasm.sh && bash scripts/copy-icons.sh",
     "dev": "astro dev",
     "start": "astro dev",
-    "prebuild": "bash scripts/copy-wasm.sh",
+    "prebuild": "bash scripts/copy-wasm.sh && bash scripts/copy-icons.sh",
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",
@@ -25,5 +25,8 @@
     "opentype.js": "^2.0.0",
     "sharp": "^0.34.5",
     "three": "^0.184.0"
+  },
+  "devDependencies": {
+    "lucide-static": "1.16.0"
   }
 }

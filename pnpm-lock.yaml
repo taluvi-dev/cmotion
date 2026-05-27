@@ -56,6 +56,10 @@ importers:
       three:
         specifier: ^0.184.0
         version: 0.184.0
+    devDependencies:
+      lucide-static:
+        specifier: 1.16.0
+        version: 1.16.0
 
   packages/tree-sitter-cmotion:
     devDependencies:
@@ -1537,6 +1541,9 @@ packages:
   lru-cache@11.4.0:
     resolution: {integrity: sha512-W+R+kFL4HgVxONq2bhXPi3bGpzGe/yEhVOp233qw9wCRtgncJ15P3bC+e4zZMu4Cq7d+WAJjXGW0uUkifhcatA==}
     engines: {node: 20 || >=22}
+
+  lucide-static@1.16.0:
+    resolution: {integrity: sha512-/EH96rDLRLNKaxuhqHHbmUPx3+qHS/kQRzI1ZGZqnxmh6ljX9yX0xC2UZlQSfBE/n84eNIaxKsv9P8sMiOdCww==}
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
@@ -3785,6 +3792,8 @@ snapshots:
   longest-streak@3.1.0: {}
 
   lru-cache@11.4.0: {}
+
+  lucide-static@1.16.0: {}
 
   magic-string@0.30.21:
     dependencies:
