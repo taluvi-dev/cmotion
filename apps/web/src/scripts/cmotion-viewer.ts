@@ -189,6 +189,36 @@ function imagePath(node: JsonNode): string | null {
   return null;
 }
 
+// A sprite with cols/rows slices one cell out of a grid atlas. The shared
+// cached texture (loadTexture) can't carry per-cell repeat/offset without
+// corrupting every other user of the same image, so each (src, cols, rows,
+// frame) gets its own clone. clone() shares the underlying Source by
+// reference, so the cell still receives the bitmap once the async fetch
+// lands (same "pixels on the next render" deal as loadTexture). Cached by
+// composite key so an animated frame: doesn't reallocate on a repeat cell.
+const spriteTexCache = new Map<string, THREE.Texture>();
+
+function spriteTexture(src: string, cols: number, rows: number, frame: number): THREE.Texture {
+  if (cols <= 1 && rows <= 1) return loadTexture(src);
+  const key = `${src}|${cols}x${rows}|${frame}`;
+  const cached = spriteTexCache.get(key);
+  if (cached) return cached;
+
+  const tex = loadTexture(src).clone();
+  tex.needsUpdate = true;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.repeat.set(1 / cols, 1 / rows);
+  // frame 0 = top-left, row-major. Three.js's UV origin is bottom-left,
+  // hence the `1 - (row+1)/rows` flip on Y.
+  const col = ((frame % cols) + cols) % cols;
+  const row = Math.floor(frame / cols) % rows;
+  tex.offset.set(col / cols, 1 - (row + 1) / rows);
+
+  spriteTexCache.set(key, tex);
+  return tex;
+}
+
 // ---- Font loading (for text.glyph) ------------------------------
 
 let fontPromise: Promise<opentype.Font> | null = null;
@@ -284,6 +314,51 @@ function buildCircle(node: JsonNode): THREE.Object3D {
   const r = numberOf(f.radius) * pxToWorld;
   const geom = new THREE.CircleGeometry(r, 64);
   const mat = new THREE.MeshBasicMaterial({ color: toThreeColor(f.fill) });
+  return new THREE.Mesh(geom, mat);
+}
+
+// sprite(image(src), width?, height?, cols?, rows?, frame?) — a 2D textured
+// quad. The source resolves through imagePath, so a bare image(...) or an
+// as_texture/fit wrapper both work; `data:` URIs and `https://` URLs load via
+// TextureLoader verbatim. cols/rows/frame slice a grid atlas (frame 0 =
+// top-left, row-major); frame may be animated and arrives already sampled to
+// a number, floored here to a cell index. MeshBasicMaterial is unlit, which
+// is what a flat 2D sprite wants.
+function buildSprite(node: JsonNode): THREE.Object3D | null {
+  const f = namedFields(node);
+  const src = imagePath(positionalArgs(node)[0] ?? f.src ?? f.image);
+  if (!src) {
+    console.warn(`[cmotion-viewer] sprite: no image source`);
+    return null;
+  }
+  const cols = Math.max(1, Math.floor(numberOf(f.cols, 1)));
+  const rows = Math.max(1, Math.floor(numberOf(f.rows, 1)));
+  const frame = Math.floor(numberOf(f.frame, 0));
+  const texture = spriteTexture(src, cols, rows, frame);
+
+  // Explicit width/height (px→world) are the deterministic path. With
+  // neither, fall back to a 256-px square cell — texture native size is
+  // async and unknown at build time; with one, keep the cell square.
+  const hasW = f.width?.kind === "number";
+  const hasH = f.height?.kind === "number";
+  let w = hasW ? numberOf(f.width) * pxToWorld : 0;
+  let h = hasH ? numberOf(f.height) * pxToWorld : 0;
+  if (!hasW && !hasH) {
+    w = 256 * pxToWorld;
+    h = 256 * pxToWorld;
+  } else if (!hasW) {
+    w = h;
+  } else if (!hasH) {
+    h = w;
+  }
+
+  const geom = new THREE.PlaneGeometry(w, h);
+  const mat = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    alphaTest: 0.01,
+    side: THREE.DoubleSide,
+  });
   return new THREE.Mesh(geom, mat);
 }
 
@@ -714,6 +789,8 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       return buildRect(node);
     case "circle":
       return buildCircle(node);
+    case "sprite":
+      return buildSprite(node);
     case "sphere":
       return buildSphere(node);
     case "metaballs":

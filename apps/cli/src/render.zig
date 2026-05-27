@@ -151,6 +151,8 @@ fn paintValue(v: value.Value, fb: *Framebuffer, off: Offset, style: Style) void 
                 paintTranslate(c, fb, off, style);
             } else if (std.mem.eql(u8, c.name, "text.glyph")) {
                 paintTextGlyph(c, fb, off, style);
+            } else if (std.mem.eql(u8, c.name, "sprite")) {
+                paintSprite(c, fb, off, style);
             } else if (has_3d and std.mem.eql(u8, c.name, "render3d")) {
                 paintRender3D(c, fb, off, style);
             } else if (isFlatFallback(c.name)) {
@@ -391,6 +393,41 @@ fn paintRect(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) 
     // Centered-by-default: the rect's geometric centre lands at the
     // canvas centre, shifted by the accumulated translate and the
     // rect's own `at:` offset.
+    const cx = @as(f64, @floatFromInt(fb.width)) / 2.0 + off.x + at.x;
+    const cy = @as(f64, @floatFromInt(fb.height)) / 2.0 + off.y + at.y;
+    fillRect(fb, cx - w / 2.0, cy - h / 2.0, w, h, rgba);
+}
+
+/// `sprite(image(src), width:, height:, ...)` — the native 2D build has
+/// no image decoder (the textured render lives in the Three.js viewer,
+/// per TODO.md), so paint a sized, positioned placeholder block where the
+/// sprite goes. Honours `width`/`height` (default 256px), an optional
+/// `at:` offset, and a `fill:`/`tint:` colour (default neutral gray) so
+/// `cmo render`/`cmo open` read as "an image lands here" rather than
+/// silently dropping the layer.
+fn paintSprite(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) void {
+    var w: f64 = 256;
+    var h: f64 = 256;
+    var fill: ?value.Value = null;
+    var at: Offset = .{};
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "width")) {
+            if (numberAsPixels(f.value)) |px| w = px;
+        } else if (std.mem.eql(u8, f.name, "height")) {
+            if (numberAsPixels(f.value)) |px| h = px;
+        } else if (std.mem.eql(u8, f.name, "fill") or std.mem.eql(u8, f.name, "tint")) {
+            fill = f.value;
+        } else if (std.mem.eql(u8, f.name, "at")) {
+            if (valueAsOffset(f.value)) |a| at = a;
+        }
+    }
+    const rgba: [4]u8 = if (fill) |fv|
+        valueToRgba(fv)
+    else if (style.fill) |sf|
+        valueToRgba(sf)
+    else
+        .{ 128, 128, 128, 255 };
+
     const cx = @as(f64, @floatFromInt(fb.width)) / 2.0 + off.x + at.x;
     const cy = @as(f64, @floatFromInt(fb.height)) / 2.0 + off.y + at.y;
     fillRect(fb, cx - w / 2.0, cy - h / 2.0, w, h, rgba);

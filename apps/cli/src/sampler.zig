@@ -720,6 +720,36 @@ test "sampleAt: recurses into Constructed fields and array elems" {
     try std.testing.expectEqual(@as(f64, 50), sampled.constructed.fields[0].value.number.value);
 }
 
+test "sampleAt: sprite frame: animates via the verbatim recurse" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // sprite(frame: animate(0s => 0, 2s => 8)) → at t=1s, frame = 4.
+    // `sprite` isn't special-cased; this proves the renderer-agnostic
+    // recurse resolves an animated grid-atlas cell index.
+    const kfs = try a.alloc(Value, 2);
+    inline for (.{ .{ 0.0, 0.0 }, .{ 2.0, 8.0 } }, 0..) |pair, i| {
+        const fs = try a.alloc(value.Field, 2);
+        fs[0] = .{ .name = "at", .value = .{ .number = .{ .value = pair[0], .unit = .s } } };
+        fs[1] = .{ .name = "value", .value = .{ .number = .{ .value = pair[1], .unit = null } } };
+        kfs[i] = .{ .record = .{ .fields = fs } };
+    }
+    const top = try a.alloc(value.Field, 2);
+    top[0] = .{ .name = "keyframes", .value = .{ .array = .{ .elems = kfs } } };
+    top[1] = .{ .name = "opts", .value = .nil };
+    const anim = Value{ .constructed = .{ .name = "animate", .fields = top } };
+
+    const sprite_fs = try a.alloc(value.Field, 1);
+    sprite_fs[0] = .{ .name = "frame", .value = anim };
+    const sprite = Value{ .constructed = .{ .name = "sprite", .fields = sprite_fs } };
+
+    const sampled = try sampleAt(a, sprite, 1.0);
+    try std.testing.expectEqualStrings("sprite", sampled.constructed.name);
+    try std.testing.expectEqualStrings("frame", sampled.constructed.fields[0].name);
+    try std.testing.expectEqual(@as(f64, 4), sampled.constructed.fields[0].value.number.value);
+}
+
 fn buildBounce(a: std.mem.Allocator, height_px: f64, period_s: f64, floor_px: f64) !Value {
     const fs = try a.alloc(value.Field, 3);
     fs[0] = .{ .name = "height", .value = .{ .number = .{ .value = height_px, .unit = .px } } };

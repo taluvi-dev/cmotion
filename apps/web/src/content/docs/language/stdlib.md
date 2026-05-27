@@ -9,7 +9,7 @@ The stdlib is intentionally small. Hosts extend it; the core stays narrow.
 
 ### 2D
 
-- `std.shapes` — `rect`, `circle`, `ellipse`, `path`, `image`
+- `std.shapes` — `rect`, `circle`, `ellipse`, `path`, `image`, `sprite`. `image(src)` is the source value (`src` is a `data:` base64 URI — inline and deterministic — or a URL); `sprite(image(src), width?, height?, cols?, rows?, frame?)` is the displayable textured quad, with `cols`/`rows`/`frame` selecting a cell from a grid-atlas sprite sheet (`frame` 0 = top-left, row-major, and may be animated)
 - `std.text` — `text.glyph(string, font, size?)` returning a 2D path
 - `std.compose` — layer stacking, blend modes, masks
 - `std.filter` — `blur(radius)`, `color_grade`, masks
