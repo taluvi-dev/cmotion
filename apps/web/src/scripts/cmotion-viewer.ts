@@ -415,6 +415,8 @@ function buildSprite(node: JsonNode): THREE.Object3D | null {
     alphaTest: 0.01,
     side: THREE.DoubleSide,
   });
+  // Optional `opacity:` (0..1) — animatable, so a sprite can fade in/out.
+  mat.opacity = numberOf(f.opacity, 1);
   // Optional `key:` colour — discard texels within ~0.22 (linear RGB) of it,
   // so a sheet with a solid (alpha-less) background cuts out cleanly. Sheets
   // that already carry an alpha channel just omit `key:`.

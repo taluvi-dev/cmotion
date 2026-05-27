@@ -190,19 +190,32 @@ export const VIKING_SPRITE_SOURCE = `runner "0.0.1";
 use std.shapes.*;
 use std.anim.*;
 
-scene viking_sprite(duration: Duration = 2s) -> Frame {
+scene viking_sprite(duration: Duration = 3.5s) -> Frame {
   let bg = rect(width: 1920px, height: 1080px, fill: #ffffff);
 
-  // Step through all 16 cells (4×4: idle, walk, attack, death rows) over the
-  // loop; the end value (16) wraps back to cell 0 for a seamless cycle.
-  let cycle = animate { 0s => 0, 2s => 16 } with { repeat: forever };
+  // Hold the first cell to introduce the viking, step through all 16 cells
+  // (4×4: idle, walk, attack, death), then hold the last cell before the fade.
+  let cycle = animate {
+    0s   => 0,
+    0.7s => 0,
+    2.3s => 15,
+    2.9s => 15,
+  };
+
+  // Fade in to introduce, hold, then fade out over the final beat.
+  let fade = animate {
+    0s   => 0,
+    0.3s => 1,
+    2.9s => 1,
+    3.5s => 0,
+  };
 
   // key: drops the sheet's white cell background; anchor: re-centres each
-  // frame's content so every pose sits centred instead of wandering.
+  // frame's content; opacity: drives the fade.
   let viking = sprite(
     image("/img/viking.png"),
     width: 900px, height: 900px,
-    cols: 4, rows: 4, frame: cycle, key: #ffffff, anchor: center,
+    cols: 4, rows: 4, frame: cycle, key: #ffffff, anchor: center, opacity: fade,
   );
 
   compose [bg, viking]

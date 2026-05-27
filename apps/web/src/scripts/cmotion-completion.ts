@@ -34,6 +34,7 @@ const MODULES: Record<string, Member[]> = {
     { name: "ellipse", sig: "(rx: Length, ry: Length, fill?: Color)" },
     { name: "path", sig: "(d: String, fill?: Color)" },
     { name: "image", sig: "(src: String, width?: Length, height?: Length)" },
+    { name: "sprite", sig: "(src, width?, height?, cols?, rows?, frame?, key?: Color, anchor?, opacity?)" },
   ],
   "std.text": [
     { name: "glyph", sig: "(string: String, font: String, size?: Length)" },

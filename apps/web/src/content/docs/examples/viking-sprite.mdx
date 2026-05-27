@@ -17,10 +17,12 @@ width:, height:, cols:, rows:, frame:)` is the displayable textured quad.
 top-left, row-major) and is floored, so an animated `frame:` steps crisply
 rather than cross-fading.
 
-Here `frame:` ramps across all 16 cells on a looping `animate`, so the
-viking runs through every action — idle, walk, attack, death. Because this
-sheet has a solid white cell background and its frames aren't grid-aligned,
-`key: #ffffff` cuts out the background and `anchor: center` re-centres each
-frame's content so the figure stays put instead of wandering.
+Here `frame:` steps across all 16 cells, so the viking runs through every
+action — idle, walk, attack, death. The keyframes hold the first cell to
+introduce him and the last (the fall) before fading out via an animated
+`opacity:`. Because this sheet has a solid white cell background and its
+frames aren't grid-aligned, `key: #ffffff` cuts out the background and
+`anchor: center` re-centres each frame's content so the figure stays put
+instead of wandering.
 
 <ExampleScene source={VIKING_SPRITE_SOURCE} />
