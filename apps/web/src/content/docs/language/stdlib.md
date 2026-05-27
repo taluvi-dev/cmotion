@@ -26,7 +26,7 @@ The stdlib is intentionally small. Hosts extend it; the core stays narrow.
 
 ### Motion, color, time, audio
 
-- `std.anim` — `animate { ... }` keyframes; modifiers `with { easing, repeat, … }` where `repeat: <Int> | forever`; helpers `wave(amplitude, period)`, `noise(seed, period)`, easings, splines
+- `std.anim` — `animate { ... }` keyframes; modifiers `with { easing, repeat, … }` where `repeat: <Int> | forever`; helpers `wave(amplitude, period, phase?)` (a quarter-turn `phase:` apart gives the cos/sin pair for circular/orbital motion), `noise(seed, period)`, easings, splines
 - `std.color` — perceptual mixing, gamut mapping, helpers around the `oklch` / `oklab` / `srgb` literals built into the grammar
 - `std.transport` — playhead, time, frame, tempo
 - `std.audio` — FFT, envelope follow, beat/onset detection, sample reading

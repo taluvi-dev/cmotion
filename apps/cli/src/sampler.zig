@@ -133,27 +133,33 @@ fn sampleConstructed(
     return .{ .constructed = .{ .name = c.name, .fields = fields } };
 }
 
-/// `wave(amplitude, period)` → `amplitude · sin(2π · t / period)`.
-/// The amplitude's unit (deg / rad / px / …) carries through to the
-/// output number. `period` is read in time units (s / ms / us / ns);
-/// dropping the unit defaults to seconds. Returns null if either
-/// arg is missing, non-numeric, or the period is zero.
+/// `wave(amplitude, period, phase?)` → `amplitude · sin(2π · t / period +
+/// phase)`. The amplitude's unit (deg / rad / px / …) carries through to the
+/// output number. `period` is read in time units (s / ms / us / ns); dropping
+/// the unit defaults to seconds. `phase` is an angle (deg / turn / rad,
+/// default 0) added to the argument — two waves a quarter-turn apart give the
+/// (cos, sin) pair for circular/orbital motion. Returns null if amplitude or
+/// period is missing, non-numeric, or the period is zero.
 fn tryEvalWave(c: value.Constructed, t: f64) ?Value {
     var amplitude: ?value.Number = null;
     var period: ?value.Number = null;
+    var phase: ?value.Number = null;
     for (c.fields) |f| {
         if (std.mem.eql(u8, f.name, "amplitude") and f.value == .number) {
             amplitude = f.value.number;
         } else if (std.mem.eql(u8, f.name, "period") and f.value == .number) {
             period = f.value.number;
+        } else if (std.mem.eql(u8, f.name, "phase") and f.value == .number) {
+            phase = f.value.number;
         }
     }
     const amp = amplitude orelse return null;
     const per_seconds = numberToSeconds(period orelse return null);
     if (per_seconds == 0) return null;
 
-    const phase = (2.0 * std.math.pi * t) / per_seconds;
-    const result = amp.value * std.math.sin(phase);
+    const phase_offset = if (phase) |p| numberToRadians(p) else 0.0;
+    const theta = (2.0 * std.math.pi * t) / per_seconds + phase_offset;
+    const result = amp.value * std.math.sin(theta);
     return .{ .number = .{ .value = result, .unit = amp.unit } };
 }
 
@@ -468,6 +474,17 @@ fn numberToSeconds(n: value.Number) f64 {
     };
 }
 
+/// Read a numeric angle as radians. `deg`/`turn` convert; `rad` and a bare
+/// unitless number pass through as radians.
+fn numberToRadians(n: value.Number) f64 {
+    const unit = n.unit orelse return n.value;
+    return switch (unit) {
+        .deg => n.value * std.math.pi / 180.0,
+        .turn => n.value * 2.0 * std.math.pi,
+        else => n.value,
+    };
+}
+
 /// Parse a duration spec accepted on the CLI (`--at 1.5s`, `500ms`, ...).
 /// Returns seconds as f64. Errors if the input isn't a recognised
 /// duration; callers turn that into a CLI-level diagnostic.
@@ -675,6 +692,41 @@ test "sampleAt: wave(amplitude, period) resolves to amplitude·sin(2π·t/period
     // Three-quarter-period sample → sin(3π/2) = -1 → negative amplitude.
     const trough = try sampleAt(a, wave, 9.0);
     try std.testing.expectApproxEqAbs(@as(f64, -8.6), trough.number.value, 1e-9);
+}
+
+test "sampleAt: wave phase offset gives the (cos, sin) orbit pair" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // y = wave(amplitude: 100px, period: 4s)            → sin
+    // x = wave(amplitude: 100px, period: 4s, phase: 90deg) → cos
+    // At t=0: y = sin(0) = 0, x = sin(90°) = 1 → (100, 0) on the circle.
+    const ys = try a.alloc(value.Field, 2);
+    ys[0] = .{ .name = "amplitude", .value = .{ .number = .{ .value = 100, .unit = .px } } };
+    ys[1] = .{ .name = "period", .value = .{ .number = .{ .value = 4, .unit = .s } } };
+    const ywave: Value = .{ .constructed = .{ .name = "wave", .fields = ys } };
+
+    const xs = try a.alloc(value.Field, 3);
+    xs[0] = .{ .name = "amplitude", .value = .{ .number = .{ .value = 100, .unit = .px } } };
+    xs[1] = .{ .name = "period", .value = .{ .number = .{ .value = 4, .unit = .s } } };
+    xs[2] = .{ .name = "phase", .value = .{ .number = .{ .value = 90, .unit = .deg } } };
+    const xwave: Value = .{ .constructed = .{ .name = "wave", .fields = xs } };
+
+    const y0 = try sampleAt(a, ywave, 0.0);
+    const x0 = try sampleAt(a, xwave, 0.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), y0.number.value, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 100), x0.number.value, 1e-9);
+
+    // A quarter period later (t=1s) the orbit has advanced 90°: (x, y) = (0, 100).
+    const y1 = try sampleAt(a, ywave, 1.0);
+    const x1 = try sampleAt(a, xwave, 1.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 100), y1.number.value, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0), x1.number.value, 1e-9);
+
+    // Radius is invariant: x² + y² == amplitude² at both samples.
+    try std.testing.expectApproxEqAbs(@as(f64, 10000), x0.number.value * x0.number.value + y0.number.value * y0.number.value, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 10000), x1.number.value * x1.number.value + y1.number.value * y1.number.value, 1e-6);
 }
 
 test "sampleAt: malformed wave (zero period) is preserved verbatim" {
