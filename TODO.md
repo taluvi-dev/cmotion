@@ -125,6 +125,22 @@ outputs are never indexable and don't embed inline. Output URLs
 are R2 signed links with a 1 h TTL; the file itself is deleted
 by the nightly sweep at 24 h.
 
+**Not yet built.** The D1 `assets` ledger (migration `0002_assets.sql`)
+and the per-upload insert in `handleAssets` exist; the rest of the
+abuse story is still TODO:
+
+- [ ] **Asset retention sweep** — a scheduled (cron) Worker that
+  deletes R2 objects + their `assets` rows past the retention window
+  (~24 h), so the playground bucket can't grow unbounded.
+- [ ] **Per-IP upload quota** — in `handleAssets`, count recent
+  `assets` rows for the request's `client_ip` (last hour/day) and
+  reject with a `429` over the limit, before writing to R2.
+- [ ] **SSRF URL guard** — before the container fetches an
+  `image("https://…")` URL, require an `http(s)` scheme and reject
+  private / link-local / loopback ranges (10/8, 172.16/12,
+  192.168/16, 169.254/16, `::1`, …). Documented in **Assets** above,
+  not yet coded.
+
 **Auth.** None in v0. Protected by Cloudflare Rate Limiting
 Rules per-IP at the edge, plus app-level clamps on the expensive
 render params (`duration`, `fps`, output dimensions). Turnstile
