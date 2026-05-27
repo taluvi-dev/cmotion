@@ -388,14 +388,29 @@ scene composition(duration: Duration = 8s) -> Frame {
   let title = render3d(compose [t0, t1, t2, t3, t4, t5, t6],
     lights: [ ambient(0.45), directional(from: vec3(2, 4, 6), intensity: 1.6), directional(from: vec3(-4, -2, 4), intensity: 0.8) ]);
 
-  // Reuse the four cells in a 2×2 grid, sparkle over the whole scene, then
-  // drop the title in the centre — on top of every other layer.
+  // Lava lamp, centre-bottom — the metaballs example reused. A raymarched SDF
+  // field is a full-frame effect (its blobs live in world space, the quad fills
+  // the frame and misses discard), so it's placed by its blob coordinates
+  // rather than a cell transform: a compact cluster bobbing in the lower centre,
+  // below the title and between the two bottom cells. 4s bob loops within 8s.
+  let lava = metaballs([
+    blob(at: vec3(   0px, animate { 0s => -340px, 4s => -290px, 8s => -340px } with { easing: easing.in_out_cubic }, 0px), radius: 110px),
+    blob(at: vec3(-150px, animate { 0s => -300px, 4s => -380px, 8s => -300px } with { easing: easing.in_out_cubic }, 0px), radius:  85px),
+    blob(at: vec3( 150px, animate { 0s => -370px, 4s => -300px, 8s => -370px } with { easing: easing.in_out_cubic }, 0px), radius:  90px),
+    blob(at: vec3( -55px, animate { 0s => -235px, 4s => -285px, 8s => -235px } with { easing: easing.in_out_cubic }, 0px), radius:  62px),
+    blob(at: vec3(  90px, animate { 0s => -470px, 4s => -430px, 8s => -470px } with { easing: easing.in_out_cubic }, 0px), radius:  70px),
+    blob(at: vec3(-120px, animate { 0s => -480px, 4s => -440px, 8s => -480px } with { easing: easing.in_out_cubic }, 0px), radius:  66px),
+  ], smoothing: 70px).material(fill: #d6420f, emissive: #ff7a1a, roughness: 0.18);
+
+  // Reuse the four cells in a 2×2 grid, drop the lava lamp in the lower centre,
+  // sparkle over the whole scene, then the title on top of every other layer.
   compose [
     bg,
     cellA.scale(0.46).translate(x: -480px, y:  264px),
     cellB.scale(0.46).translate(x:  480px, y:  264px),
-    cellD.scale(0.46).translate(x: -480px, y: -264px),
-    cellC.scale(0.46).translate(x:  480px, y: -264px),
+    cellC.scale(0.46).translate(x: -480px, y: -264px),
+    cellD.scale(0.46).translate(x:  480px, y: -264px),
+    lava,
     particles(kind: magic_sparks, count: 220),
     title.scale(0.42),
   ]

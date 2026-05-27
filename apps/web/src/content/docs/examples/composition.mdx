@@ -12,10 +12,13 @@ independently in each spot. That includes whole examples: each of the four
 cells here is the kind of scene shown elsewhere in this gallery.
 
 This example arranges four sub-compositions in a 2×2 grid (each `scale`d and
-`translate`d into a quadrant): an icon orbit, the viking sprite walk, the
+`translate`d into a quadrant): an icon orbit, the viking sprite cycle, the
 bouncing earth, and the spinning homepage glyph — 2D and 3D layers freely
-mixed. A full-scene `particles` layer then sparkles over the whole grid, and
-the title example — the word *cmotion*, each letter spinning in — is dropped
-in the centre as the last layer, so it composites on top of everything else.
+mixed. The lava lamp sits in the lower centre (a raymarched `metaballs` field
+is a full-frame effect, so it's placed by its blob coordinates rather than a
+cell transform). A full-scene `particles` layer then sparkles over the whole
+grid, and the title example — the word *cmotion*, each letter spinning in — is
+dropped in the centre as the last layer, so it composites on top of everything
+else.
 
 <ExampleScene source={COMPOSITION_SOURCE} />
