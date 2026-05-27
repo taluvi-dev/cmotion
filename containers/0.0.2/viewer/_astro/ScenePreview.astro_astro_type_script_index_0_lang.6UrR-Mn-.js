@@ -1,4 +1,4 @@
-import{b as y}from"./cmotion-viewer.BCronjCp.js";const l=`runner "0.0.1";
+import{b as y}from"./cmotion-viewer.D4yjBZz0.js";const l=`runner "0.0.1";
 
 use std.shapes.*;
 use std.mesh3d.*;
