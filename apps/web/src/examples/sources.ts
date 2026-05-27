@@ -325,7 +325,6 @@ scene composition(duration: Duration = 8s) -> Frame {
   // spaced 60° apart via wave phase (x a quarter-turn ahead of y).
   let spin = 8s;
   let cellA = compose [
-    rect(width: 900px, height: 900px, fill: #111827),
     icon("globe", size: 220px, color: #38bdf8),
     icon("smartphone",     size: 110px, color: #e2e8f0).translate(x: wave(amplitude: 300px, period: spin, phase:  90deg), y: wave(amplitude: 300px, period: spin, phase:   0deg)),
     icon("satellite",      size: 110px, color: #a3e635).translate(x: wave(amplitude: 300px, period: spin, phase: 150deg), y: wave(amplitude: 300px, period: spin, phase:  60deg)),
