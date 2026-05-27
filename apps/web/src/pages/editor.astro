@@ -392,9 +392,9 @@ scene title(duration: Duration = 6s) -> Frame {
           setCodeHidden(!layout.classList.contains("code-hidden"));
         }
       });
-      try {
-        if (localStorage.getItem("cmotion-play:code-hidden") === "1") setCodeHidden(true);
-      } catch {}
+      // Always open with the code view shown — examples opened via
+      // "Open in /editor" should land on the source, not a bare preview.
+      // The ⌘\ toggle still hides it within the session.
 
       btnRender.addEventListener("click", () => {
         setPlaying(false);

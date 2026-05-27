@@ -162,13 +162,29 @@ function toThreeColor(v: JsonNode): THREE.Color {
 // loader is async — the texture object is returned immediately, with
 // pixels arriving on the next render after the fetch completes.
 
+// When an async texture (image / svg / icon) finishes loading, a paused
+// preview (e.g. the editor at t=0) has already rendered an earlier frame, so
+// the pixels never appear. requestRerender re-renders the current frame once
+// they land, coalescing a burst of loads into one rAF tick. boot() installs
+// the actual callback.
+let viewerRerender: (() => void) | null = null;
+let rerenderQueued = false;
+function requestRerender(): void {
+  if (!viewerRerender || rerenderQueued) return;
+  rerenderQueued = true;
+  requestAnimationFrame(() => {
+    rerenderQueued = false;
+    viewerRerender?.();
+  });
+}
+
 const textureCache = new Map<string, THREE.Texture>();
 const textureLoader = new THREE.TextureLoader();
 
 function loadTexture(path: string): THREE.Texture {
   const cached = textureCache.get(path);
   if (cached) return cached;
-  const tex = textureLoader.load(path);
+  const tex = textureLoader.load(path, () => requestRerender());
   tex.colorSpace = THREE.SRGBColorSpace;
   textureCache.set(path, tex);
   return tex;
@@ -490,6 +506,7 @@ function rasterizeInto(tex: THREE.Texture, svg: string, color: string | null, we
     c.getContext("2d")?.drawImage(img, 0, 0, SVG_RASTER_PX, SVG_RASTER_PX);
     tex.image = c;
     tex.needsUpdate = true;
+    requestRerender();
   };
   img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(markup);
 }
@@ -1204,6 +1221,10 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
     }
     renderer.render(scene, camera);
   }
+
+  // Re-render the current frame when an async texture (image/svg/icon)
+  // lands, so a paused preview isn't left blank.
+  viewerRerender = () => applyFrame(lastT);
 
   function load(source: string) {
     if (handle) {
