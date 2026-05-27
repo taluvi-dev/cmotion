@@ -56,6 +56,36 @@ owns the Pages project. Pushing to `main` does **not** publish.
   before running `deploy:web` if your wrangler login is associated
   with more than one account.
 
+**Deploying from a Claude Code cloud session is possible.** A
+provisioned remote session has `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_API_TOKEN` set in the environment, and the npm registry +
+Cloudflare API are reachable, so you can deploy without a separate
+`wrangler login` (token auth). `wrangler` isn't a repo dependency —
+run it via `npx wrangler@4 ...` so the lockfile stays untouched.
+Prefer a **preview** deploy so you don't clobber production
+`cmotion.org`:
+
+```
+pnpm --filter @cmotion/web build
+npx wrangler@4 pages deploy apps/web/dist \
+  --project-name cmotion-web --branch <preview-name> --commit-dirty=true
+```
+
+A non-production `--branch` yields a preview URL
+(`https://<branch>.cmotion-web.pages.dev`); only deploying the
+project's production branch publishes the live site. Confirm with the
+human before a production deploy.
+
+## MCP server
+
+A cmotion MCP server is exposed to Claude Code sessions — tools for
+projects, tracks, transport, tempo, regions, automation, layers,
+rendering, and agent docs (plus a Three.js helper server). Prefer these
+over shelling out when a tool fits. Separately, a thin hosted
+`@cmotion/mcp` that wraps the `apps/api` upload → render → poll flow
+into single `render_video` / `render_frame` calls is planned — see
+`README.md` and `TODO.md`.
+
 ## Where things live in `apps/cli/src/`
 
 - `main.zig` — entry point, stdio + arg plumbing, `refAllDecls` smoke
