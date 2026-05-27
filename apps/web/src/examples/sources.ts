@@ -334,10 +334,13 @@ scene composition(duration: Duration = 8s) -> Frame {
     icon("users",          size: 110px, color: #60a5fa).translate(x: wave(amplitude: 300px, period: spin, phase: 390deg), y: wave(amplitude: 300px, period: spin, phase: 300deg)),
   ];
 
-  // Cell B — the viking sprite walk-cycle, reused.
-  let walk = animate { 0s => 4, 0.6s => 8 } with { repeat: forever };
+  // Cell B — the viking sprite, reused. Like the standalone example, step
+  // through all 16 cells (idle / walk / attack / death), hold the death
+  // frame, then fade out and loop — so the full sheet plays, not just walk.
+  let cycle = animate { 0s => 0, 0.7s => 0, 3.5s => 15, 5s => 15 };
+  let fade  = animate { 0s => 0, 0.4s => 1, 5s => 1, 6s => 0, 8s => 0 };
   let cellB = compose [
-    sprite(image("/img/viking.png"), width: 700px, height: 700px, cols: 4, rows: 4, frame: walk, key: #ffffff, anchor: center),
+    sprite(image("/img/viking.png"), width: 700px, height: 700px, cols: 4, rows: 4, frame: cycle, key: #ffffff, anchor: center, opacity: fade),
   ];
 
   // Cell C — the bouncing-ball example reused (earth sphere, bounce + squash).
