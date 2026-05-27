@@ -332,6 +332,54 @@ function buildCircle(node: JsonNode): THREE.Object3D {
 // top-left, row-major); frame may be animated and arrives already sampled to
 // a number, floored here to a cell index. MeshBasicMaterial is unlit, which
 // is what a flat 2D sprite wants.
+
+// Auto-anchor: AI / grid sheets often draw the figure at a different spot in
+// each cell, so equal-quarter slicing makes it wander. Reading the frame's
+// opaque / non-key content bounding box lets `buildSprite` re-centre the quad
+// so the anchor lands consistently (walk-in-place). Needs a same-origin
+// (CORS-clean) image for the pixel readback; cached per (src, grid, frame).
+const spriteAnchorCache = new Map<string, { ox: number; oyCenter: number; oyBottom: number } | null>();
+
+function spriteContentOffset(
+  img: any, cols: number, rows: number, frame: number, keySRGB: THREE.Color | null,
+): { ox: number; oyCenter: number; oyBottom: number } | null {
+  if (!img || !img.width || !img.height) return null;
+  const cacheKey = `${img.currentSrc || img.src}|${cols}x${rows}|${frame}`;
+  if (spriteAnchorCache.has(cacheKey)) return spriteAnchorCache.get(cacheKey)!;
+  const cw = Math.floor(img.width / cols), ch = Math.floor(img.height / rows);
+  const col = ((frame % cols) + cols) % cols, row = Math.floor(frame / cols) % rows;
+  const cnv = document.createElement("canvas");
+  cnv.width = cw; cnv.height = ch;
+  const ctx = cnv.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.drawImage(img, col * cw, row * ch, cw, ch, 0, 0, cw, ch);
+  let d: Uint8ClampedArray;
+  try { d = ctx.getImageData(0, 0, cw, ch).data; } catch { return null; } // CORS taint → skip
+  const kr = keySRGB ? keySRGB.r * 255 : 0, kg = keySRGB ? keySRGB.g * 255 : 0, kb = keySRGB ? keySRGB.b * 255 : 0;
+  const thr2 = 56 * 56; // ~match the shader's near-key cutoff, in sRGB bytes
+  let minX = cw, minY = ch, maxX = -1, maxY = -1;
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) {
+      const i = (y * cw + x) * 4;
+      if (d[i + 3] < 10) continue; // transparent → background
+      if (keySRGB) {
+        const dr = d[i] - kr, dg = d[i + 1] - kg, db = d[i + 2] - kb;
+        if (dr * dr + dg * dg + db * db < thr2) continue; // near key → background
+      }
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+  }
+  let res: { ox: number; oyCenter: number; oyBottom: number } | null = null;
+  if (maxX >= 0) {
+    const bcx = (minX + maxX + 1) / 2 / cw; // content centre x, 0..1
+    const bcy = (minY + maxY + 1) / 2 / ch; // content centre y, 0..1 (downward)
+    res = { ox: bcx - 0.5, oyCenter: bcy - 0.5, oyBottom: (maxY + 1) / ch - 0.5 };
+  }
+  spriteAnchorCache.set(cacheKey, res);
+  return res;
+}
+
 function buildSprite(node: JsonNode): THREE.Object3D | null {
   const f = namedFields(node);
   const src = imagePath(positionalArgs(node)[0] ?? f.src ?? f.image);
@@ -380,7 +428,20 @@ function buildSprite(node: JsonNode): THREE.Object3D | null {
       );
     };
   }
-  return new THREE.Mesh(geom, mat);
+  const mesh = new THREE.Mesh(geom, mat);
+  // Auto-anchor: re-centre the frame's content so an off-centre sheet walks
+  // in place. `anchor: bottom` plants the feet; any other anchor centres the
+  // content bounding box.
+  const anchorName = f.anchor?.kind === "constructed" ? f.anchor.name : null;
+  if (anchorName) {
+    const keySRGB = f.key?.kind === "color" ? toThreeColor(f.key) : null;
+    const off = spriteContentOffset(loadTexture(src).image, cols, rows, frame, keySRGB);
+    if (off) {
+      mesh.position.x -= off.ox * w;
+      mesh.position.y += (anchorName === "bottom" ? off.oyBottom : off.oyCenter) * h;
+    }
+  }
+  return mesh;
 }
 
 // sphere(r: <px>) → SphereGeometry with a placeholder white standard

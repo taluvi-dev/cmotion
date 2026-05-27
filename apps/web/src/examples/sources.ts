@@ -179,28 +179,30 @@ scene bouncing_ball(
 
 // Viking sprite: a 4×4, 16-frame character sheet (rows: idle / walk /
 // attack / death) loaded from /public and drawn with `sprite(...)`.
-// `frame:` ramps across the walk row (cells 4–7); the viewer floors it to
-// a cell index (frame 0 = top-left, row-major), so the figure steps
-// crisply through the sheet. Point `frame:` at another range to play a
-// different action (idle 0–3, attack 8–11, death 12–15). `image(src)` also
-// takes an inline base64 `data:` URI for small sheets — see
-// scripts/embed_sprite_base64.py.
+// `frame:` ramps across all 16 cells; the viewer floors it to a cell index
+// (frame 0 = top-left, row-major), so the figure steps crisply through the
+// whole sheet. `key:` drops the sheet's solid white cell background and
+// `anchor:` re-centres each frame's content (the source frames aren't
+// grid-aligned). `image(src)` also takes an inline base64 `data:` URI for
+// small sheets — see scripts/embed_sprite_base64.py.
 export const VIKING_SPRITE_SOURCE = `runner "0.0.1";
 
 use std.shapes.*;
 use std.anim.*;
 
-scene viking_sprite(duration: Duration = 0.6s) -> Frame {
-  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.16, 0.03, 250));
+scene viking_sprite(duration: Duration = 2s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: #ffffff);
 
-  // Loop the walk row (cells 4–7): each cell shows for duration/4, and the
-  // ramp's end value (8) wraps back to the row start for a seamless cycle.
-  let walk = animate { 0s => 4, 0.6s => 8 } with { repeat: forever };
+  // Step through all 16 cells (4×4: idle, walk, attack, death rows) over the
+  // loop; the end value (16) wraps back to cell 0 for a seamless cycle.
+  let cycle = animate { 0s => 0, 2s => 16 } with { repeat: forever };
 
+  // key: drops the sheet's white cell background; anchor: re-centres each
+  // frame's content so every pose sits centred instead of wandering.
   let viking = sprite(
     image("/img/viking.png"),
-    width: 768px, height: 768px,
-    cols: 4, rows: 4, frame: walk, key: #ffffff,
+    width: 900px, height: 900px,
+    cols: 4, rows: 4, frame: cycle, key: #ffffff, anchor: center,
   );
 
   compose [bg, viking]
