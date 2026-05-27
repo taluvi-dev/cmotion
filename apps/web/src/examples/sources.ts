@@ -337,7 +337,6 @@ scene composition(duration: Duration = 8s) -> Frame {
   // Cell B — the viking sprite walk-cycle, reused.
   let walk = animate { 0s => 4, 0.6s => 8 } with { repeat: forever };
   let cellB = compose [
-    rect(width: 900px, height: 900px, fill: #1f2937),
     sprite(image("/img/viking.png"), width: 700px, height: 700px, cols: 4, rows: 4, frame: walk, key: #ffffff, anchor: center),
   ];
 
@@ -349,7 +348,6 @@ scene composition(duration: Duration = 8s) -> Frame {
     .material(fill: image("/img/earth_4k.jpg").as_texture(projection: equirectangular))
     .rotate(y: spinB).pivot(bottom).squash(factor: squashB);
   let cellC = compose [
-    rect(width: 900px, height: 900px, fill: #0a1530),
     render3d(ball.translate(y: bounceY.position),
       lights: [ ambient(0.35), directional(from: vec3(2, 3, 4), intensity: 1.0) ]),
   ];
@@ -363,7 +361,6 @@ scene composition(duration: Duration = 8s) -> Frame {
               emissive: oklch(0.65, 0.18, hueG), emissive_intensity: 0.6)
     .rotate(x: wave(amplitude: 8.6deg, period: 12s), y: rotG).scale(pulseG);
   let cellD = compose [
-    rect(width: 900px, height: 900px, fill: #120b22),
     render3d(glyph, lights: [ ambient(0.35), directional(from: vec3(3, 4, 5), intensity: 1.6), directional(from: vec3(-4, -2, -3), intensity: 0.9) ]),
   ];
 
