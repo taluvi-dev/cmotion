@@ -364,7 +364,27 @@ scene composition(duration: Duration = 8s) -> Frame {
     render3d(glyph, lights: [ ambient(0.35), directional(from: vec3(3, 4, 5), intensity: 1.6), directional(from: vec3(-4, -2, -3), intensity: 0.9) ]),
   ];
 
-  // Reuse the four cells in a 2×2 grid, then sparkle over the whole scene.
+  // Centre piece — the Title example reused: the word "cmotion", each letter
+  // its own colour, spinning in on a 0.3s stagger; the "i" hops. No tile bg.
+  let r0 = animate { 0s => 0deg, 2.0s => 360deg, 8s => 360deg } with { easing: easing.in_out_cubic };
+  let r1 = animate { 0s => 0deg, 0.3s => 0deg, 2.3s => 360deg, 8s => 360deg } with { easing: easing.in_out_cubic };
+  let r2 = animate { 0s => 0deg, 0.6s => 0deg, 2.6s => 360deg, 8s => 360deg } with { easing: easing.in_out_cubic };
+  let r3 = animate { 0s => 0deg, 0.9s => 0deg, 2.9s => 360deg, 8s => 360deg } with { easing: easing.in_out_cubic };
+  let r5 = animate { 0s => 0deg, 1.5s => 0deg, 3.5s => 360deg, 8s => 360deg } with { easing: easing.in_out_cubic };
+  let r6 = animate { 0s => 0deg, 1.8s => 0deg, 3.8s => 360deg, 8s => 360deg } with { easing: easing.in_out_cubic };
+  let ijump = animate { 0s => 30px, 1.3s => 250px, 2.1s => 30px, 2.8s => 165px, 3.5s => 30px, 8s => 30px } with { easing: easing.in_out_cubic };
+  let t0 = extrude(text.glyph("c", size: 430px), depth: 43px).material(fill: oklch(0.70, 0.20,  25)).rotate(y: r0).translate(x: -567px);
+  let t1 = extrude(text.glyph("m", size: 430px), depth: 43px).material(fill: oklch(0.83, 0.16,  92)).rotate(y: r1).translate(x: -313px);
+  let t2 = extrude(text.glyph("o", size: 430px), depth: 43px).material(fill: oklch(0.70, 0.19, 150)).rotate(y: r2).translate(x: -59px);
+  let t3 = extrude(text.glyph("t", size: 430px), depth: 43px).material(fill: oklch(0.66, 0.16, 245)).rotate(y: r3).translate(x: 108px);
+  let t4 = extrude(text.glyph("i", size: 430px), depth: 43px).material(fill: oklch(0.70, 0.23, 350)).translate(x: 225px, y: ijump);
+  let t5 = extrude(text.glyph("o", size: 430px), depth: 43px).material(fill: oklch(0.74, 0.20,  55)).rotate(y: r5).translate(x: 368px);
+  let t6 = extrude(text.glyph("n", size: 430px), depth: 43px).material(fill: oklch(0.72, 0.17, 195)).rotate(y: r6).translate(x: 570px);
+  let title = render3d(compose [t0, t1, t2, t3, t4, t5, t6],
+    lights: [ ambient(0.45), directional(from: vec3(2, 4, 6), intensity: 1.6), directional(from: vec3(-4, -2, 4), intensity: 0.8) ]);
+
+  // Reuse the four cells in a 2×2 grid, sparkle over the whole scene, then
+  // drop the title in the centre — on top of every other layer.
   compose [
     bg,
     cellA.scale(0.46).translate(x: -480px, y:  264px),
@@ -372,6 +392,7 @@ scene composition(duration: Duration = 8s) -> Frame {
     cellC.scale(0.46).translate(x: -480px, y: -264px),
     cellD.scale(0.46).translate(x:  480px, y: -264px),
     particles(kind: magic_sparks, count: 220),
+    title.scale(0.42),
   ]
 }
 `;
