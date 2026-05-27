@@ -181,10 +181,10 @@ scene bouncing_ball(
 // attack / death) loaded from /public and drawn with `sprite(...)`.
 // `frame:` ramps across all 16 cells; the viewer floors it to a cell index
 // (frame 0 = top-left, row-major), so the figure steps crisply through the
-// whole sheet. `key:` drops the sheet's solid white cell background and
-// `anchor:` re-centres each frame's content (the source frames aren't
-// grid-aligned). `image(src)` also takes an inline base64 `data:` URI for
-// small sheets — see scripts/embed_sprite_base64.py.
+// whole sheet. The sheet carries its own alpha (background already removed),
+// so no `key:` is needed; `anchor:` re-centres each frame's content (the
+// source frames aren't grid-aligned). `image(src)` also takes an inline
+// base64 `data:` URI for small sheets — see scripts/embed_sprite_base64.py.
 export const VIKING_SPRITE_SOURCE = `runner "0.0.1";
 
 use std.shapes.*;
@@ -212,12 +212,12 @@ scene viking_sprite(duration: Duration = 4.5s) -> Frame {
     4.5s => 0,
   };
 
-  // key: drops the sheet's white cell background; anchor: re-centres each
-  // frame's content; opacity: drives the fade.
+  // The sheet's background is already transparent, so no key: is needed;
+  // anchor: re-centres each frame's content; opacity: drives the fade.
   let viking = sprite(
-    image("/img/viking.png"),
+    image("/img/viking-transparent.png"),
     width: 900px, height: 900px,
-    cols: 4, rows: 4, frame: cycle, key: #ffffff, anchor: center, opacity: fade,
+    cols: 4, rows: 4, frame: cycle, anchor: center, opacity: fade,
   );
 
   compose [bg, viking]
@@ -340,7 +340,7 @@ scene composition(duration: Duration = 8s) -> Frame {
   let cycle = animate { 0s => 0, 0.7s => 0, 3.5s => 15, 5s => 15 };
   let fade  = animate { 0s => 0, 0.4s => 1, 5s => 1, 6s => 0, 8s => 0 };
   let cellB = compose [
-    sprite(image("/img/viking.png"), width: 700px, height: 700px, cols: 4, rows: 4, frame: cycle, key: #ffffff, anchor: center, opacity: fade),
+    sprite(image("/img/viking-transparent.png"), width: 700px, height: 700px, cols: 4, rows: 4, frame: cycle, anchor: center, opacity: fade),
   ];
 
   // Cell C — the bouncing-ball example reused (earth sphere, bounce + squash).
