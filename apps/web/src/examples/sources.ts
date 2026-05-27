@@ -394,8 +394,8 @@ scene composition(duration: Duration = 8s) -> Frame {
     bg,
     cellA.scale(0.46).translate(x: -480px, y:  264px),
     cellB.scale(0.46).translate(x:  480px, y:  264px),
-    cellC.scale(0.46).translate(x: -480px, y: -264px),
-    cellD.scale(0.46).translate(x:  480px, y: -264px),
+    cellD.scale(0.46).translate(x: -480px, y: -264px),
+    cellC.scale(0.46).translate(x:  480px, y: -264px),
     particles(kind: magic_sparks, count: 220),
     title.scale(0.42),
   ]
