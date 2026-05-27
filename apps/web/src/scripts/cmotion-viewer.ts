@@ -199,21 +199,29 @@ function imagePath(node: JsonNode): string | null {
 const spriteTexCache = new Map<string, THREE.Texture>();
 
 function spriteTexture(src: string, cols: number, rows: number, frame: number): THREE.Texture {
-  if (cols <= 1 && rows <= 1) return loadTexture(src);
   const key = `${src}|${cols}x${rows}|${frame}`;
   const cached = spriteTexCache.get(key);
   if (cached) return cached;
 
+  // Always a clone (never the shared loadTexture instance): sprites get
+  // nearest-neighbour filtering + no mipmaps so pixel-art sheets stay crisp
+  // and don't bleed across atlas-cell edges. clone() shares the underlying
+  // Source, so the bitmap still arrives once the async fetch lands.
   const tex = loadTexture(src).clone();
   tex.needsUpdate = true;
+  tex.magFilter = THREE.NearestFilter;
+  tex.minFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
-  tex.repeat.set(1 / cols, 1 / rows);
-  // frame 0 = top-left, row-major. Three.js's UV origin is bottom-left,
-  // hence the `1 - (row+1)/rows` flip on Y.
-  const col = ((frame % cols) + cols) % cols;
-  const row = Math.floor(frame / cols) % rows;
-  tex.offset.set(col / cols, 1 - (row + 1) / rows);
+  if (cols > 1 || rows > 1) {
+    tex.repeat.set(1 / cols, 1 / rows);
+    // frame 0 = top-left, row-major. Three.js's UV origin is bottom-left,
+    // hence the `1 - (row+1)/rows` flip on Y.
+    const col = ((frame % cols) + cols) % cols;
+    const row = Math.floor(frame / cols) % rows;
+    tex.offset.set(col / cols, 1 - (row + 1) / rows);
+  }
 
   spriteTexCache.set(key, tex);
   return tex;
@@ -359,6 +367,19 @@ function buildSprite(node: JsonNode): THREE.Object3D | null {
     alphaTest: 0.01,
     side: THREE.DoubleSide,
   });
+  // Optional `key:` colour — discard texels within ~0.22 (linear RGB) of it,
+  // so a sheet with a solid (alpha-less) background cuts out cleanly. Sheets
+  // that already carry an alpha channel just omit `key:`.
+  if (f.key?.kind === "color") {
+    const keyRGB = toThreeColor(f.key).convertSRGBToLinear();
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uSpriteKey = { value: keyRGB };
+      shader.fragmentShader = "uniform vec3 uSpriteKey;\n" + shader.fragmentShader.replace(
+        "#include <map_fragment>",
+        "#include <map_fragment>\n  if (distance(diffuseColor.rgb, uSpriteKey) < 0.22) discard;",
+      );
+    };
+  }
   return new THREE.Mesh(geom, mat);
 }
 

@@ -199,8 +199,8 @@ scene viking_sprite(duration: Duration = 0.6s) -> Frame {
 
   let viking = sprite(
     image("/img/viking.png"),
-    width: 384px, height: 384px,
-    cols: 4, rows: 4, frame: walk,
+    width: 768px, height: 768px,
+    cols: 4, rows: 4, frame: walk, key: #ffffff,
   );
 
   compose [bg, viking]
