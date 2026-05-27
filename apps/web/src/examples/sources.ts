@@ -321,15 +321,18 @@ use std.scene3d.*;
 scene composition(duration: Duration = 8s) -> Frame {
   let bg = rect(width: 1920px, height: 1080px, fill: #0b0f1a);
 
-  // Cell A — a globe with two icons orbiting it (wave-phase).
+  // Cell A — the Icons example: a globe with six icons orbiting it,
+  // spaced 60° apart via wave phase (x a quarter-turn ahead of y).
   let spin = 8s;
   let cellA = compose [
     rect(width: 900px, height: 900px, fill: #111827),
-    icon("globe", size: 260px, color: #38bdf8),
-    icon("satellite", size: 120px, color: #a3e635)
-      .translate(x: wave(amplitude: 320px, period: spin, phase:  90deg), y: wave(amplitude: 320px, period: spin, phase:   0deg)),
-    icon("rocket", size: 120px, color: #f472b6)
-      .translate(x: wave(amplitude: 320px, period: spin, phase: 270deg), y: wave(amplitude: 320px, period: spin, phase: 180deg)),
+    icon("globe", size: 220px, color: #38bdf8),
+    icon("smartphone",     size: 110px, color: #e2e8f0).translate(x: wave(amplitude: 300px, period: spin, phase:  90deg), y: wave(amplitude: 300px, period: spin, phase:   0deg)),
+    icon("satellite",      size: 110px, color: #a3e635).translate(x: wave(amplitude: 300px, period: spin, phase: 150deg), y: wave(amplitude: 300px, period: spin, phase:  60deg)),
+    icon("dollar-sign",    size: 110px, color: #fbbf24).translate(x: wave(amplitude: 300px, period: spin, phase: 210deg), y: wave(amplitude: 300px, period: spin, phase: 120deg)),
+    icon("sword",          size: 110px, color: #f87171).translate(x: wave(amplitude: 300px, period: spin, phase: 270deg), y: wave(amplitude: 300px, period: spin, phase: 180deg)),
+    icon("ice-cream-cone", size: 110px, color: #f9a8d4).translate(x: wave(amplitude: 300px, period: spin, phase: 330deg), y: wave(amplitude: 300px, period: spin, phase: 240deg)),
+    icon("users",          size: 110px, color: #60a5fa).translate(x: wave(amplitude: 300px, period: spin, phase: 390deg), y: wave(amplitude: 300px, period: spin, phase: 300deg)),
   ];
 
   // Cell B — the viking sprite walk-cycle, reused.
