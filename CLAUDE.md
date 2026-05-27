@@ -41,6 +41,37 @@ that aren't always obvious from the source.
 - From the repo root, `pnpm install` covers `apps/web` and the
   tree-sitter package; `pnpm dev` runs the web app.
 
+## Rendering & previewing (how to see what a `.cm` produces)
+
+Three surfaces, by fidelity for *visual* features:
+
+- **Browser viewer — the source of truth.** `pnpm dev` (repo root) →
+  open `/editor`, paste a source or deep-link
+  `/editor/#source=<urlencoded .cm>`. Real Three.js + WASM viewer
+  (`apps/web/src/scripts/cmotion-viewer.ts`): sprites, 3D, lights,
+  textures. If it looks right here, it's right.
+- **Native CLI — fast, 2D only.** `cmo render --at <t> --out f.ppm <file>`
+  (one frame) or `cmo bounce` (APNG). `render.zig` is a 2D software
+  raster (rect / text-glyph / flat fallback for 3D); `sprite()` draws
+  only a **placeholder block** there — no image decoder natively. Good
+  for layout/position, not textured output. `cmo eval --at <t>` dumps the
+  sampled value tree (what the viewer consumes) without rendering.
+- **Hosted render API — `api.cmotion.org`.** `POST /v1/frame
+  {source, params:{at,width,height}}` → poll `GET /v1/jobs/:id` →
+  download the `url` (PNG); `/v1/render` → video (MP4). See `apps/api`.
+
+**Gotcha — the hosted API lags the branch.** It renders with the viewer
+**baked into the deployed container image** (`containers/<version>/viewer`),
+not your working tree, so new viewer features (e.g. `sprite()`) and new
+`/img` assets only appear there after the container is rebuilt + deployed.
+To check a branch's visual change, use the local browser viewer.
+
+**For AI sessions:** you can view rendered PNGs directly (Read the file),
+so a downloaded frame is how you "see" output. There's **no headless
+browser in the cloud sandbox** — you can't run the WebGL viewer yourself;
+have a human run `pnpm dev`, or inspect a rendered frame. Outbound TLS to
+`api.cmotion.org` may also fail cert validation from a cloud session.
+
 ## Deploy
 
 There is **no automated git-triggered deploy** for cmotion.org. The
