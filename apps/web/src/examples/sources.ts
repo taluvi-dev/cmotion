@@ -177,6 +177,36 @@ scene bouncing_ball(
 }
 `;
 
+// Viking sprite: a 4×4, 16-frame sprite sheet (rows: idle / walk / attack
+// / death), embedded inline as a base64 `data:` URI — no external asset —
+// and drawn with `sprite(...)`. `frame:` ramps across the walk row (cells
+// 4–7); the viewer floors it to a cell index (frame 0 = top-left,
+// row-major), so the figure steps crisply through the sheet. To reskin,
+// replace the data URI with a real sheet's base64 (same 4×4 grid) — see
+// scripts/embed_sprite_base64.py — and adjust the frame range to taste
+// (idle 0–3, walk 4–7, attack 8–11, death 12–15).
+export const VIKING_SPRITE_SOURCE = `runner "0.0.1";
+
+use std.shapes.*;
+use std.anim.*;
+
+scene viking_sprite(duration: Duration = 0.6s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.16, 0.03, 250));
+
+  // Loop the walk row (cells 4–7): each cell shows for duration/4, and the
+  // ramp's end value (8) wraps back to the row start for a seamless cycle.
+  let walk = animate { 0s => 4, 0.6s => 8 } with { repeat: forever };
+
+  let viking = sprite(
+    image("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAIAAADdvvtQAAADmUlEQVR42u3dwU0bQRiGYSqhBqrgQA2pgRoQRVAD4pACOHPgTAFUseIMkiUL2V7beHf++Wfmkd5LSKR82XmiiGA8V9P0JV3clUcggASQABJAEkACSAAJIAkgASSABJAEkABSB4Ce/7+eLPKPYU+tPQDZA5A9ADkwgBwYQB6QPWGfxn++PBwp/vNJe6rsAcgegOwByIEB5MAA8oDsKQfo/u7md9vfe+fjm58KeCL2ZNgDkD2FAT3d3x5sf8e223+PP21/uO5zsSfVHoDsqQ1o89vvV+sB2RO5ByB7ALIHIAcGkAMDyAOyJxWgt/eP/So+IHtW3wOQPYUBHWxuxO9+flmJB2RPqj0A2VMD0M7X6uY+EvaA7Km1ByB7EgOKzJ4qewCyByB7WgQkASSABJAAEkASQAJIAAkgCSABJIAEkASQANJlZXyjcQE0dXPVwTgHBhBAALncxB6A7AHInj+U653qHRhASz+NT/VW/uMcGEAAATTSA7IHIHsAsufvpbutx4EBtAhQtuuMxjywk6W7bAUggBYBynad0eAHtnxPujcaBwigRIMcGEAAAeQB2QOQPQDZE7on3W09Dgygrq4z6uDALqvmZSsAAbT+F1MrXmc0+IGt8v+ucx8BCKBGAE3JrjMa58CK7gl9PRBAAE2j3dbTwYEVXQgQQO28P1D+v0/ZQHdZP+8PNMjfeIAEkASQABJAAkgASQAJIAEkgCSA1DCgg6+aKPfCieb2AASQAAIIIIBaBXT8Lb3jD6ytPS5bAQigkoA2Rb6ctMU9AAEEEEAAAQRQe4CmM97YO/hbaprbE1x7l60ABBBAAAEEEEAAAQTQ8ICyXfdkT4Y9ANlTGNDFl5sUei7d7OnjMhqAALpJeldGrQNrZY/LVgACCCCAAAIIIIAAAggggIIPrIPLaAACqDCgg515uUlYje5x4RxAAK3xtbq5j0Tm8pcqewACCCB76u0ByB6A7GkRkASQABJAAkgASQAJIAEkgCSABJAAEkASQGoFkOuVAAJIAAkg9QnIBW8CSFkBuV4JIIAEEEAAAdTtp/EuNxFAAggggAACCCCAAFJRQC54E0AKB+SCNwG0PqBs/99da89AVx3EADri+Mi25U+v1h6AAAIIIIAAAqh/QE/X1zvVBZRhD0AAAVTjgre5fzLOP5KYf8JK7wFo0feKrHU8az29+D1jXTjn2x2zfDUeIC19OYcL3gQQQABl3QMQQDrdN/3O1tVLUeh7AAAAAElFTkSuQmCC"),
+    width: 384px, height: 384px,
+    cols: 4, rows: 4, frame: walk,
+  );
+
+  compose [bg, viking]
+}
+`;
+
 // Lava lamp: a raymarched smooth-union metaball field (the Three.js viewer
 // renders `metaballs` as an SDF fragment shader). Each blob keeps a constant
 // radius — so it deforms by merging/separating from its neighbours while its
