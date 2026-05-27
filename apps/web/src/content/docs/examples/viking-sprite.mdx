@@ -1,20 +1,21 @@
 ---
 title: Viking sprite
-description: A walk-cycle sprite sheet animated by stepping through a 4×4 grid atlas with sprite() and an inline base64 image.
+description: A walk-cycle sprite sheet animated by stepping through a 4×4 grid atlas with sprite().
 ---
 
 import ExampleScene from '../../../components/ExampleScene.astro';
 import { VIKING_SPRITE_SOURCE } from '../../../examples/sources.ts';
 
 A 16-frame character sheet (idle, walk, attack, death — one row each)
-packed into a 4×4 grid and embedded inline as a base64 `data:` URI, so
-the asset travels with the source and the render stays deterministic.
+packed into a 4×4 grid, loaded from `/img/viking.png` and drawn with
+`sprite(...)`.
 
-`image(src)` is the source value — here a `data:image/png;base64,…`
-string — and `sprite(image(src), width:, height:, cols:, rows:, frame:)`
-is the displayable textured quad. `cols`/`rows` describe the atlas grid;
-`frame` selects a cell (0 = top-left, row-major) and is floored, so an
-animated `frame:` steps crisply rather than cross-fading.
+`image(src)` is the source value — a path to an image, or an inline
+`data:image/png;base64,…` URI for small sheets — and `sprite(image(src),
+width:, height:, cols:, rows:, frame:)` is the displayable textured quad.
+`cols`/`rows` describe the atlas grid; `frame` selects a cell (0 =
+top-left, row-major) and is floored, so an animated `frame:` steps crisply
+rather than cross-fading.
 
 Here `frame:` ramps across the walk row (cells 4–7) on a looping
 `animate`. Point it at a different range to play another action — idle
