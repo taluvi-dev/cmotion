@@ -56,6 +56,8 @@ export default defineConfig({
 						{ label: 'Bouncing ball', slug: 'examples/bouncing-ball' },
 						{ label: 'Viking sprite', slug: 'examples/viking-sprite' },
 						{ label: 'Icons', slug: 'examples/icons' },
+						{ label: 'Particles', slug: 'examples/particles' },
+						{ label: 'Composition', slug: 'examples/composition' },
 					],
 				},
 				{

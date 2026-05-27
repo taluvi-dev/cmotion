@@ -37,6 +37,7 @@ const MODULES: Record<string, Member[]> = {
     { name: "sprite", sig: "(src, width?, height?, cols?, rows?, frame?, key?: Color, anchor?, opacity?)" },
     { name: "svg", sig: "(source: String, size?: Length, color?: Color, weight?, opacity?)" },
     { name: "icon", sig: "(name: String, size?: Length, color?: Color, weight?, opacity?)" },
+    { name: "particles", sig: "(kind, count?, area?, speed?, size?, color?, seed?, period?)" },
   ],
   "std.text": [
     { name: "glyph", sig: "(string: String, font: String, size?: Length)" },

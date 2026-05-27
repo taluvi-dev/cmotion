@@ -287,3 +287,85 @@ scene icons(duration: Duration = 16s) -> Frame {
   compose [bg, world, s0, s1, s2, s3, s4, s5]
 }
 `;
+
+// Particles: a generative point-sprite field (a viewer primitive, like
+// metaballs). One emitter cycling through all eight kinds across the loop —
+// stars → dust → snow → embers → magic sparks → fireflies → smoke → pollen.
+// `particles(kind: cycle, period:)` rotates the preset by frame time; each
+// named kind (e.g. `particles(kind: snow)`) is available on its own.
+export const PARTICLES_SOURCE = `runner "0.0.1";
+
+use std.shapes.*;
+
+scene particle_field(duration: Duration = 8s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: #05070f);
+  compose [bg, particles(kind: cycle, count: 400, period: 8s)]
+}
+`;
+
+// Composition: a composition is just a value, so it can be reused inside
+// another composition. Here four sub-compositions are arranged in a 2×2 grid
+// (each scaled + translated into a quadrant), one of them — the flower — is
+// itself built by reusing a petal sub-composition five times (composition
+// within a composition), and a full-scene particle layer sparkles over the
+// whole grid to show layers compositing on top.
+export const COMPOSITION_SOURCE = `runner "0.0.1";
+
+use std.shapes.*;
+use std.anim.*;
+
+scene composition(duration: Duration = 8s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: #0b0f1a);
+
+  // Cell A — a globe with two icons orbiting it (wave-phase).
+  let spin = 8s;
+  let cellA = compose [
+    rect(width: 900px, height: 900px, fill: #111827),
+    icon("globe", size: 260px, color: #38bdf8),
+    icon("satellite", size: 120px, color: #a3e635)
+      .translate(x: wave(amplitude: 320px, period: spin, phase:  90deg), y: wave(amplitude: 320px, period: spin, phase:   0deg)),
+    icon("rocket", size: 120px, color: #f472b6)
+      .translate(x: wave(amplitude: 320px, period: spin, phase: 270deg), y: wave(amplitude: 320px, period: spin, phase: 180deg)),
+  ];
+
+  // Cell B — the viking sprite walk-cycle, reused.
+  let walk = animate { 0s => 4, 0.6s => 8 } with { repeat: forever };
+  let cellB = compose [
+    rect(width: 900px, height: 900px, fill: #1f2937),
+    sprite(image("/img/viking.png"), width: 700px, height: 700px, cols: 4, rows: 4, frame: walk, key: #ffffff, anchor: center),
+  ];
+
+  // Cell C — composition within a composition: one petal reused five times
+  // (rotated) builds a flower, and the flower sways as a whole.
+  let petal = compose [ circle(radius: 70px, fill: #f9a8d4).translate(y: 150px) ];
+  let flower = compose [
+    petal,
+    petal.rotate(z:  72deg),
+    petal.rotate(z: 144deg),
+    petal.rotate(z: 216deg),
+    petal.rotate(z: 288deg),
+    circle(radius: 70px, fill: #fde047),
+  ];
+  let cellC = compose [
+    rect(width: 900px, height: 900px, fill: #18181b),
+    flower.rotate(z: wave(amplitude: 30deg, period: 6s)),
+  ];
+
+  // Cell D — a simple badge.
+  let cellD = compose [
+    rect(width: 900px, height: 900px, fill: #0f172a),
+    circle(radius: 230px, fill: #22c55e),
+    icon("heart", size: 230px, color: #ffffff),
+  ];
+
+  // Reuse the four cells in a 2×2 grid, then sparkle over the whole scene.
+  compose [
+    bg,
+    cellA.scale(0.46).translate(x: -480px, y:  264px),
+    cellB.scale(0.46).translate(x:  480px, y:  264px),
+    cellC.scale(0.46).translate(x: -480px, y: -264px),
+    cellD.scale(0.46).translate(x:  480px, y: -264px),
+    particles(kind: magic_sparks, count: 220),
+  ]
+}
+`;

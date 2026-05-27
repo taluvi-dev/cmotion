@@ -318,10 +318,14 @@ interface BuildCtx {
   // Set from the first rect layer's width/height — defines the
   // letterbox aspect of the rendered viewport.
   sceneAspect: number;
+  // Current frame time in seconds. Most primitives are sampled to concrete
+  // values upstream and ignore this; generative ones (particles) drive their
+  // own motion from it.
+  t: number;
 }
 
-function makeCtx(font: opentype.Font): BuildCtx {
-  return { font, lights: [], background: null, glyphScale: 2.5, sceneAspect: 16 / 9 };
+function makeCtx(font: opentype.Font, t = 0): BuildCtx {
+  return { font, lights: [], background: null, glyphScale: 2.5, sceneAspect: 16 / 9, t };
 }
 
 function buildRect(node: JsonNode): THREE.Object3D {
@@ -872,6 +876,166 @@ function buildMetaballs(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   return mesh;
 }
 
+// particles(kind:, count?, area?, speed?, size?, color?, seed?, period?) — a
+// generative point-sprite field. Like metaballs it's a viewer-side primitive
+// (the language has no loops/random); per-particle attributes come from a
+// seeded PRNG (deterministic) and motion/twinkle are driven in the shader by
+// a `uTime` uniform = ctx.t, so the field animates as the frame time advances.
+// `kind` selects a preset; `cycle` rotates through all eight over `period`.
+interface ParticlePreset {
+  color: [number, number, number];
+  colorB?: [number, number, number]; // mixed by per-particle seed (variety)
+  size: number;                       // base point size, screen px
+  mode: 0 | 1 | 2;                    // 0 still · 1 stream(wrap) · 2 wander
+  vel: [number, number];              // drift, px/s (cmotion frame px)
+  sway: number;                       // horizontal/wander amplitude, px
+  swayFreq: number;
+  twMin: number;                      // twinkle floor (0 = full blink, 1 = steady)
+  soft: number;                       // sprite edge softness
+  additive: boolean;
+  count: number;
+}
+const PARTICLE_KINDS: Record<string, ParticlePreset> = {
+  stars:        { color: [1.0, 1.0, 0.92], size: 3,  mode: 0, vel: [0, 0],      sway: 0,  swayFreq: 0,    twMin: 0.15, soft: 0.9, additive: true,  count: 260 },
+  dust:         { color: [0.82, 0.8, 0.7], size: 2,  mode: 1, vel: [14, -6],    sway: 10, swayFreq: 0.3, twMin: 0.5,  soft: 1.0, additive: false, count: 320 },
+  snow:         { color: [1.0, 1.0, 1.0],  size: 6,  mode: 1, vel: [0, -260],   sway: 24, swayFreq: 0.6, twMin: 0.85, soft: 1.0, additive: false, count: 300 },
+  embers:       { color: [1.0, 0.45, 0.12], colorB: [1.0, 0.82, 0.25], size: 4, mode: 1, vel: [12, 300], sway: 16, swayFreq: 1.3, twMin: 0.0, soft: 0.9, additive: true, count: 180 },
+  magic_sparks: { color: [0.55, 0.85, 1.0], colorB: [1.0, 0.55, 1.0], size: 4,  mode: 0, vel: [0, 0],    sway: 6,  swayFreq: 2.0, twMin: 0.0,  soft: 0.8, additive: true,  count: 240 },
+  fireflies:    { color: [0.8, 1.0, 0.42], size: 6,  mode: 2, vel: [0, 0],      sway: 70, swayFreq: 0.5, twMin: 0.0,  soft: 0.85, additive: true, count: 70 },
+  smoke:        { color: [0.62, 0.62, 0.68], size: 34, mode: 1, vel: [10, 170], sway: 14, swayFreq: 0.4, twMin: 0.3,  soft: 1.0, additive: false, count: 60 },
+  pollen:       { color: [1.0, 0.95, 0.5], size: 3,  mode: 2, vel: [0, 0],      sway: 22, swayFreq: 0.25, twMin: 0.45, soft: 1.0, additive: true, count: 220 },
+};
+const PARTICLE_CYCLE = ["stars", "dust", "snow", "embers", "magic_sparks", "fireflies", "smoke", "pollen"];
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const PARTICLE_VERT = /* glsl */ `
+  attribute float aSeed;
+  attribute float aSize;
+  attribute float aPhase;
+  uniform float uTime;
+  uniform vec2  uField;    // world W,H of the spawn box
+  uniform vec2  uVel;      // world units / s
+  uniform float uSway;     // world
+  uniform float uSwayFreq;
+  uniform int   uMode;     // 0 still · 1 stream(wrap) · 2 wander
+  uniform float uSizeScale;
+  uniform float uTwMin;
+  varying float vAlpha;
+  varying float vSeed;
+  void main() {
+    vec3 p = position;            // base position (world, z=0)
+    float ph = aPhase + aSeed * 6.2831;
+    if (uMode == 1) {
+      p.xy += uVel * uTime;
+      p.x = mod(p.x + uField.x * 0.5, uField.x) - uField.x * 0.5;
+      p.y = mod(p.y + uField.y * 0.5, uField.y) - uField.y * 0.5;
+      p.x += uSway * sin(uTime * uSwayFreq + ph);
+    } else if (uMode == 2) {
+      p.x += uSway * sin(uTime * uSwayFreq + ph);
+      p.y += uSway * cos(uTime * uSwayFreq * 0.8 + ph * 1.3);
+    }
+    float tw = 0.5 + 0.5 * sin(uTime * (2.0 + aSeed * 3.0) + ph);
+    vAlpha = mix(uTwMin, 1.0, tw);
+    vSeed = aSeed;
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    gl_Position = projectionMatrix * mv;
+    gl_PointSize = aSize * uSizeScale;
+  }
+`;
+const PARTICLE_FRAG = /* glsl */ `
+  precision mediump float;
+  uniform vec3 uColorA;
+  uniform vec3 uColorB;
+  uniform float uSoft;
+  varying float vAlpha;
+  varying float vSeed;
+  void main() {
+    vec2 uv = gl_PointCoord * 2.0 - 1.0;
+    float r = length(uv);
+    float a = smoothstep(1.0, 1.0 - uSoft, r);
+    if (a <= 0.001) discard;
+    vec3 col = mix(uColorA, uColorB, vSeed);
+    gl_FragColor = vec4(col, a * vAlpha);
+  }
+`;
+
+function buildParticles(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
+  const f = namedFields(node);
+  const kindNode = f.kind ?? positionalArgs(node)[0];
+  let kind = kindNode?.kind === "constructed" ? kindNode.name : "stars";
+  if (kind === "cycle") {
+    const period = numberOf(f.period, 8); // full cycle through all kinds
+    const frac = (Math.max(0, ctx.t) % period) / period; // 0..1 across the cycle
+    const idx = Math.min(PARTICLE_CYCLE.length - 1, Math.floor(frac * PARTICLE_CYCLE.length));
+    kind = PARTICLE_CYCLE[idx];
+  }
+  const preset = PARTICLE_KINDS[kind] ?? PARTICLE_KINDS.stars;
+
+  const count = Math.min(2000, Math.max(1, Math.floor(numberOf(f.count, preset.count))));
+  const W = numberOf(f.area, 1920) * pxToWorld;
+  const H = (f.height?.kind === "number" ? numberOf(f.height) : 1080) * pxToWorld;
+  const rnd = mulberry32(Math.floor(numberOf(f.seed, 1)) * 2654435761);
+
+  const positions = new Float32Array(count * 3);
+  const seeds = new Float32Array(count);
+  const sizes = new Float32Array(count);
+  const phases = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    positions[i * 3] = (rnd() - 0.5) * W;
+    positions[i * 3 + 1] = (rnd() - 0.5) * H;
+    positions[i * 3 + 2] = 0;
+    seeds[i] = rnd();
+    sizes[i] = preset.size * (0.6 + rnd() * 0.8);
+    phases[i] = rnd() * 6.2831;
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geom.setAttribute("aSeed", new THREE.BufferAttribute(seeds, 1));
+  geom.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
+  geom.setAttribute("aPhase", new THREE.BufferAttribute(phases, 1));
+
+  const override = svgColor(f.color); // optional #hex override → uColorA/B
+  const cA = override ? new THREE.Color(override) : new THREE.Color(...preset.color);
+  const cB = override ? cA : new THREE.Color(...(preset.colorB ?? preset.color));
+  const speed = numberOf(f.speed, 1);
+  const sizeScale = numberOf(f.size, 1);
+
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: PARTICLE_VERT,
+    fragmentShader: PARTICLE_FRAG,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    blending: preset.additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+    uniforms: {
+      uTime: { value: Math.max(0, ctx.t) },
+      uField: { value: new THREE.Vector2(W, H) },
+      uVel: { value: new THREE.Vector2(preset.vel[0] * pxToWorld * speed, preset.vel[1] * pxToWorld * speed) },
+      uSway: { value: preset.sway * pxToWorld },
+      uSwayFreq: { value: preset.swayFreq * speed },
+      uMode: { value: preset.mode },
+      uSizeScale: { value: sizeScale },
+      uTwMin: { value: preset.twMin },
+      uColorA: { value: cA },
+      uColorB: { value: cB },
+      uSoft: { value: preset.soft },
+    },
+  });
+  const points = new THREE.Points(geom, mat);
+  points.frustumCulled = false;
+  points.renderOrder = 10; // overlay on top of other layers
+  return points;
+}
+
 function buildMaterial(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   const args = positionalArgs(node);
   const f = namedFields(node);
@@ -1023,6 +1187,8 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       return buildSphere(node);
     case "metaballs":
       return buildMetaballs(node, ctx);
+    case "particles":
+      return buildParticles(node, ctx);
     case "render3d":
       return buildRender3d(node, ctx);
     case "extrude":
@@ -1198,7 +1364,7 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
     if (!handle) return;
     lastT = t;
     const tree = sample(exp, handle, t) as JsonNode;
-    const ctx = makeCtx(font);
+    const ctx = makeCtx(font, t);
     let root: THREE.Object3D | null = null;
     if (tree?.kind === "constructed" && tree.name === "compose") {
       root = buildCompose(tree, ctx);

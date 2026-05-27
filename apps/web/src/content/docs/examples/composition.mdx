@@ -1,0 +1,19 @@
+---
+title: Composition
+description: Reusing one composition inside another — a 2×2 grid of sub-compositions with a particle layer on top.
+---
+
+import ExampleScene from '../../../components/ExampleScene.astro';
+import { COMPOSITION_SOURCE } from '../../../examples/sources.ts';
+
+A composition is just a value, so a `let`-bound `compose [...]` can be placed
+inside another `compose` — with its own transform, and its animations sampled
+independently in each spot.
+
+This example arranges four sub-compositions in a 2×2 grid (each `scale`d and
+`translate`d into a quadrant). One of them — the flower — is itself built by
+reusing a single `petal` composition five times, rotated (a composition within
+a composition). Finally a full-scene `particles` layer sparkles over the whole
+grid, showing how layers composite on top of the composited cells.
+
+<ExampleScene source={COMPOSITION_SOURCE} />

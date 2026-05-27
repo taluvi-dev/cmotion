@@ -1,0 +1,20 @@
+---
+title: Particles
+description: A generative particle field — stars, snow, embers, fireflies and more — cycling through eight kinds.
+---
+
+import ExampleScene from '../../../components/ExampleScene.astro';
+import { PARTICLES_SOURCE } from '../../../examples/sources.ts';
+
+`particles(kind:, count:, ...)` is a generative point-sprite field. Like
+`metaballs` it runs entirely in the viewer — the language has no loops or
+randomness, so the particles are generated from a seeded PRNG and their motion
+is driven by the frame time (deterministic, seamless).
+
+It ships eight presets — `stars`, `dust`, `snow`, `embers`, `magic_sparks`,
+`fireflies`, `smoke`, `pollen` — each with its own motion, colour, size and
+glow. `kind: cycle` rotates through all eight over `period`; this example does
+exactly that across an 8-second loop. Use a single kind on its own with
+`particles(kind: snow)`, and tune `count`, `area`, `speed`, `size`, `color`.
+
+<ExampleScene source={PARTICLES_SOURCE} />
