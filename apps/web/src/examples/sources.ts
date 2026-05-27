@@ -313,6 +313,10 @@ export const COMPOSITION_SOURCE = `runner "0.0.1";
 
 use std.shapes.*;
 use std.anim.*;
+use std.mesh3d.*;
+use std.text;
+use std.lighting.*;
+use std.scene3d.*;
 
 scene composition(duration: Duration = 8s) -> Frame {
   let bg = rect(width: 1920px, height: 1080px, fill: #0b0f1a);
@@ -335,27 +339,30 @@ scene composition(duration: Duration = 8s) -> Frame {
     sprite(image("/img/viking.png"), width: 700px, height: 700px, cols: 4, rows: 4, frame: walk, key: #ffffff, anchor: center),
   ];
 
-  // Cell C — composition within a composition: one petal reused five times
-  // (rotated) builds a flower, and the flower sways as a whole.
-  let petal = compose [ circle(radius: 70px, fill: #f9a8d4).translate(y: 150px) ];
-  let flower = compose [
-    petal,
-    petal.rotate(z:  72deg),
-    petal.rotate(z: 144deg),
-    petal.rotate(z: 216deg),
-    petal.rotate(z: 288deg),
-    circle(radius: 70px, fill: #fde047),
-  ];
+  // Cell C — the bouncing-ball example reused (earth sphere, bounce + squash).
+  let spinB   = animate { 0s => 0deg, 6s => 360deg } with { repeat: forever };
+  let bounceY = bounce(height: 520px, period: 1.2s, floor: -300px);
+  let squashB = on_event(bounceY.impacts, decay: 0.18s, peak: 0.35);
+  let ball = sphere(r: 190px)
+    .material(fill: image("/img/earth_4k.jpg").as_texture(projection: equirectangular))
+    .rotate(y: spinB).pivot(bottom).squash(factor: squashB);
   let cellC = compose [
-    rect(width: 900px, height: 900px, fill: #18181b),
-    flower.rotate(z: wave(amplitude: 30deg, period: 6s)),
+    rect(width: 900px, height: 900px, fill: #0a1530),
+    render3d(ball.translate(y: bounceY.position),
+      lights: [ ambient(0.35), directional(from: vec3(2, 3, 4), intensity: 1.0) ]),
   ];
 
-  // Cell D — a simple badge.
+  // Cell D — the homepage glyph reused (extruded "C", spin + hue cycle).
+  let rotG   = animate { 0s => 0deg,   6s => 360deg } with { repeat: forever };
+  let hueG   = animate { 0s => 280deg, 4s => 640deg } with { repeat: forever };
+  let pulseG = animate { 0s => 1.00, 500ms => 1.06, 1s => 1.00 } with { easing: easing.out_cubic, repeat: forever };
+  let glyph = extrude(text.glyph("C", font: "Inter Bold"), depth: 16px)
+    .material(fill: oklch(0.78, 0.20, hueG), metalness: 0.25, roughness: 0.35,
+              emissive: oklch(0.65, 0.18, hueG), emissive_intensity: 0.6)
+    .rotate(x: wave(amplitude: 8.6deg, period: 12s), y: rotG).scale(pulseG);
   let cellD = compose [
-    rect(width: 900px, height: 900px, fill: #0f172a),
-    circle(radius: 230px, fill: #22c55e),
-    icon("heart", size: 230px, color: #ffffff),
+    rect(width: 900px, height: 900px, fill: #120b22),
+    render3d(glyph, lights: [ ambient(0.35), directional(from: vec3(3, 4, 5), intensity: 1.6), directional(from: vec3(-4, -2, -3), intensity: 0.9) ]),
   ];
 
   // Reuse the four cells in a 2×2 grid, then sparkle over the whole scene.

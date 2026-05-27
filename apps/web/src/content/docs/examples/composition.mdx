@@ -8,12 +8,13 @@ import { COMPOSITION_SOURCE } from '../../../examples/sources.ts';
 
 A composition is just a value, so a `let`-bound `compose [...]` can be placed
 inside another `compose` — with its own transform, and its animations sampled
-independently in each spot.
+independently in each spot. That includes whole examples: each of the four
+cells here is the kind of scene shown elsewhere in this gallery.
 
 This example arranges four sub-compositions in a 2×2 grid (each `scale`d and
-`translate`d into a quadrant). One of them — the flower — is itself built by
-reusing a single `petal` composition five times, rotated (a composition within
-a composition). Finally a full-scene `particles` layer sparkles over the whole
-grid, showing how layers composite on top of the composited cells.
+`translate`d into a quadrant): an icon orbit, the viking sprite walk, the
+bouncing earth, and the spinning homepage glyph — 2D and 3D layers freely
+mixed. A full-scene `particles` layer then sparkles over the whole grid,
+showing how layers composite on top of the composited cells.
 
 <ExampleScene source={COMPOSITION_SOURCE} />
