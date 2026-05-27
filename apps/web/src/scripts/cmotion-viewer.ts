@@ -473,8 +473,13 @@ function svgWeight(f: Record<string, JsonNode>): number | null {
 // raster resolution, then rasterise the SVG into `tex` via the browser's
 // native SVG→canvas. Async — pixels land on a later render.
 function rasterizeInto(tex: THREE.Texture, svg: string, color: string | null, weight: number | null): void {
-  let markup = svg.replace(/\s(width|height)="[^"]*"/g, "");
-  markup = markup.replace("<svg", `<svg width="${SVG_RASTER_PX}" height="${SVG_RASTER_PX}"`);
+  // Resize on the ROOT <svg> tag only — stripping width/height globally would
+  // also wipe inner element dimensions (e.g. the smartphone's <rect> body),
+  // leaving just a stray stroke.
+  let markup = svg.replace(
+    /<svg\b([^>]*)>/,
+    (_m, attrs) => `<svg${attrs.replace(/\s(width|height)="[^"]*"/g, "")} width="${SVG_RASTER_PX}" height="${SVG_RASTER_PX}">`,
+  );
   if (weight != null) markup = markup.replace(/stroke-width="[^"]*"/g, `stroke-width="${weight}"`);
   if (color) markup = markup.replace(/currentColor/g, color);
   const img = new Image();

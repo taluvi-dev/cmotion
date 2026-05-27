@@ -1,0 +1,21 @@
+---
+title: Icons
+description: A Lucide globe with icons orbiting it like satellites, via sprite-free SVG rendering and wave-phase motion.
+---
+
+import ExampleScene from '../../../components/ExampleScene.astro';
+import { ICONS_SOURCE } from '../../../examples/sources.ts';
+
+A `icon("globe")` sits in the centre while six more icons —
+`smartphone`, `satellite`, `dollar-sign`, `sword`, `ice-cream-cone`,
+`users` — orbit it like satellites.
+
+`icon(name, size?, color?, weight?)` draws a [Lucide](https://lucide.dev)
+icon by name (the full ISC-licensed set ships with the renderer); `color:`
+recolours it and `weight:` sets the stroke thickness. The orbit comes from
+`wave`: `x` is a quarter-turn (`phase: 90deg`) ahead of `y`, which traces a
+circle, and each satellite adds its own base angle (`0°, 60°, …`) so they
+space evenly. Because the icons only `translate`, they stay upright as they
+go around; one revolution per 16-second period makes the loop seamless.
+
+<ExampleScene source={ICONS_SOURCE} />

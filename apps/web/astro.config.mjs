@@ -55,6 +55,7 @@ export default defineConfig({
 						{ label: 'Lava lamp', slug: 'examples/lava-lamp' },
 						{ label: 'Bouncing ball', slug: 'examples/bouncing-ball' },
 						{ label: 'Viking sprite', slug: 'examples/viking-sprite' },
+						{ label: 'Icons', slug: 'examples/icons' },
 					],
 				},
 				{

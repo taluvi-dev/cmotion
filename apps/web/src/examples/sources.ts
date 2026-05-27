@@ -255,3 +255,35 @@ scene lava(duration: Duration = 12s) -> Frame {
   ]
 }
 `;
+
+// Icons: a Lucide globe in the centre with six icons orbiting it like
+// satellites. Each satellite sits at a different angle via the wave `phase:`
+// — x is a quarter-turn (90°) ahead of y, which traces a circle; adding the
+// satellite's base angle (0°, 60°, …) spaces them evenly. The icons only
+// translate (no rotate), so they stay upright as they orbit. One revolution
+// per 16s period == the scene duration, so the loop is seamless.
+export const ICONS_SOURCE = `runner "0.0.1";
+
+use std.shapes.*;
+use std.anim.*;
+
+scene icons(duration: Duration = 16s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: #0b1020);
+
+  // World in the centre.
+  let world = icon("globe", size: 320px, color: #38bdf8);
+
+  // Shared orbit: radius r, one revolution per period p.
+  let r = 380px;
+  let p = 16s;
+
+  let s0 = icon("smartphone",     size: 150px, color: #e2e8f0).translate(x: wave(amplitude: r, period: p, phase:  90deg), y: wave(amplitude: r, period: p, phase:   0deg));
+  let s1 = icon("satellite",      size: 150px, color: #a3e635).translate(x: wave(amplitude: r, period: p, phase: 150deg), y: wave(amplitude: r, period: p, phase:  60deg));
+  let s2 = icon("dollar-sign",    size: 150px, color: #fbbf24).translate(x: wave(amplitude: r, period: p, phase: 210deg), y: wave(amplitude: r, period: p, phase: 120deg));
+  let s3 = icon("sword",          size: 150px, color: #f87171).translate(x: wave(amplitude: r, period: p, phase: 270deg), y: wave(amplitude: r, period: p, phase: 180deg));
+  let s4 = icon("ice-cream-cone", size: 150px, color: #f9a8d4).translate(x: wave(amplitude: r, period: p, phase: 330deg), y: wave(amplitude: r, period: p, phase: 240deg));
+  let s5 = icon("users",          size: 150px, color: #60a5fa).translate(x: wave(amplitude: r, period: p, phase: 390deg), y: wave(amplitude: r, period: p, phase: 300deg));
+
+  compose [bg, world, s0, s1, s2, s3, s4, s5]
+}
+`;
