@@ -190,7 +190,7 @@ export const VIKING_SPRITE_SOURCE = `runner "0.0.1";
 use std.shapes.*;
 use std.anim.*;
 
-scene viking_sprite(duration: Duration = 3.5s) -> Frame {
+scene viking_sprite(duration: Duration = 4.5s) -> Frame {
   let bg = rect(width: 1920px, height: 1080px, fill: #ffffff);
 
   // Hold the first cell to introduce the viking, step through all 16 cells
@@ -202,12 +202,14 @@ scene viking_sprite(duration: Duration = 3.5s) -> Frame {
     2.9s => 15,
   };
 
-  // Fade in to introduce, hold, then fade out over the final beat.
+  // Fade in to introduce, hold, fade out by 3.5s, then stay blank white for
+  // ~1s before the loop restarts.
   let fade = animate {
     0s   => 0,
     0.3s => 1,
     2.9s => 1,
     3.5s => 0,
+    4.5s => 0,
   };
 
   // key: drops the sheet's white cell background; anchor: re-centres each
