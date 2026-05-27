@@ -151,7 +151,7 @@ fn paintValue(v: value.Value, fb: *Framebuffer, off: Offset, style: Style) void 
                 paintTranslate(c, fb, off, style);
             } else if (std.mem.eql(u8, c.name, "text.glyph")) {
                 paintTextGlyph(c, fb, off, style);
-            } else if (std.mem.eql(u8, c.name, "sprite")) {
+            } else if (std.mem.eql(u8, c.name, "sprite") or std.mem.eql(u8, c.name, "svg")) {
                 paintSprite(c, fb, off, style);
             } else if (has_3d and std.mem.eql(u8, c.name, "render3d")) {
                 paintRender3D(c, fb, off, style);
@@ -415,7 +415,7 @@ fn paintSprite(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style
             if (numberAsPixels(f.value)) |px| w = px;
         } else if (std.mem.eql(u8, f.name, "height")) {
             if (numberAsPixels(f.value)) |px| h = px;
-        } else if (std.mem.eql(u8, f.name, "fill") or std.mem.eql(u8, f.name, "tint")) {
+        } else if (std.mem.eql(u8, f.name, "fill") or std.mem.eql(u8, f.name, "tint") or std.mem.eql(u8, f.name, "color")) {
             fill = f.value;
         } else if (std.mem.eql(u8, f.name, "at")) {
             if (valueAsOffset(f.value)) |a| at = a;

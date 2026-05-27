@@ -446,6 +446,74 @@ function buildSprite(node: JsonNode): THREE.Object3D | null {
   return mesh;
 }
 
+// ---- SVG renderer ------------------------------------------------
+//
+// Rasterise an SVG string to a texture: recolour (`currentColor` → the
+// given colour), force the intrinsic size to a high raster resolution so
+// the browser rasterises crisply (not upscaled from a 24×24 viewBox), draw
+// to a canvas, hand it to a texture. Async like loadTexture — pixels land
+// on a later render. Cached by (svg, colour). Both `svg(...)` and the
+// `icon(...)` catalog ride this path.
+const SVG_RASTER_PX = 512;
+const svgTexCache = new Map<string, THREE.Texture>();
+
+function svgColor(node: JsonNode): string | null {
+  if (!node || node.kind !== "color") return null;
+  if (node.form === "hex") return "#" + node.digits;
+  return "#" + toThreeColor(node).getHexString();
+}
+
+function svgTexture(svg: string, color: string | null): THREE.Texture {
+  const key = `${color ?? ""}|${svg}`;
+  const cached = svgTexCache.get(key);
+  if (cached) return cached;
+
+  let markup = svg.replace(/\s(width|height)="[^"]*"/g, "");
+  markup = markup.replace("<svg", `<svg width="${SVG_RASTER_PX}" height="${SVG_RASTER_PX}"`);
+  if (color) markup = markup.replace(/currentColor/g, color);
+
+  const tex = new THREE.Texture();
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement("canvas");
+    c.width = SVG_RASTER_PX;
+    c.height = SVG_RASTER_PX;
+    const ctx = c.getContext("2d");
+    if (ctx) ctx.drawImage(img, 0, 0, SVG_RASTER_PX, SVG_RASTER_PX);
+    tex.image = c;
+    tex.needsUpdate = true;
+  };
+  img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(markup);
+  svgTexCache.set(key, tex);
+  return tex;
+}
+
+// svg(source, size?|width?/height?, color?, opacity?) — a vector image
+// rasterised to a textured quad. `source` is an SVG string (positional or
+// `src:`); `color:` recolours `currentColor`.
+function buildSvg(node: JsonNode): THREE.Object3D | null {
+  const f = namedFields(node);
+  const raw = positionalArgs(node)[0] ?? f.src;
+  const svg = raw && raw.kind === "string" ? String(raw.raw).replace(/^"|"$/g, "") : null;
+  if (!svg) {
+    console.warn(`[cmotion-viewer] svg: no source string`);
+    return null;
+  }
+  const texture = svgTexture(svg, svgColor(f.color ?? f.fill));
+  const sizePx = numberOf(f.size, 256);
+  const w = (f.width?.kind === "number" ? numberOf(f.width) : sizePx) * pxToWorld;
+  const h = (f.height?.kind === "number" ? numberOf(f.height) : sizePx) * pxToWorld;
+  const mat = new THREE.MeshBasicMaterial({
+    map: texture,
+    transparent: true,
+    alphaTest: 0.01,
+    side: THREE.DoubleSide,
+  });
+  mat.opacity = numberOf(f.opacity, 1);
+  return new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+}
+
 // sphere(r: <px>) → SphereGeometry with a placeholder white standard
 // material. Wrap in `.material(...)` to fill or texture it. The
 // geometry carries its source radius on `userData.radius_world` so
@@ -875,6 +943,8 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       return buildCircle(node);
     case "sprite":
       return buildSprite(node);
+    case "svg":
+      return buildSvg(node);
     case "sphere":
       return buildSphere(node);
     case "metaballs":
