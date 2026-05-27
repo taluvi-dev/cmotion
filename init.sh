@@ -16,9 +16,9 @@
 #   CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in the environment. See the
 #   Deploy section of CLAUDE.md.
 #
-# Optional (agents): a cmotion MCP server is exposed to Claude Code sessions
-#   (projects, tracks, transport, regions, layers, rendering, agent docs); a
-#   hosted @cmotion/mcp render wrapper is planned — see README.md / TODO.md.
+# Optional (agents): a thin @cmotion/mcp render wrapper (render_video /
+#   render_frame over apps/api) is planned — no MCP server code in the repo
+#   yet. See README.md / TODO.md.
 
 set -euo pipefail
 

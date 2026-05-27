@@ -78,13 +78,12 @@ human before a production deploy.
 
 ## MCP server
 
-A cmotion MCP server is exposed to Claude Code sessions — tools for
-projects, tracks, transport, tempo, regions, automation, layers,
-rendering, and agent docs (plus a Three.js helper server). Prefer these
-over shelling out when a tool fits. Separately, a thin hosted
-`@cmotion/mcp` that wraps the `apps/api` upload → render → poll flow
-into single `render_video` / `render_frame` calls is planned — see
-`README.md` and `TODO.md`.
+The repo has **no MCP server code yet**. A thin stdio `@cmotion/mcp` is
+planned (lands as `apps/mcp`, publishes to npm): it wraps the `apps/api`
+upload → render → poll flow into single `render_video` / `render_frame`
+tool calls — see `README.md` and `TODO.md`. Any MCP servers attached to a
+Claude Code session are environment-provided and **unrelated to this
+repo** — don't document or depend on them here.
 
 ## Where things live in `apps/cli/src/`
 
