@@ -394,14 +394,14 @@ scene composition(duration: Duration = 8s) -> Frame {
   // rather than a cell transform: a compact cluster bobbing in the lower centre,
   // below the title and between the two bottom cells. 4s bob loops within 8s.
   let lava = metaballs([
-    blob(at: vec3(   5px, animate { 0s => -315px, 4s => -365px, 8s => -315px } with { easing: easing.in_out_cubic }, 0px), radius: 125px),
-    blob(at: vec3(-140px, animate { 0s => -255px, 4s => -195px, 8s => -255px } with { easing: easing.in_out_cubic }, 0px), radius:  80px),
-    blob(at: vec3( 150px, animate { 0s => -335px, 4s => -275px, 8s => -335px } with { easing: easing.in_out_cubic }, 0px), radius:  85px),
-    blob(at: vec3( -80px, animate { 0s => -450px, 4s => -385px, 8s => -450px } with { easing: easing.in_out_cubic }, 0px), radius:  75px),
-    blob(at: vec3( 115px, animate { 0s => -470px, 4s => -405px, 8s => -470px } with { easing: easing.in_out_cubic }, 0px), radius:  72px),
-    blob(at: vec3(-235px, animate { 0s => -310px, 4s => -375px, 8s => -310px } with { easing: easing.in_out_cubic }, 0px), radius:  60px),
-    blob(at: vec3( 250px, animate { 0s => -375px, 4s => -295px, 8s => -375px } with { easing: easing.in_out_cubic }, 0px), radius:  58px),
-  ], smoothing: 45px).material(roughness: 0.18);
+    blob(at: vec3(   4px, animate { 0s => -317px, 4s => -359px, 8s => -317px } with { easing: easing.in_out_cubic }, 0px), radius: 105px),
+    blob(at: vec3(-118px, animate { 0s => -267px, 4s => -217px, 8s => -267px } with { easing: easing.in_out_cubic }, 0px), radius:  67px),
+    blob(at: vec3( 126px, animate { 0s => -334px, 4s => -284px, 8s => -334px } with { easing: easing.in_out_cubic }, 0px), radius:  71px),
+    blob(at: vec3( -67px, animate { 0s => -431px, 4s => -376px, 8s => -431px } with { easing: easing.in_out_cubic }, 0px), radius:  63px),
+    blob(at: vec3(  97px, animate { 0s => -448px, 4s => -393px, 8s => -448px } with { easing: easing.in_out_cubic }, 0px), radius:  61px),
+    blob(at: vec3(-197px, animate { 0s => -313px, 4s => -368px, 8s => -313px } with { easing: easing.in_out_cubic }, 0px), radius:  50px),
+    blob(at: vec3( 210px, animate { 0s => -368px, 4s => -301px, 8s => -368px } with { easing: easing.in_out_cubic }, 0px), radius:  48px),
+  ], smoothing: 38px).material(roughness: 0.18);
 
   // Reuse the four cells in a 2×2 grid, drop the lava lamp in the lower centre,
   // sparkle over the whole scene, then the title on top of every other layer.
@@ -413,7 +413,7 @@ scene composition(duration: Duration = 8s) -> Frame {
     cellD.scale(0.46).translate(x:  480px, y: -264px),
     lava,
     particles(kind: magic_sparks, count: 220),
-    title.scale(0.42),
+    title.scale(0.50),
   ]
 }
 `;
