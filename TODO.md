@@ -312,6 +312,24 @@ directly:
 Hides the asset upload and the job-polling loop. ~150 lines; lands as
 `apps/mcp` and publishes to npm as `@cmotion/mcp`.
 
+**The bigger win for AI agents is the feedback loop, not more authoring
+verbs.** Rendering alone only covers the "see" half; an agent also needs
+to validate and inspect without a human. Add (all already exist in the
+CLI / WASM — the MCP just makes them one call):
+
+- `render_frame(...)` should **return the PNG inline** (not just a URL) so
+  an agent can actually view its output — the missing piece that forces
+  ad-hoc headless-screenshot pipelines today.
+- `check({ source })` → the `--json` diagnostic envelope (codes + spans),
+  so an agent can fix `.cm` before rendering.
+- `sample({ source, at })` → the value tree (`cmo eval --at`), cheap
+  structural feedback (resolved frame/positions/colours) with no pixels.
+
+Keep the set small on purpose — tool count has a cost (it dilutes an
+agent's selection), so resist mirroring every CLI verb. This handful
+(check → sample → render_frame → render_video) is the write → validate →
+see loop, and nothing more.
+
 ---
 
 ## Top priority — type system
