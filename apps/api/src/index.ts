@@ -49,8 +49,9 @@ export class RenderRunner extends Container<Env> {
     source: string,
     params: Record<string, unknown>,
     assets: Record<string, string>,
+    image?: string,
   ): Promise<void> {
-    this.ctx.waitUntil(this.executeJob(id, kind, source, params, assets));
+    this.ctx.waitUntil(this.executeJob(id, kind, source, params, assets, image));
   }
 
   // The actual render lifecycle — runs inside the DO via waitUntil,
@@ -61,15 +62,21 @@ export class RenderRunner extends Container<Env> {
     source: string,
     params: Record<string, unknown>,
     assets: Record<string, string>,
+    image?: string,
   ): Promise<void> {
     try {
+      // Inline base64 image (vectorize convenience): hand it to the container
+      // under the source path directly, skipping the R2 staging round-trip.
+      const assetBytes: Record<string, string> = {};
+      if (image) {
+        assetBytes[source] = image;
+      }
       console.log(`[do] ${id} assets received:`, JSON.stringify(assets));
       // Fetch each referenced asset from R2 staging and inline
       // it as base64 in the request to the container. Inlining
       // bytes (instead of giving the container a signed URL) keeps
       // the container free of CF credentials and the storage
       // pipeline single-direction (Worker → Container → R2 outputs).
-      const assetBytes: Record<string, string> = {};
       for (const [pathInSource, key] of Object.entries(assets)) {
         const obj = await this.env.R2.get(`staging/${key}`);
         if (!obj) {
@@ -509,6 +516,10 @@ interface JobBody {
   // Mapping of friendly path-in-source ("/earth.png") to the
   // R2 staging key returned by POST /v1/assets ("asset_<uuid>").
   assets?: Record<string, string>;
+  // Optional inline base64 image (vectorize convenience): submit the
+  // bitmap in one call without the /v1/assets upload step. The DO inlines
+  // it straight to the container; it is NOT stored in D1.
+  image?: string;
 }
 
 async function readJobBody(request: Request): Promise<JobBody | { error: string }> {
@@ -518,13 +529,19 @@ async function readJobBody(request: Request): Promise<JobBody | { error: string 
   } catch (e) {
     return { error: `bad json: ${e instanceof Error ? e.message : String(e)}` };
   }
-  if (typeof body?.source !== "string" || body.source.length === 0) {
+  const hasImage = typeof body?.image === "string" && body.image.length > 0;
+  // With an inline `image`, `source` is just the in-container path and may be
+  // omitted (defaulted later); otherwise it's required.
+  if (!hasImage && (typeof body?.source !== "string" || body.source.length === 0)) {
     return { error: "missing 'source'" };
   }
-  // Cap source size to keep D1 / log volume sane. Tighten once we
-  // have a real measurement of typical sources.
-  if (body.source.length > 64 * 1024) {
+  // Cap source size to keep D1 / log volume sane.
+  if (typeof body?.source === "string" && body.source.length > 64 * 1024) {
     return { error: "'source' exceeds 64 KiB" };
+  }
+  // Inline images are transient (not stored in D1) but still bounded.
+  if (hasImage && body.image!.length > 12 * 1024 * 1024) {
+    return { error: "'image' exceeds 12 MiB (base64)" };
   }
   return body;
 }
@@ -543,13 +560,15 @@ async function handleEnqueue(
   const id = crypto.randomUUID();
   const params_json = JSON.stringify(body.params ?? {});
   const assets = body.assets ?? {};
+  // Inline base64 image → synthesise a source path the container loads.
+  const source = body.source ?? (body.image ? "/input.img" : "");
   const now = Date.now();
 
   await env.DB.prepare(
     `INSERT INTO jobs (id, kind, source, params_json, status, created_at)
      VALUES (?, ?, ?, ?, 'pending', ?)`,
   )
-    .bind(id, kind, body.source, params_json, now)
+    .bind(id, kind, source, params_json, now)
     .run();
 
   // Hand the work off to the singleton RenderRunner DO via an
@@ -559,7 +578,7 @@ async function handleEnqueue(
   // dodges the ~30 s cap on Worker-level waitUntil that was
   // cancelling longer videos before they could upload to R2.
   const stub = env.RENDER_RUNNER.get(env.RENDER_RUNNER.idFromName("singleton"));
-  ctx.waitUntil(stub.runJob(id, kind, body.source!, body.params ?? {}, assets));
+  ctx.waitUntil(stub.runJob(id, kind, source, body.params ?? {}, assets, body.image));
 
   return json({ job_id: id, status: "pending", kind }, 202);
 }
