@@ -395,7 +395,7 @@ scene handdrawn(duration: Duration = 8s) -> Frame {
   let spin = animate { 0s => -20deg, 4s => 20deg, 8s => -20deg } with { easing: easing.in_out_cubic };
 
   let mark = vectorize(image("/img/handdrawn.jpg"),
-                       stroke_width: 8px, simplify: 2.0, bridge: 3, stitch: 18,
+                       stroke_width: 8px, simplify: 2.0, bridge: 3, stitch: 110,
                        depth: 70px, size: 780px, round: 10px)
                .material(fill: oklch(0.72, 0.15, 250), metalness: 0.3, roughness: 0.3)
                .rotate(x: 12deg, y: spin);
