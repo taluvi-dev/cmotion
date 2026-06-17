@@ -53,7 +53,7 @@ Every function is tagged `pure` or `effectful`. Pure functions are safe to call 
 
 A scene's render output is deterministic if every function it calls is pure — which is the whole point of the [CanvasKit backend](/impl/backends/).
 
-Status: in progress. The **(rendered)** modules above run today in both
+Status: in progress. The **(rendered)** modules above run in both
 the native renderer and the web viewer; the `pure`/`effectful` tagging
 and the remaining modules (`std.filter`, `std.transport`, `std.audio`)
 are still ahead. See [Roadmap](/roadmap/) stage 3.

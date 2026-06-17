@@ -18,4 +18,4 @@ The spec will cover:
 - **Function types** — including how `animate { ... } with { ... }` and postfix method chains are typed.
 - **Determinism partition** — every stdlib function is tagged `pure` or `effectful`. Effectful functions take an explicit capability (file/network/clock) and cannot be called from a `pure` context. This is what makes the [CanvasKit backend](/impl/backends/) deterministic.
 
-Status: **in progress.** A narrow slice runs today in `cmo check` — unit categories (a duration can't be a length), name resolution, and literal-vs-annotation mismatches — with stable diagnostic codes (`NAM*`, `TYP*`, `UNT*`). The full type system above (generics, `Animation<T>`, function types, the `pure`/`effectful` partition) is the remaining work. See [Roadmap](/roadmap/) stage 2.
+Status: **in progress.** A narrow slice runs in `cmo check` — unit categories (a duration can't be a length), name resolution, and literal-vs-annotation mismatches — with stable diagnostic codes (`NAM*`, `TYP*`, `UNT*`). The full type system above (generics, `Animation<T>`, function types, the `pure`/`effectful` partition) is the remaining work. See [Roadmap](/roadmap/) stage 2.
