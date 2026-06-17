@@ -26,7 +26,7 @@ export default defineConfig({
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/taluvi-dev/cmotion' },
 			],
-			components: { Footer: './src/components/Footer.astro' },
+			components: { PageFrame: './src/components/PageFrame.astro' },
 			customCss: ['./src/styles/custom.css'],
 			pagination: false,
 			tableOfContents: { minHeadingLevel: 2, maxHeadingLevel: 3 },

@@ -1,0 +1,62 @@
+---
+// Overrides Starlight's PageFrame so a full-width site footer renders
+// *after* the page frame (outside the sidebar-offset content column).
+// Registered via `components.PageFrame` in astro.config.
+import Default from '@astrojs/starlight/components/PageFrame.astro';
+---
+
+<Default {...Astro.props}>
+  <slot name="header" slot="header" />
+  <slot name="sidebar" slot="sidebar" />
+  <slot />
+</Default>
+
+<footer class="site-footer">
+  <div class="site-footer-inner">
+    <span class="brand">
+      cmotion — open source, MIT licensed ·
+      <a href="https://github.com/taluvi-dev/cmotion">GitHub</a>
+    </span>
+    <span class="sponsor">
+      With thanks to our sponsor
+      <a href="https://taluvi.com" target="_blank" rel="noopener noreferrer">taluvi.com</a>
+      — <em>Tools for Digital Nomads</em>.
+    </span>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    /* Sits after `.page` (min-height:100vh), spanning the full document
+       width. Raised above the fixed sidebar so it reads as one bar. */
+    position: relative;
+    z-index: calc(var(--sl-z-index-navbar) + 1);
+    width: 100%;
+    box-sizing: border-box;
+    border-top: 1px solid var(--sl-color-hairline-shade);
+    background-color: var(--sl-color-bg-nav);
+    padding: 1.25rem var(--sl-nav-pad-x);
+  }
+  .site-footer-inner {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.5rem;
+    align-items: center;
+    justify-content: space-between;
+    max-width: 90rem;
+    margin-inline: auto;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+    line-height: 1.5;
+  }
+  .site-footer a {
+    color: var(--sl-color-text-accent);
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .site-footer a:hover { text-decoration: underline; }
+  .site-footer em { font-style: italic; }
+  @media (max-width: 50rem) {
+    .site-footer-inner { justify-content: center; text-align: center; }
+  }
+</style>
