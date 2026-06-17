@@ -117,3 +117,9 @@ Worker can surface the diagnostic to the client.
   Wired to the API's `POST /v1/mesh`. `apps/api/wrangler.jsonc` pins
   `0.0.6-amd64`; build from this directory, push as
   `cmotion-runner:0.0.6-amd64`, redeploy with `apps/api/scripts/deploy.sh`.
+
+- `0.0.7/` — fixes SVG→mesh extraction: thicken each stroke/fill region
+  independently (not a pre-merged soup), detect boundaries undirected
+  (winding-independent), seal walls both-ways, and export double-sided — so
+  the back cap and the side band are watertight (no holes). Pins
+  `0.0.7-amd64`.

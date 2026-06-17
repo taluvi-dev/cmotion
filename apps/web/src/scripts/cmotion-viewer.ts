@@ -841,27 +841,44 @@ function svgStringOf(node: JsonNode | undefined): string | null {
 // along the boundary edges (directed edges with no reverse twin). Welds
 // first so boundary detection is robust. Generic over fills (ShapeGeometry)
 // and strokes (SVGLoader.pointsToStroke) alike.
+// Give one flat (z=0) triangulated region real Z thickness: a front face at
+// +depth/2, a back face at -depth/2, and side walls along its boundary —
+// producing a watertight solid. Must be called PER connected region (not on
+// a merged soup of overlapping pieces), so the boundary loop is well-defined.
+//
+// Boundary detection is UNDIRECTED (an edge used by exactly one triangle is a
+// boundary), so it's independent of the source triangles' winding — which is
+// what `pointsToStroke`/`ShapeGeometry` don't guarantee, and what made an
+// earlier directed-edge version drop walls (holes in the band) and leave the
+// back cap unreliable. Walls are emitted both-ways so they show regardless of
+// viewing side.
 function thickenFlat(flat: THREE.BufferGeometry, depth: number): THREE.BufferGeometry {
-  const g = BufferGeometryUtils.mergeVertices(flat.toNonIndexed(), 1e-4);
+  const g = BufferGeometryUtils.mergeVertices(flat.toNonIndexed(), 1e-5);
   const pos = g.getAttribute("position");
   const idx = g.getIndex()!.array as ArrayLike<number>;
   const hd = depth / 2;
   const verts: number[] = [];
   const push = (i: number, z: number) => verts.push(pos.getX(i), pos.getY(i), z);
-  const dir = new Map<number, number>();
-  const ek = (a: number, b: number) => a * 1_000_003 + b;
+
+  // Count each undirected edge. Boundary edges appear exactly once.
+  const count = new Map<number, number>();
+  const uk = (a: number, b: number) => (a < b ? a * 4_000_037 + b : b * 4_000_037 + a);
   for (let t = 0; t < idx.length; t += 3) {
     const a = idx[t], b = idx[t + 1], c = idx[t + 2];
-    for (const [u, v] of [[a, b], [b, c], [c, a]] as const) dir.set(ek(u, v), (dir.get(ek(u, v)) ?? 0) + 1);
+    for (const [u, v] of [[a, b], [b, c], [c, a]] as const) count.set(uk(u, v), (count.get(uk(u, v)) ?? 0) + 1);
   }
+
   for (let t = 0; t < idx.length; t += 3) {
     const a = idx[t], b = idx[t + 1], c = idx[t + 2];
-    push(a, hd); push(b, hd); push(c, hd);          // front
-    push(c, -hd); push(b, -hd); push(a, -hd);       // back (reversed)
+    push(a, hd); push(b, hd); push(c, hd);          // front cap
+    push(c, -hd); push(b, -hd); push(a, -hd);       // back cap (reversed winding)
     for (const [u, v] of [[a, b], [b, c], [c, a]] as const) {
-      if (!dir.get(ek(v, u))) {                      // boundary edge u→v → wall
+      if (count.get(uk(u, v)) === 1) {              // boundary → seal with a wall
+        // both winding orders so the wall is solid from either side
         push(u, hd); push(v, hd); push(v, -hd);
         push(u, hd); push(v, -hd); push(u, -hd);
+        push(v, hd); push(u, hd); push(u, -hd);
+        push(v, hd); push(u, -hd); push(v, -hd);
       }
     }
   }
@@ -913,17 +930,25 @@ function svgMeshGeometry(src: string, depthUnits: number, sizeUnits: number): TH
   }
   if (flats.length === 0) { console.warn("[cmotion-viewer] svg(): nothing to render"); return null; }
 
-  const flat = flats.length === 1 ? flats[0] : (BufferGeometryUtils.mergeGeometries(flats, false) ?? flats[0]);
-  flat.computeBoundingBox();
-  const bb = flat.boundingBox!;
-  const h = Math.max(1e-4, bb.max.y - bb.min.y);
-  const cx = (bb.max.x + bb.min.x) / 2;
-  const cy = (bb.max.y + bb.min.y) / 2;
+  // Normalise from the UNION bounds so every piece shares the same centre +
+  // scale, then thicken each piece INDEPENDENTLY and merge the solids. (Each
+  // stroke ribbon / fill is its own closed region; thickening a pre-merged
+  // soup of overlapping pieces is what produced holes.)
+  const union = new THREE.Box3();
+  for (const f of flats) { f.computeBoundingBox(); union.union(f.boundingBox!); }
+  const h = Math.max(1e-4, union.max.y - union.min.y);
+  const cx = (union.max.x + union.min.x) / 2;
+  const cy = (union.max.y + union.min.y) / 2;
   const s = sizeUnits / h;
   // centre at origin, flip SVG's y-down to scene y-up, scale to size
   const m = new THREE.Matrix4().makeScale(s, -s, 1).multiply(new THREE.Matrix4().makeTranslation(-cx, -cy, 0));
-  flat.applyMatrix4(m);
-  return thickenFlat(flat, depthUnits);
+
+  const solids: THREE.BufferGeometry[] = [];
+  for (const f of flats) {
+    f.applyMatrix4(m);
+    solids.push(thickenFlat(f, depthUnits));
+  }
+  return solids.length === 1 ? solids[0] : (BufferGeometryUtils.mergeGeometries(solids, false) ?? solids[0]);
 }
 
 function buildSvg(node: JsonNode): THREE.Object3D | null {
@@ -944,7 +969,7 @@ function buildSvg(node: JsonNode): THREE.Object3D | null {
 export async function svgToGlb(src: string, depth = 0.4, size = 2): Promise<Uint8Array> {
   const geom = svgMeshGeometry(src, depth, size);
   if (!geom) throw new Error("svg(): nothing to export");
-  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.2, roughness: 0.5 }));
+  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.2, roughness: 0.5, side: THREE.DoubleSide }));
   const scene = new THREE.Scene();
   scene.add(mesh);
   const exporter = new GLTFExporter();
