@@ -63,7 +63,7 @@ are still ahead. See [Roadmap](/roadmap/) stage 3.
 These land in runner `0.0.5` (the hosted API + editor viewer); opt in with
 `runner "0.0.5";`.
 
-- **`svg(source, depth?, size?)`** **(rendered)** — turn an SVG string into
+- **`svg(source, depth?, size?, round?)`** **(rendered)** — turn an SVG string into
   an extruded 3D mesh. Handles filled shapes and stroked outlines
   (lucide-style icons), normalizes (centre, Y-flip, scale to `size` px),
   and gives it `depth` px of thickness. Compose it like any mesh:

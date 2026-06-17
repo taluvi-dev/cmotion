@@ -61,14 +61,14 @@
             versions: { cmotion: string; three: string };
           };
           // SVG → .glb export (base64), used by the container's mesh job.
-          __svgToGlbB64?: (svg: string, depth: number, size: number) => Promise<string>;
+          __svgToGlbB64?: (svg: string, depth: number, size: number, round: number) => Promise<string>;
         }
       }
 
       // Always expose the mesh exporter (no scene/wasm needed). The driver's
       // KIND=mesh path calls this directly and never boots the scene.
-      window.__svgToGlbB64 = async (svg, depth, size) => {
-        const bytes = await svgToGlb(svg, depth, size);
+      window.__svgToGlbB64 = async (svg, depth, size, round) => {
+        const bytes = await svgToGlb(svg, depth, size, round);
         let bin = "";
         for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
         return btoa(bin);

@@ -123,3 +123,13 @@ Worker can surface the diagnostic to the client.
   (winding-independent), seal walls both-ways, and export double-sided — so
   the back cap and the side band are watertight (no holes). Pins
   `0.0.7-amd64`.
+
+
+
+- `0.0.10/` — reworks SVG→mesh to the glyph principle: stroked paths are
+  converted to OUTLINE polygons (centreline offset by half the line width,
+  round caps; closed paths → outer ring + inner hole) and fed to
+  THREE.ExtrudeGeometry (the same call that extrudes glyphs), so icons render
+  as outlines, watertight by construction. Adds a `round` param that bevels
+  the edges (0 = square "qube"; → depth/2 rounds toward a tube). Supersedes
+  the 0.0.7 hand-rolled thickener. Pins `0.0.10-amd64`.

@@ -19,7 +19,6 @@ import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { SVGLoader } from "three/examples/jsm/loaders/SVGLoader.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
-import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 // ---- WASM bridge -------------------------------------------------
 
@@ -836,119 +835,150 @@ function svgStringOf(node: JsonNode | undefined): string | null {
   return r;
 }
 
-// Give a flat (z=0) triangulated geometry real Z thickness: a front face
-// at +depth/2, a back face at -depth/2 (reversed winding), and side walls
-// along the boundary edges (directed edges with no reverse twin). Welds
-// first so boundary detection is robust. Generic over fills (ShapeGeometry)
-// and strokes (SVGLoader.pointsToStroke) alike.
-// Give one flat (z=0) triangulated region real Z thickness: a front face at
-// +depth/2, a back face at -depth/2, and side walls along its boundary —
-// producing a watertight solid. Must be called PER connected region (not on
-// a merged soup of overlapping pieces), so the boundary loop is well-defined.
-//
-// Boundary detection is UNDIRECTED (an edge used by exactly one triangle is a
-// boundary), so it's independent of the source triangles' winding — which is
-// what `pointsToStroke`/`ShapeGeometry` don't guarantee, and what made an
-// earlier directed-edge version drop walls (holes in the band) and leave the
-// back cap unreliable. Walls are emitted both-ways so they show regardless of
-// viewing side.
-function thickenFlat(flat: THREE.BufferGeometry, depth: number): THREE.BufferGeometry {
-  const g = BufferGeometryUtils.mergeVertices(flat.toNonIndexed(), 1e-5);
-  const pos = g.getAttribute("position");
-  const idx = g.getIndex()!.array as ArrayLike<number>;
-  const hd = depth / 2;
-  const verts: number[] = [];
-  const push = (i: number, z: number) => verts.push(pos.getX(i), pos.getY(i), z);
-
-  // Count each undirected edge. Boundary edges appear exactly once.
-  const count = new Map<number, number>();
-  const uk = (a: number, b: number) => (a < b ? a * 4_000_037 + b : b * 4_000_037 + a);
-  for (let t = 0; t < idx.length; t += 3) {
-    const a = idx[t], b = idx[t + 1], c = idx[t + 2];
-    for (const [u, v] of [[a, b], [b, c], [c, a]] as const) count.set(uk(u, v), (count.get(uk(u, v)) ?? 0) + 1);
-  }
-
-  for (let t = 0; t < idx.length; t += 3) {
-    const a = idx[t], b = idx[t + 1], c = idx[t + 2];
-    push(a, hd); push(b, hd); push(c, hd);          // front cap
-    push(c, -hd); push(b, -hd); push(a, -hd);       // back cap (reversed winding)
-    for (const [u, v] of [[a, b], [b, c], [c, a]] as const) {
-      if (count.get(uk(u, v)) === 1) {              // boundary → seal with a wall
-        // both winding orders so the wall is solid from either side
-        push(u, hd); push(v, hd); push(v, -hd);
-        push(u, hd); push(v, -hd); push(u, -hd);
-        push(v, hd); push(u, hd); push(u, -hd);
-        push(v, hd); push(u, -hd); push(v, -hd);
-      }
-    }
-  }
-  const out = new THREE.BufferGeometry();
-  out.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
-  out.computeVertexNormals();
-  return out;
+function ringArea(r: THREE.Vector2[]): number {
+  let a = 0;
+  for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += (r[j].x + r[i].x) * (r[j].y - r[i].y);
+  return a / 2;
 }
 
-// svg(source, depth?, size?) — turn an SVG string into an extruded 3D mesh.
-// Handles filled shapes (SVGLoader.createShapes → ShapeGeometry) and
-// stroked paths (lucide-style outline icons → pointsToStroke ribbons),
-// flattens + merges them, normalises (centre, Y-flip, scale so the icon is
-// `size` cmotion-px tall), then gives it `depth` px of thickness. Wrap with
-// .material()/.rotate()/… like any other mesh. `size` is pixel-honest via
-// pxToWorld, matching the rest of the scene.
-// Core SVG → solid geometry, in absolute units: the result is centred at
-// the origin, `sizeUnits` tall, `depthUnits` thick (Y-flipped from SVG's
-// y-down). Shared by the in-scene svg() primitive (which passes world
-// units via pxToWorld) and the standalone svgToGlb() export (which passes
-// the caller's units directly).
-function svgMeshGeometry(src: string, depthUnits: number, sizeUnits: number): THREE.BufferGeometry | null {
+// Append a round-cap / round-join arc (radius hw, around `center`) from point
+// `from` to point `to`, sweeping through the `outward` side.
+function arcTo(out: THREE.Vector2[], center: THREE.Vector2, from: THREE.Vector2, to: THREE.Vector2, outward: THREE.Vector2, segs = 8): void {
+  const start = Math.atan2(from.y - center.y, from.x - center.x);
+  const end = Math.atan2(to.y - center.y, to.x - center.x);
+  const ao = Math.atan2(outward.y, outward.x);
+  const hw = from.distanceTo(center);
+  let delta = end - start;
+  while (delta <= -Math.PI) delta += 2 * Math.PI;
+  while (delta > Math.PI) delta -= 2 * Math.PI;
+  const norm = (x: number) => { let d = x - ao; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; return Math.abs(d); };
+  if (norm(start + delta / 2) > Math.PI / 2) delta += delta > 0 ? -2 * Math.PI : 2 * Math.PI;
+  for (let k = 1; k < segs; k++) {
+    const a = start + (delta * k) / segs;
+    out.push(new THREE.Vector2(center.x + hw * Math.cos(a), center.y + hw * Math.sin(a)));
+  }
+}
+
+// Convert a stroked polyline (centreline `pts`, half-width `hw`) into its
+// outline polygon(s) — the same thing the SVG renderer fills along a stroke.
+// Offsets each vertex by its (mitred, clamped) normal to get left/right
+// edges; open paths get round caps, closed paths become an outer ring + an
+// inner hole. The result is a clean simple loop, so feeding it to
+// ExtrudeGeometry yields a watertight OUTLINE solid (not a filled blob).
+function strokeOutline(pts: THREE.Vector2[], hw: number, closed: boolean): { contour: THREE.Vector2[]; holes: THREE.Vector2[][] } | null {
+  const P: THREE.Vector2[] = [];
+  for (const p of pts) if (!P.length || P[P.length - 1].distanceTo(p) > 1e-6) P.push(p.clone());
+  if (closed && P.length > 1 && P[0].distanceTo(P[P.length - 1]) < 1e-6) P.pop();
+  const n = P.length;
+  if (n < 2) return null;
+
+  const m = closed ? n : n - 1;
+  const segN: THREE.Vector2[] = [];
+  for (let i = 0; i < m; i++) {
+    const a = P[i], b = P[(i + 1) % n];
+    const d = b.clone().sub(a).normalize();
+    segN.push(new THREE.Vector2(-d.y, d.x)); // left-hand normal
+  }
+  const vnorm = (i: number): THREE.Vector2 => {
+    let nA: THREE.Vector2, nB: THREE.Vector2;
+    if (closed) { nA = segN[(i - 1 + m) % m]; nB = segN[i % m]; }
+    else if (i === 0) { nA = nB = segN[0]; }
+    else if (i === n - 1) { nA = nB = segN[m - 1]; }
+    else { nA = segN[i - 1]; nB = segN[i]; }
+    const mit = nA.clone().add(nB);
+    if (mit.lengthSq() < 1e-9) return nB.clone();
+    mit.normalize();
+    return mit.multiplyScalar(1 / Math.max(0.25, mit.dot(nB)));
+  };
+
+  const left: THREE.Vector2[] = [], right: THREE.Vector2[] = [];
+  for (let i = 0; i < n; i++) {
+    const o = vnorm(i).multiplyScalar(hw);
+    left.push(P[i].clone().add(o));
+    right.push(P[i].clone().sub(o));
+  }
+
+  if (closed) {
+    const outer = Math.abs(ringArea(left)) >= Math.abs(ringArea(right)) ? left : right;
+    const inner = outer === left ? right : left;
+    return { contour: outer, holes: [inner.slice().reverse()] };
+  }
+
+  const dirStart = P[1].clone().sub(P[0]).normalize();
+  const dirEnd = P[n - 1].clone().sub(P[n - 2]).normalize();
+  const loop: THREE.Vector2[] = [...left];
+  arcTo(loop, P[n - 1], left[n - 1], right[n - 1], dirEnd);              // end cap
+  for (let i = n - 1; i >= 0; i--) loop.push(right[i]);
+  arcTo(loop, P[0], right[0], left[0], dirStart.clone().multiplyScalar(-1)); // start cap
+  return { contour: loop, holes: [] };
+}
+
+// Core SVG → solid geometry, in absolute units: centred at the origin,
+// `sizeUnits` tall, `depthUnits` thick (Y-flipped from SVG's y-down). Shared
+// by the in-scene svg() primitive (world units via pxToWorld) and svgToGlb()
+// (caller's units).
+//
+// Glyph principle: collect THREE.Shapes and hand them to ExtrudeGeometry (the
+// same call that extrudes glyphs) for a watertight solid. Filled paths become
+// shapes via SVGLoader.createShapes; stroked paths (lucide icons) are turned
+// into their OUTLINE shapes via strokeOutline so they extrude as outlines, not
+// filled blobs. y is negated at the shape so the extrude keeps a right-handed
+// basis (correct normals), like the glyph builder's font y-flip.
+function svgMeshGeometry(src: string, depthUnits: number, sizeUnits: number, roundUnits = 0): THREE.BufferGeometry | null {
   let data: ReturnType<SVGLoader["parse"]>;
   try { data = new SVGLoader().parse(src); }
   catch (e) { console.warn("[cmotion-viewer] svg(): parse failed", e); return null; }
 
-  const flats: THREE.BufferGeometry[] = [];
-  const onlyPos = (g: THREE.BufferGeometry) => {
-    const n = g.toNonIndexed();
-    const p = new THREE.BufferGeometry();
-    p.setAttribute("position", n.getAttribute("position"));
-    return p;
-  };
+  const polys: { contour: THREE.Vector2[]; holes: THREE.Vector2[][] }[] = [];
   for (const path of data.paths) {
     const style: any = (path as any).userData?.style ?? {};
     const hasFill = style.fill && style.fill !== "none";
     const hasStroke = style.stroke && style.stroke !== "none";
     if (hasFill || (!hasFill && !hasStroke)) {
-      for (const shape of SVGLoader.createShapes(path)) flats.push(onlyPos(new THREE.ShapeGeometry(shape, 16)));
+      for (const shape of SVGLoader.createShapes(path)) {
+        const ep = shape.extractPoints(24);
+        if (ep.shape.length >= 3) polys.push({ contour: ep.shape, holes: ep.holes });
+      }
     }
     if (hasStroke) {
+      const hw = (typeof style.strokeWidth === "number" ? style.strokeWidth : 1) / 2;
       for (const sub of path.subPaths) {
-        const pts = sub.getPoints();
+        const pts = sub.getPoints(24);
         if (pts.length < 2) continue;
-        const g = SVGLoader.pointsToStroke(pts, style);
-        if (g) flats.push(onlyPos(g));
+        const closed = pts[0].distanceTo(pts[pts.length - 1]) < 1e-3;
+        const o = strokeOutline(pts, hw, closed);
+        if (o) polys.push(o);
       }
     }
   }
-  if (flats.length === 0) { console.warn("[cmotion-viewer] svg(): nothing to render"); return null; }
+  if (polys.length === 0) { console.warn("[cmotion-viewer] svg(): nothing to render"); return null; }
 
-  // Normalise from the UNION bounds so every piece shares the same centre +
-  // scale, then thicken each piece INDEPENDENTLY and merge the solids. (Each
-  // stroke ribbon / fill is its own closed region; thickening a pre-merged
-  // soup of overlapping pieces is what produced holes.)
-  const union = new THREE.Box3();
-  for (const f of flats) { f.computeBoundingBox(); union.union(f.boundingBox!); }
-  const h = Math.max(1e-4, union.max.y - union.min.y);
-  const cx = (union.max.x + union.min.x) / 2;
-  const cy = (union.max.y + union.min.y) / 2;
-  const s = sizeUnits / h;
-  // centre at origin, flip SVG's y-down to scene y-up, scale to size
-  const m = new THREE.Matrix4().makeScale(s, -s, 1).multiply(new THREE.Matrix4().makeTranslation(-cx, -cy, 0));
-
-  const solids: THREE.BufferGeometry[] = [];
-  for (const f of flats) {
-    f.applyMatrix4(m);
-    solids.push(thickenFlat(f, depthUnits));
+  const shapes: THREE.Shape[] = [];
+  for (const p of polys) {
+    if (p.contour.length < 3) continue;
+    const sh = new THREE.Shape(p.contour.map((v) => new THREE.Vector2(v.x, -v.y)));
+    for (const hole of p.holes) if (hole.length >= 3) sh.holes.push(new THREE.Path(hole.map((v) => new THREE.Vector2(v.x, -v.y))));
+    shapes.push(sh);
   }
-  return solids.length === 1 ? solids[0] : (BufferGeometryUtils.mergeGeometries(solids, false) ?? solids[0]);
+  if (shapes.length === 0) return null;
+
+  // `round` bevels the extruded edges: 0 = square ("qube") edges; as it grows
+  // toward depth/2 the cross-section rounds off toward a tube. The bevel adds
+  // 2×thickness in z, so shrink the straight depth to keep total = depthUnits.
+  const r = Math.max(0, Math.min(roundUnits, depthUnits / 2 - 1e-4));
+  const extrudeOpts: THREE.ExtrudeGeometryOptions = r > 1e-6
+    ? { depth: depthUnits - 2 * r, bevelEnabled: true, bevelThickness: r, bevelSize: r, bevelOffset: 0, bevelSegments: 6, steps: 1 }
+    : { depth: depthUnits, bevelEnabled: false, steps: 1 };
+  const geom = new THREE.ExtrudeGeometry(shapes, extrudeOpts);
+  geom.computeBoundingBox();
+  const bb = geom.boundingBox!;
+  const h = Math.max(1e-4, bb.max.y - bb.min.y);
+  const cx = (bb.max.x + bb.min.x) / 2;
+  const cy = (bb.max.y + bb.min.y) / 2;
+  geom.translate(-cx, -cy, -depthUnits / 2);
+  const s = sizeUnits / h;
+  geom.scale(s, s, 1);
+  return geom;
 }
 
 function buildSvg(node: JsonNode): THREE.Object3D | null {
@@ -956,7 +986,7 @@ function buildSvg(node: JsonNode): THREE.Object3D | null {
   const args = positionalArgs(node);
   const src = svgStringOf(f.source ?? args[0]);
   if (!src) { console.warn("[cmotion-viewer] svg(): missing source string"); return null; }
-  const geom = svgMeshGeometry(src, numberOf(f.depth, 16) * pxToWorld, numberOf(f.size, 400) * pxToWorld);
+  const geom = svgMeshGeometry(src, numberOf(f.depth, 16) * pxToWorld, numberOf(f.size, 400) * pxToWorld, numberOf(f.round, 0) * pxToWorld);
   if (!geom) return null;
   return new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0xffffff }));
 }
@@ -965,9 +995,10 @@ function buildSvg(node: JsonNode): THREE.Object3D | null {
 // svg() primitive renders and serialises it to a .glb byte array via
 // three's GLTFExporter — no canvas/WebGL/wasm needed, so the render
 // container can call it headlessly for POST /v1/mesh. `depth`/`size` are
-// in mesh units (the icon ends up `size` tall, `depth` thick).
-export async function svgToGlb(src: string, depth = 0.4, size = 2): Promise<Uint8Array> {
-  const geom = svgMeshGeometry(src, depth, size);
+// in mesh units (the icon ends up `size` tall, `depth` thick). `round` bevels
+// the edges (0 = square, → depth/2 rounds toward a tube).
+export async function svgToGlb(src: string, depth = 0.4, size = 2, round = 0): Promise<Uint8Array> {
+  const geom = svgMeshGeometry(src, depth, size, round);
   if (!geom) throw new Error("svg(): nothing to export");
   const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.2, roughness: 0.5, side: THREE.DoubleSide }));
   const scene = new THREE.Scene();
