@@ -19,6 +19,7 @@ import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { SVGLoader } from "three/examples/jsm/loaders/SVGLoader.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
+import { GIFEncoder, quantize, applyPalette } from "gifenc";
 
 // ---- WASM bridge -------------------------------------------------
 
@@ -1395,6 +1396,11 @@ export interface ViewerHandle {
     fps?: number;
     onProgress?: (t: number) => void;
   }): Promise<{ blob: Blob; ext: string; mime: string }>;
+  captureGif(opts?: {
+    duration?: number;
+    fps?: number;
+    onProgress?: (t: number) => void;
+  }): Promise<{ blob: Blob; ext: string; mime: string }>;
   destroy(): void;
 }
 
@@ -1629,6 +1635,57 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
           requestAnimationFrame(tick);
         };
         requestAnimationFrame(tick);
+      });
+    },
+    captureGif(opts: { duration?: number; fps?: number; onProgress?: (t: number) => void } = {}) {
+      // Animated GIF export. Unlike captureClip (which records the live canvas
+      // in real time via MediaRecorder), GIF is built deterministically: seek
+      // to each frame, redraw, read the pixels off the WebGL canvas, quantize
+      // to a 256-colour table and LZW-encode. Synchronous frame stepping means
+      // the output never drops frames the way a real-time recorder can.
+      const duration = opts.duration ?? durationSeconds;
+      const fps = Math.min(50, Math.max(1, Math.round(opts.fps ?? 20)));
+      const onProgress = opts.onProgress;
+      const frames = Math.max(1, Math.round(duration * fps));
+      // GIF delays are in centiseconds (1/100 s); clamp to ≥2 (browsers floor
+      // sub-2cs delays to 10cs anyway).
+      const delayCs = Math.max(2, Math.round(100 / fps));
+
+      // Read-back surface. The WebGL canvas can't give an ImageData directly,
+      // so we blit it onto a 2D canvas at its backing-store resolution.
+      const w = canvas.width, h = canvas.height;
+      const read = document.createElement("canvas");
+      read.width = w; read.height = h;
+      const rctx = read.getContext("2d", { willReadFrequently: true })!;
+
+      const gif = GIFEncoder();
+      return new Promise<{ blob: Blob; ext: string; mime: string }>((resolve, reject) => {
+        let i = 0;
+        const step = () => {
+          try {
+            const t = frames > 1 ? (i / frames) * duration : 0;
+            applyFrame(t);
+            // Draw immediately after applyFrame in the same tick — see
+            // captureFrame for why the back buffer is otherwise undefined.
+            rctx.clearRect(0, 0, w, h);
+            rctx.drawImage(canvas, 0, 0, w, h);
+            const { data } = rctx.getImageData(0, 0, w, h);
+            // Per-frame palette: the prism/bloom scenes shift colour over time,
+            // so a single global table would band badly. 256-colour median cut.
+            const palette = quantize(data, 256);
+            const index = applyPalette(data, palette);
+            gif.writeFrame(index, w, h, { palette, delay: delayCs });
+            onProgress?.(t);
+            i++;
+            if (i < frames) { requestAnimationFrame(step); return; }
+            gif.finish();
+            const blob = new Blob([gif.bytesView()], { type: "image/gif" });
+            resolve({ blob, ext: "gif", mime: "image/gif" });
+          } catch (err) {
+            reject(err);
+          }
+        };
+        requestAnimationFrame(step);
       });
     },
     destroy() {

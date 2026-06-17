@@ -182,6 +182,7 @@ scene title(duration: Duration = 6s) -> Frame {
       <button id="btn-render">Render</button>
       <button class="secondary" id="btn-play">Play</button>
       <button class="secondary" id="btn-png" disabled>Save PNG</button>
+      <button class="secondary" id="btn-gif" disabled>Save GIF</button>
       <button class="secondary" id="btn-webm" disabled>Save video</button>
     </header>
 
@@ -288,6 +289,7 @@ scene title(duration: Duration = 6s) -> Frame {
       const btnRender = document.getElementById("btn-render") as HTMLButtonElement;
       const btnPlay = document.getElementById("btn-play") as HTMLButtonElement;
       const btnPng = document.getElementById("btn-png") as HTMLButtonElement;
+      const btnGif = document.getElementById("btn-gif") as HTMLButtonElement;
       const btnWebm = document.getElementById("btn-webm") as HTMLButtonElement;
       const btnBack = document.getElementById("btn-back") as HTMLButtonElement;
       const btnCode = document.getElementById("btn-code") as HTMLButtonElement;
@@ -338,10 +340,12 @@ scene title(duration: Duration = 6s) -> Frame {
           tVal.textContent = formatTime(0, d);
           setStatus(`rendered in ${ms}ms · interp v${view.versions.cmotion} · three.js r${view.versions.three} · duration ${d}s`);
           btnPng.disabled = false;
+          btnGif.disabled = false;
           btnWebm.disabled = false;
         } catch (e: any) {
           setStatus(e.message, true);
           btnPng.disabled = true;
+          btnGif.disabled = true;
           btnWebm.disabled = true;
         } finally {
           btnRender.disabled = false;
@@ -493,6 +497,67 @@ scene title(duration: Duration = 6s) -> Frame {
 
       btnWebm.addEventListener("click", () => {
         if (pendingClip) saveClip(); else recordClip();
+      });
+
+      // GIF mirrors the video two-click flow (record, then a fresh-gesture
+      // save) for the same iOS share-sheet activation reason.
+      let pendingGif: { blob: Blob; name: string; durationS: number; sizeKB: number } | null = null;
+      const btnGifLabel = btnGif.textContent || "Save GIF";
+
+      async function recordGif() {
+        if (!view) return;
+        btnGif.disabled = true;
+        btnGif.textContent = "encoding…";
+        setStatus(`encoding ${view.durationSeconds.toFixed(1)}s GIF…`);
+        setPlaying(false);
+        const d = view.durationSeconds;
+        view.seek(0);
+        scrub.value = "0";
+        tVal.textContent = formatTime(0, d);
+        try {
+          const { blob } = await view.captureGif({
+            onProgress: (t) => {
+              scrub.value = String(t);
+              tVal.textContent = formatTime(t, d);
+            },
+          });
+          if (!blob.size) throw new Error("GIF encode produced 0 bytes");
+          pendingGif = {
+            blob,
+            name: `cmotion-${Date.now()}.gif`,
+            durationS: d,
+            sizeKB: blob.size / 1024,
+          };
+          btnGif.textContent = `Save ${pendingGif.sizeKB.toFixed(0)} KB GIF`;
+          btnGif.classList.remove("secondary");
+          setStatus(`GIF ready — click "${btnGif.textContent}" to save`);
+        } catch (e: any) {
+          setStatus(`GIF: ${e.message}`, true);
+          btnGif.textContent = btnGifLabel;
+        } finally {
+          btnGif.disabled = false;
+        }
+      }
+
+      async function saveGif() {
+        if (!pendingGif) return;
+        const { blob, name, durationS, sizeKB } = pendingGif;
+        btnGif.disabled = true;
+        try {
+          const how = await saveOrShare(blob, name);
+          setStatus(`GIF ${how} (${sizeKB.toFixed(0)} KB · ${durationS.toFixed(1)}s)`);
+        } catch (e: any) {
+          setStatus(`GIF: ${e.message}`, true);
+        } finally {
+          pendingGif = null;
+          btnGif.textContent = btnGifLabel;
+          btnGif.classList.add("secondary");
+          btnGif.disabled = false;
+        }
+      }
+
+      btnGif.addEventListener("click", () => {
+        if (pendingGif) saveGif(); else recordGif();
       });
 
       try {
