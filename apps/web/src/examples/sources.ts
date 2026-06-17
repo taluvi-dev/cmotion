@@ -379,7 +379,7 @@ scene plinken_svg(duration: Duration = 6s) -> Frame {
 
 // Hand-drawn -> 3D: vectorize() traces a raster line drawing to a uniform
 // centreline and extrudes it, the bitmap counterpart to svg().
-export const HANDDRAWN_SOURCE = `runner "0.0.12";
+export const HANDDRAWN_SOURCE = `runner "0.0.13";
 
 use std.shapes.*;
 use std.scene3d.*;
