@@ -27,8 +27,8 @@ A single program contains:
 
 ## What this site is
 
-This is the language and toolchain reference. It is being built in public, in stages — see the [Roadmap](/roadmap/). The [Grammar](/language/grammar/) is the first thing locked.
+This is the language and toolchain reference. It is being built in public, in stages — see the [Roadmap](/roadmap/). The [Grammar](/language/grammar/) is locked at v0.2, and the reference interpreter that runs on top of it already renders the scene above.
 
 ## Status
 
-cmotion is **pre-release**. The grammar spec is at v0.2; no compiler exists yet. The first milestone is the tree-sitter parser.
+cmotion is **pre-release but already runs.** The grammar is locked at v0.2, and the reference interpreter (`cmo` on the CLI, and the same core as `cmotion-render.wasm`) parses, type-checks, evaluates, and **renders 3D scenes today** — in the CLI, the in-browser [editor](/playground/), and the hosted render [API](/api/) at `api.cmotion.org`. Rendering runs through interim backends (a native rasteriser and a Three.js/WebGL viewer); still ahead are the full type system and the canonical CanvasKit + WGSL backends. See the [Roadmap](/roadmap/) for the stage-by-stage status, or try it now in the [playground](/playground/).

@@ -11,15 +11,14 @@ Once the [grammar](/language/grammar/) and [type system](/language/types/) are l
 
 ## Implementation language
 
-To be decided. Leading candidates:
+**Zig** (0.15.1). It won out for its C interop (tree-sitter, stb_truetype, asset codecs are all C), its WASM toolchain, and comptime that fits AST work. The same Zig core builds two ways: a native binary (`cmo`) and `cmotion-render.wasm` for the browser editor and the hosted render API. A future WGSL backend may live on `wgpu` (Rust) behind a C ABI.
 
-- **Zig** — best-in-class C interop (tree-sitter, audio analyzers, asset codecs are all C/C++), excellent WASM toolchain, comptime fits AST work, `World`-capability-style I/O via explicit allocators.
-- **Rust** — mature ecosystem, first-class tree-sitter bindings, shares a codebase with the WGSL backend (which lives on `wgpu`, also Rust).
+## What runs today
 
-Likely split: **Zig for the interpreter + CanvasKit/audio side; Rust for the WGSL backend.** A C ABI sits between them.
+`cmo eval` / `cmo render` walk the AST through `eval` → a time-sampler → a renderer. The renderer side has two interim backends — a native software rasteriser and a Three.js/WebGL viewer fed the interpreter's JSON value tree — so the same source renders in the CLI, the in-browser editor, and the hosted API. These stand in for the canonical CanvasKit/WGSL backends (roadmap 6–7) while the interpreter itself is the conformance oracle.
 
 ## Testing
 
-Conformance tests use [wasmtime](https://wasmtime.dev/) to run WASM-codegen output and compare values against the interpreter, headlessly in CI. Rendering tests use golden PNG diffs (CanvasKit native, `wgpu` headless).
+A vitest/Zig conformance suite runs the WASM interpreter and compares against the native build; rendering is checked with golden-image diffs. As the WASM-codegen backend lands, its output will be compared against this interpreter headlessly in CI.
 
-Status: not started. See [Roadmap](/roadmap/) stage 4.
+Status: **done** — the interpreter is built and renders 3D today (native + WASM). See [Roadmap](/roadmap/) stage 4.
