@@ -261,12 +261,12 @@ scene star(duration: Duration = 6s) -> Frame {
 // gradient, and bloom.
 export const PLINKEN_SVG_SOURCE = `// Plinken SVG — an SVG icon turned into a turning 3D mark over a prism.
 //
-// Showcases runner 0.0.5 features: a verbatim SVG (the lucide "users"
-// icon) pasted in a triple-quoted string and extruded by svg(src,
-// depth:, size:); translucent material via opacity:; a vertical emissive
-// gradient(top:, bottom:); and opt-in bloom(...). The mark sits in front
-// of the beams in Z; a spectral fan tilts toward the camera and sweeps a
-// bright crest once per loop. Loops seamlessly over 6s.
+// Showcases runner 0.0.5 features: a verbatim SVG pasted in a triple-
+// quoted string and extruded by svg(src, depth:, size:); translucent
+// material via opacity:; a vertical emissive gradient(top:, bottom:);
+// and opt-in bloom(...). The lucide "user" outline becomes a glassy 3D
+// mark; a spectral fan tilts toward the camera and sweeps a bright crest
+// once per loop. Loops seamlessly over 6s.
 
 runner "0.0.5";
 
@@ -295,13 +295,12 @@ scene plinken_svg(duration: Duration = 6s) -> Frame {
   // so its self-glow shifts through the colours over the loop.
   let pickup = animate { 0s => 250deg, 6s => 610deg } with { repeat: forever };
 
-  // Hero: the lucide "users" (plural) SVG, pasted verbatim via a triple-
-  // quoted string and turned into a 3D mesh by the svg(...) primitive
-  // (runner 0.0.5). Its stroked outlines (head rings + shoulder arcs)
-  // become extruded ribbons with \`depth\`; \`size\` sets its height in frame
-  // px. Big, in front, translucent blue, turning on Y. One material + spin
-  // wraps the whole figure.
-  let person = svg("""<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M16 3.128a4 4 0 0 1 0 7.744"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><circle cx="9" cy="7" r="4"/></svg>""", depth: 80px, size: 820px)
+  // Hero: the provided lucide "user" SVG, pasted verbatim via a triple-
+  // quoted string and turned into a 3D mesh by the new svg(...) primitive
+  // (runner 0.0.5). Stroked outlines (head ring + arc) become extruded
+  // ribbons with \`depth\`; \`size\` sets its height in frame px. Big, in
+  // front, translucent blue, turning on Y. One material + spin wraps it.
+  let person = svg("""<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#cfe0ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 21a8 8 0 0 1 8 -8"/><circle cx="10" cy="8" r="5"/></svg>""", depth: 80px, size: 820px)
             .material(fill: oklch(0.56, 0.15, 258),
                       metalness: 0.35,
                       roughness: 0.16,
@@ -310,7 +309,7 @@ scene plinken_svg(duration: Duration = 6s) -> Frame {
                       emissive_intensity: 0.30)
             .rotate(x: wobble, y: spin)
             .scale(pulse)
-            .translate(y: 40px, z: 200px);
+            .translate(y: 40px);
 
   // ---- Prism fan -----------------------------------------------------
   // Seven spectral wedges share one apex at (0, -80) — the point just under
