@@ -373,17 +373,31 @@ const OPENAPI_SPEC = {
     schemas: {
       RenderRequest: {
         type: "object",
-        required: ["source"],
+        description:
+          "Either `source` (a `.cm` source for render/frame/gif, or an SVG for mesh, or an in-container image path for vectorize), or — for `/v1/vectorize` only — an inline base64 `image` instead.",
         properties: {
           source: {
             type: "string",
             maxLength: 65536,
             description:
-              "The `.cm` source. Should pin its target runner with a `runner \"<semver>\";` declaration at the top.",
+              "For render/frame/gif: the `.cm` source (pin `runner \"<semver>\";`). For mesh: an SVG string. For vectorize: the in-container image path (paired with `assets`). Optional on `/v1/vectorize` when `image` is given.",
+          },
+          image: {
+            type: "string",
+            description:
+              "`/v1/vectorize` only: an inline base64-encoded raster image — submit a drawing in one call without the `/v1/assets` upload step (≤12 MiB base64). Provide this OR `source`+`assets`.",
+          },
+          assets: {
+            type: "object",
+            additionalProperties: { type: "string" },
+            description:
+              "Maps an in-source path (e.g. `/drawing.jpg`) to an asset key from POST /v1/assets. Used by vectorize (image input) and any source that references uploaded files.",
           },
           params: {
             type: "object",
+            description: "Per-kind options.",
             properties: {
+              // render / video
               fps: { type: "integer", minimum: 1, maximum: 60, default: 30 },
               duration: {
                 type: "number",
@@ -394,6 +408,18 @@ const OPENAPI_SPEC = {
               },
               width: { type: "integer", minimum: 16, maximum: 3840, default: 1920 },
               height: { type: "integer", minimum: 16, maximum: 2160, default: 1080 },
+              at: { type: "number", minimum: 0, description: "frame: time (s) to seek to." },
+              // mesh (SVG → .glb)
+              depth: { type: "number", description: "mesh: extrusion depth (units)." },
+              size: { type: "number", description: "mesh: target height (units)." },
+              round: { type: "number", description: "mesh: edge bevel (0 = square, → depth/2 rounds toward a tube)." },
+              // vectorize (image → centreline SVG)
+              strokeWidth: { type: "number", description: "vectorize: output line width." },
+              threshold: { type: "number", minimum: 0, maximum: 1, description: "vectorize: ink cutoff (0..1)." },
+              simplify: { type: "number", description: "vectorize: RDP tolerance (px)." },
+              bridge: { type: "integer", description: "vectorize: gap-bridging dilation rounds." },
+              stitch: { type: "number", description: "vectorize: endpoint-join tolerance (px)." },
+              maxDim: { type: "integer", description: "vectorize: processing resolution." },
             },
           },
         },
