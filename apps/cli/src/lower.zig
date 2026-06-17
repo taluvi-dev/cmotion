@@ -461,7 +461,15 @@ pub const Lowerer = struct {
             const n = ts.namedChildCount(node);
             var i: u32 = 0;
             while (i < n) : (i += 1) {
-                try elems.append(self.arena, try self.lowerExpr(ts.namedChild(node, i)));
+                const c = ts.namedChild(node, i);
+                // Comments are tree-sitter `extras` and surface as named
+                // children anywhere — including between array elements. The
+                // arg-list / record-init loops skip them implicitly via a
+                // positive kind filter; the array loop lowers every child, so
+                // skip them explicitly or `lowerExpr` hits UnexpectedNodeKind.
+                const ck = ts.kind(c);
+                if (std.mem.eql(u8, ck, "line_comment") or std.mem.eql(u8, ck, "block_comment")) continue;
+                try elems.append(self.arena, try self.lowerExpr(c));
             }
             return .{ .array = .{
                 .span = self.spanOf(node),

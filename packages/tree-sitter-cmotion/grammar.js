@@ -477,14 +477,27 @@ module.exports = grammar({
       )),
     )),
 
-    string_lit: _ => token(seq(
-      '"',
-      repeat(choice(
-        /[^"\\]/,
-        seq('\\', /./),
+    // Two forms: a normal escaped "..." string, and a raw triple-quoted
+    // """..."""  string whose body may contain unescaped quotes and
+    // newlines (it ends at the first """). The triple form lets a source
+    // paste a verbatim SVG / JSON blob — e.g. svg("""<svg ...>...</svg>""")
+    // — without escaping its inner double quotes. Longest-match lexing
+    // picks the triple form when three quotes open.
+    string_lit: _ => choice(
+      token(seq(
+        '"""',
+        /([^"]|"[^"]|""[^"])*/,
+        '"""',
       )),
-      '"',
-    )),
+      token(seq(
+        '"',
+        repeat(choice(
+          /[^"\\]/,
+          seq('\\', /./),
+        )),
+        '"',
+      )),
+    ),
 
     bool_lit: _ => choice('true', 'false'),
 

@@ -100,3 +100,13 @@ Worker can surface the diagnostic to the client.
   `runner "0.0.3";`. Note the single pinned image renders every runner's
   sources — the per-version directories exist so each generation's bytes
   can be reproduced, not for per-pin worker routing.
+
+- `0.0.5/` — adds, to the frozen viewer + driver: material `opacity:`, a
+  vertical emissive `gradient(top:, bottom:)`, opt-in `bloom(...)`, the
+  `svg(src, depth:, size:)` primitive (SVG → extruded 3D mesh, fills +
+  strokes), triple-quoted raw strings in the grammar, and a `KIND=gif`
+  output (ffmpeg two-pass palette) wired to the API's `POST /v1/gif`.
+  `apps/api/wrangler.jsonc` pins `0.0.5-amd64`; ship it by building the
+  image from this directory, pushing it as `cmotion-runner:0.0.5-amd64`
+  (`wrangler containers push`), and redeploying with
+  `apps/api/scripts/deploy.sh`. Sources opt in with `runner "0.0.5";`.

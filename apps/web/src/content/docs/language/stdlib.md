@@ -57,3 +57,33 @@ Status: in progress. The **(rendered)** modules above run in both
 the native renderer and the web viewer; the `pure`/`effectful` tagging
 and the remaining modules (`std.filter`, `std.transport`, `std.audio`)
 are still ahead. See [Roadmap](/roadmap/) stage 3.
+
+## Runner 0.0.5 additions
+
+These land in runner `0.0.5` (the hosted API + editor viewer); opt in with
+`runner "0.0.5";`.
+
+- **`svg(source, depth?, size?)`** **(rendered)** — turn an SVG string into
+  an extruded 3D mesh. Handles filled shapes and stroked outlines
+  (lucide-style icons), normalizes (centre, Y-flip, scale to `size` px),
+  and gives it `depth` px of thickness. Compose it like any mesh:
+  `svg("""<svg…>""", depth: 40px, size: 600px).material(...).rotate(...)`.
+- **Triple-quoted strings** `"""…"""` — a raw string whose body may contain
+  unescaped `"` and newlines (ends at the first `"""`). Lets a source paste
+  a verbatim SVG/JSON blob without escaping — the intended companion to
+  `svg(...)`.
+- **`material(opacity:)`** — `0..1` source-over translucency (e.g. a glassy
+  mark the prism reads through). Absent / `1` = opaque, so older sources are
+  unaffected.
+- **`material(emissive_intensity: gradient(top:, bottom:))`** — a vertical
+  emissive ramp from `bottom` intensity at the mesh's lowest point to `top`
+  at its highest. Either endpoint may be animated.
+- **`bloom(strength?, radius?, threshold?)`** — opt-in glow, placed in
+  `render3d(..., lights: [...])`. It adds no scene light; it routes the
+  frame through a bloom post-process (only luminance above `threshold`
+  blooms). Absent → the frame renders straight through, byte-identical to
+  earlier runners.
+
+The hosted API also gains **`POST /v1/gif`** — an animated-GIF render of
+the scene loop (ffmpeg two-pass palette), alongside `/v1/render` (mp4) and
+`/v1/frame` (png).

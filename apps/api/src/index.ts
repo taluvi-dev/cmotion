@@ -45,7 +45,7 @@ export class RenderRunner extends Container<Env> {
   // we tried to render inline.
   async runJob(
     id: string,
-    kind: "video" | "frame",
+    kind: "video" | "frame" | "gif",
     source: string,
     params: Record<string, unknown>,
     assets: Record<string, string>,
@@ -57,7 +57,7 @@ export class RenderRunner extends Container<Env> {
   // so it doesn't share the Worker request's deadline.
   private async executeJob(
     id: string,
-    kind: "video" | "frame",
+    kind: "video" | "frame" | "gif",
     source: string,
     params: Record<string, unknown>,
     assets: Record<string, string>,
@@ -96,8 +96,8 @@ export class RenderRunner extends Container<Env> {
         return;
       }
 
-      const ext = kind === "frame" ? "png" : "mp4";
-      const mime = kind === "frame" ? "image/png" : "video/mp4";
+      const ext = kind === "frame" ? "png" : kind === "gif" ? "gif" : "mp4";
+      const mime = kind === "frame" ? "image/png" : kind === "gif" ? "image/gif" : "video/mp4";
       const key = `outputs/${id}.${ext}`;
 
       const bytes = await containerRes.arrayBuffer();
@@ -202,6 +202,32 @@ const OPENAPI_SPEC = {
           content: {
             "application/json": {
               schema: { $ref: "#/components/schemas/FrameRequest" },
+            },
+          },
+        },
+        responses: {
+          "202": {
+            description: "Job accepted, rendering in the background.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/EnqueueResponse" },
+              },
+            },
+          },
+          "400": { $ref: "#/components/responses/BadRequest" },
+        },
+      },
+    },
+    "/v1/gif": {
+      post: {
+        summary: "Enqueue an animated-GIF render",
+        description:
+          "Schedules an animated-GIF render of the scene's loop. Returns immediately with a `job_id`; poll `GET /v1/jobs/{id}` until ready, then fetch the URL (an `image/gif`). Uses ffmpeg palettegen/paletteuse for a quality palette.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/RenderRequest" },
             },
           },
         },
@@ -347,7 +373,7 @@ const OPENAPI_SPEC = {
         properties: {
           job_id: { type: "string", format: "uuid" },
           status: { type: "string", enum: ["pending"] },
-          kind: { type: "string", enum: ["video", "frame"] },
+          kind: { type: "string", enum: ["video", "frame", "gif"] },
         },
       },
       JobPending: {
@@ -355,7 +381,7 @@ const OPENAPI_SPEC = {
         required: ["job_id", "kind", "status", "created_at"],
         properties: {
           job_id: { type: "string", format: "uuid" },
-          kind: { type: "string", enum: ["video", "frame"] },
+          kind: { type: "string", enum: ["video", "frame", "gif"] },
           status: { type: "string", enum: ["pending"] },
           created_at: { type: "integer", description: "Unix milliseconds." },
         },
@@ -365,7 +391,7 @@ const OPENAPI_SPEC = {
         required: ["job_id", "kind", "status", "url", "mime"],
         properties: {
           job_id: { type: "string", format: "uuid" },
-          kind: { type: "string", enum: ["video", "frame"] },
+          kind: { type: "string", enum: ["video", "frame", "gif"] },
           status: { type: "string", enum: ["ready"] },
           url: {
             type: "string",
@@ -382,7 +408,7 @@ const OPENAPI_SPEC = {
         required: ["job_id", "kind", "status", "message"],
         properties: {
           job_id: { type: "string", format: "uuid" },
-          kind: { type: "string", enum: ["video", "frame"] },
+          kind: { type: "string", enum: ["video", "frame", "gif"] },
           status: { type: "string", enum: ["error"] },
           message: {
             type: "string",
@@ -463,7 +489,7 @@ async function handleEnqueue(
   request: Request,
   env: Env,
   ctx: ExecutionContext,
-  kind: "video" | "frame",
+  kind: "video" | "frame" | "gif",
 ): Promise<Response> {
   if (request.method !== "POST") return err(405, "method not allowed");
 
@@ -670,6 +696,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (path === "/v1/assets") return handleAssets(request, env);
     if (path === "/v1/render") return handleEnqueue(request, env, ctx, "video");
     if (path === "/v1/frame")  return handleEnqueue(request, env, ctx, "frame");
+    if (path === "/v1/gif")    return handleEnqueue(request, env, ctx, "gif");
 
     if (path.startsWith("/v1/jobs/")) {
       const id = path.slice("/v1/jobs/".length);
@@ -705,6 +732,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         "cmotion api\n\n" +
           "POST /v1/render          { source, params? }  →  202 { job_id }\n" +
           "POST /v1/frame           { source, params? }  →  202 { job_id }\n" +
+          "POST /v1/gif             { source, params? }  →  202 { job_id }\n" +
           "GET  /v1/jobs/<id>                              →  status + url when ready\n" +
           "GET  /v1/outputs/<file>                          →  streams the render\n" +
           "GET  /openapi.json                               →  OpenAPI 3.1 schema\n" +

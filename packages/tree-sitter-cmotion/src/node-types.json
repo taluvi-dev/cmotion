@@ -5045,6 +5045,11 @@
     }
   },
   {
+    "type": "string_lit",
+    "named": true,
+    "fields": {}
+  },
+  {
     "type": "tuple_type",
     "named": true,
     "fields": {},
@@ -5375,10 +5380,6 @@
   {
     "type": "srgb",
     "named": false
-  },
-  {
-    "type": "string_lit",
-    "named": true
   },
   {
     "type": "true",

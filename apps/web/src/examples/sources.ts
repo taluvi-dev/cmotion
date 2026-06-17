@@ -254,3 +254,123 @@ scene star(duration: Duration = 6s) -> Frame {
   ]
 }
 `;
+
+// Plinken SVG: a lucide "user" icon pasted verbatim via a triple-quoted
+// string and turned into a turning 3D mesh by svg(...), over a camera-facing
+// prism fan. Exercises 0.0.5: svg(), opacity, emissive gradient, and bloom.
+export const PLINKEN_SVG_SOURCE = `// Plinken SVG — an SVG icon turned into a turning 3D mark over a prism.
+//
+// Showcases runner 0.0.5 features: a verbatim SVG pasted in a triple-
+// quoted string and extruded by svg(src, depth:, size:); translucent
+// material via opacity:; a vertical emissive gradient(top:, bottom:);
+// and opt-in bloom(...). The lucide "user" outline becomes a glassy 3D
+// mark; a spectral fan tilts toward the camera and sweeps a bright crest
+// once per loop. Loops seamlessly over 6s.
+
+runner "0.0.5";
+
+use std.shapes.*;
+use std.mesh3d.*;
+use std.text;
+use std.lighting.*;
+use std.scene3d.*;
+use std.anim.*;
+
+scene plinken_svg(duration: Duration = 6s) -> Frame {
+  let bg = rect(width: 1080px, height: 1080px, fill: oklch(0.08, 0.03, 280));
+
+  // The hero: one full turn every 6s, forever, with a slow wobble and a
+  // gentle breathing scale to keep the highlights alive.
+  let spin   = animate { 0s => 0deg, 6s => 360deg } with { repeat: forever };
+  let wobble = wave(amplitude: 6deg, period: 6s);
+  let pulse  = animate {
+                 0s    => 1.00,
+                 1.5s  => 1.035,
+                 3s    => 1.00,
+                 6s    => 1.00,
+               } with { easing: easing.out_cubic, repeat: forever };
+
+  // Emissive hue the mark picks up from the prism — a slow spectral drift
+  // so its self-glow shifts through the colours over the loop.
+  let pickup = animate { 0s => 250deg, 6s => 610deg } with { repeat: forever };
+
+  // Hero: the provided lucide "user" SVG, pasted verbatim via a triple-
+  // quoted string and turned into a 3D mesh by the new svg(...) primitive
+  // (runner 0.0.5). Stroked outlines (head ring + arc) become extruded
+  // ribbons with \`depth\`; \`size\` sets its height in frame px. Big, in
+  // front, translucent blue, turning on Y. One material + spin wraps it.
+  let person = svg("""<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#cfe0ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 21a8 8 0 0 1 8 -8"/><circle cx="10" cy="8" r="5"/></svg>""", depth: 80px, size: 820px)
+            .material(fill: oklch(0.56, 0.15, 258),
+                      metalness: 0.35,
+                      roughness: 0.16,
+                      opacity: 0.88,
+                      emissive: oklch(0.50, 0.13, pickup),
+                      emissive_intensity: 0.30)
+            .rotate(x: wobble, y: spin)
+            .scale(pulse)
+            .translate(y: 40px);
+
+  // ---- Prism fan -----------------------------------------------------
+  // Seven spectral wedges share one apex at (0, -80) — the point just under
+  // the mark — and fan down to the base at y = -600, tiling a wide span
+  // (x: -760..760) so that, after the forward tilt below, the beams reach
+  // the bottom frame edge and corners. Each wedge is an extruded triangle,
+  // self-lit, its emissive crest staggered so a bright "switch-on" sweeps
+  // the fan once per loop (wedge k peaks at k*(6/7)s).
+
+  let i0 = animate { 0s => 2.2, 0.6s => 0.7, 5.4s => 0.7, 6s => 2.2 } with { repeat: forever };
+  let i1 = animate { 0s => 0.7, 0.26s => 0.7, 0.86s => 2.2, 1.46s => 0.7, 6s => 0.7 } with { repeat: forever };
+  let i2 = animate { 0s => 0.7, 1.11s => 0.7, 1.71s => 2.2, 2.31s => 0.7, 6s => 0.7 } with { repeat: forever };
+  let i3 = animate { 0s => 0.7, 1.97s => 0.7, 2.57s => 2.2, 3.17s => 0.7, 6s => 0.7 } with { repeat: forever };
+  let i4 = animate { 0s => 0.7, 2.83s => 0.7, 3.43s => 2.2, 4.03s => 0.7, 6s => 0.7 } with { repeat: forever };
+  let i5 = animate { 0s => 0.7, 3.69s => 0.7, 4.29s => 2.2, 4.89s => 0.7, 6s => 0.7 } with { repeat: forever };
+  let i6 = animate { 0s => 0.7, 4.54s => 0.7, 5.14s => 2.2, 5.74s => 0.7, 6s => 0.7 } with { repeat: forever };
+
+  // The deployed viewer recentres every extruded path on its own bounding
+  // box (geom.center()), so each wedge is translated back by its bbox
+  // centre to restore the shared apex at (0,-80) and the tiled base at
+  // y=-600. bbox-centre y is (-80 + -600)/2 = -340 for all; x varies.
+  let w0 = extrude(path(points: [vec2(0, -80), vec2(-760, -600), vec2(-543, -600)]), depth: 8px).material(fill: oklch(0.66, 0.24, 25), emissive: oklch(0.66, 0.24, 25), emissive_intensity: gradient(top: 0.3, bottom: i0)).translate(x: -380.0px, y: -340.0px);
+  let w1 = extrude(path(points: [vec2(0, -80), vec2(-543, -600), vec2(-326, -600)]), depth: 8px).material(fill: oklch(0.74, 0.2, 60), emissive: oklch(0.74, 0.2, 60), emissive_intensity: gradient(top: 0.3, bottom: i1)).translate(x: -271.4px, y: -340.0px);
+  let w2 = extrude(path(points: [vec2(0, -80), vec2(-326, -600), vec2(-109, -600)]), depth: 8px).material(fill: oklch(0.88, 0.18, 98), emissive: oklch(0.88, 0.18, 98), emissive_intensity: gradient(top: 0.3, bottom: i2)).translate(x: -162.9px, y: -340.0px);
+  let w3 = extrude(path(points: [vec2(0, -80), vec2(-109, -600), vec2(109, -600)]), depth: 8px).material(fill: oklch(0.74, 0.21, 150), emissive: oklch(0.74, 0.21, 150), emissive_intensity: gradient(top: 0.3, bottom: i3)).translate(x: 0.0px, y: -340.0px);
+  let w4 = extrude(path(points: [vec2(0, -80), vec2(109, -600), vec2(326, -600)]), depth: 8px).material(fill: oklch(0.72, 0.16, 210), emissive: oklch(0.72, 0.16, 210), emissive_intensity: gradient(top: 0.3, bottom: i4)).translate(x: 162.9px, y: -340.0px);
+  let w5 = extrude(path(points: [vec2(0, -80), vec2(326, -600), vec2(543, -600)]), depth: 8px).material(fill: oklch(0.62, 0.2, 265), emissive: oklch(0.62, 0.2, 265), emissive_intensity: gradient(top: 0.3, bottom: i5)).translate(x: 271.4px, y: -340.0px);
+  let w6 = extrude(path(points: [vec2(0, -80), vec2(543, -600), vec2(760, -600)]), depth: 8px).material(fill: oklch(0.58, 0.23, 320), emissive: oklch(0.58, 0.23, 320), emissive_intensity: gradient(top: 0.3, bottom: i6)).translate(x: 380.0px, y: -340.0px);
+
+  // ---- Lighting ------------------------------------------------------
+  // A soft neutral key/fill for the mark's form, plus three coloured point
+  // lights between the fan and the mark (toward the camera, z ≈ +300..340)
+  // whose hues drift around the wheel out of phase — the prism colours
+  // washing up onto the mark.
+  let hueA = animate { 0s =>   0deg, 6s => 360deg } with { repeat: forever };
+  let hueB = animate { 0s => 120deg, 6s => 480deg } with { repeat: forever };
+  let hueC = animate { 0s => 240deg, 6s => 600deg } with { repeat: forever };
+
+  let lights = [
+    ambient(0.30),
+    directional(from: vec3(2, 4, 6), intensity: 1.1),
+    point(at: vec3(-260px, -150px, 300px), intensity: 0.9, range: 1100px, color: oklch(0.72, 0.18, hueA)),
+    point(at: vec3(   0px, -120px, 340px), intensity: 0.8, range: 1100px, color: oklch(0.72, 0.18, hueB)),
+    point(at: vec3( 260px, -150px, 300px), intensity: 0.9, range: 1100px, color: oklch(0.72, 0.18, hueC)),
+    // Opt-in glow: a high threshold so only the brightest prism crest
+    // blooms — keeps the haze off the matte background and the P, which
+    // stays the crisp hero on top of a softly glowing beam.
+    bloom(strength: 0.55, radius: 0.4, threshold: 0.72),
+  ];
+
+  // Tilt the whole fan toward the camera so the beam reads as coming at the
+  // viewer. The group pivots about the world origin, which sits just above
+  // the fan's apex, so the apex stays put and the base swings forward.
+  let fan = compose [w0, w1, w2, w3, w4, w5, w6];
+
+  compose [
+    bg,
+    render3d(
+      compose [fan.rotate(x: -12deg), person],
+      lights: lights,
+      camera: camera(distance: 2166),
+    ),
+  ]
+}
+`;

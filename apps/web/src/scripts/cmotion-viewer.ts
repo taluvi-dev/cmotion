@@ -13,6 +13,12 @@
 
 import * as THREE from "three";
 import * as opentype from "opentype.js";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { SVGLoader } from "three/examples/jsm/loaders/SVGLoader.js";
+import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 // ---- WASM bridge -------------------------------------------------
 
@@ -264,10 +270,15 @@ interface BuildCtx {
   // Set from the first rect layer's width/height — defines the
   // letterbox aspect of the rendered viewport.
   sceneAspect: number;
+  // Opt-in bloom (set when a source puts `bloom(...)` in render3d's
+  // lights). Null → the frame renders straight through the renderer,
+  // byte-identical to pre-bloom runners; non-null routes through an
+  // EffectComposer with an UnrealBloomPass. See applyFrame.
+  bloom: { strength: number; radius: number; threshold: number } | null;
 }
 
 function makeCtx(font: opentype.Font): BuildCtx {
-  return { font, lights: [], background: null, glyphScale: 2.5, sceneAspect: 16 / 9 };
+  return { font, lights: [], background: null, glyphScale: 2.5, sceneAspect: 16 / 9, bloom: null };
 }
 
 function buildRect(node: JsonNode): THREE.Object3D {
@@ -640,12 +651,20 @@ function buildMaterial(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   // else falls back to a flat colour. SphereGeometry's default UVs are
   // already equirectangular, so `projection: equirectangular` is a no-op for
   // the only mesh we accept here.
+  // `emissive_intensity:` is normally a number, but it can be a
+  // `gradient(top:, bottom:)` for a vertical emissive ramp (e.g. a
+  // prism beam that's dim at its apex and bright at its base). When it
+  // is, the base intensity is 1 and the ramp is applied in-shader below.
+  const eiNode = f.emissive_intensity;
+  const eiGradient =
+    eiNode && eiNode.kind === "constructed" && eiNode.name === "gradient" ? eiNode : null;
+
   const fillTexture = imagePath(f.fill);
   const opts: THREE.MeshStandardMaterialParameters = {
     metalness: numberOf(f.metalness, 0),
     roughness: numberOf(f.roughness, 1),
     emissive: toThreeColor(f.emissive),
-    emissiveIntensity: numberOf(f.emissive_intensity, 0),
+    emissiveIntensity: eiGradient ? 1 : numberOf(f.emissive_intensity, 0),
   };
   if (fillTexture) {
     opts.color = 0xffffff;
@@ -653,7 +672,16 @@ function buildMaterial(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   } else {
     opts.color = toThreeColor(f.fill);
   }
+  // `opacity:` (0..1) makes a material translucent (e.g. a glassy P that
+  // lets the prism behind it show through). Absent / 1 → fully opaque,
+  // so existing sources are unaffected.
+  const opacity = numberOf(f.opacity, 1);
+  if (opacity < 1) {
+    opts.transparent = true;
+    opts.opacity = opacity;
+  }
   const mat = new THREE.MeshStandardMaterial(opts);
+  if (eiGradient) applyEmissiveRamp(inner, mat, eiGradient);
   inner.traverse((o: any) => {
     if (o.isMesh) {
       o.material?.dispose?.();
@@ -661,6 +689,50 @@ function buildMaterial(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
     }
   });
   return inner;
+}
+
+// Ramp a material's emissive along the mesh's local Y, from `bottom`
+// intensity at the geometry's lowest point to `top` at its highest.
+// Implemented as a small injection into MeshStandardMaterial's shader so
+// it composes with the standard lighting/emissive path (and with bloom).
+// The geometry is already centred (buildExtrude* call geom.center()), so
+// local Y is symmetric about 0; we read the real bounds off the mesh.
+function applyEmissiveRamp(inner: THREE.Object3D, mat: THREE.MeshStandardMaterial, node: JsonNode): void {
+  const gf = namedFields(node);
+  const topI = numberOf(gf.top, 1);
+  const bottomI = numberOf(gf.bottom, 1);
+  let minY = Infinity;
+  let maxY = -Infinity;
+  inner.traverse((o: any) => {
+    if (o.isMesh && o.geometry) {
+      o.geometry.computeBoundingBox?.();
+      const bb = o.geometry.boundingBox;
+      if (bb) {
+        minY = Math.min(minY, bb.min.y);
+        maxY = Math.max(maxY, bb.max.y);
+      }
+    }
+  });
+  if (!isFinite(minY) || !isFinite(maxY) || maxY - minY < 1e-6) return;
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uRampTop = { value: topI };
+    shader.uniforms.uRampBottom = { value: bottomI };
+    shader.uniforms.uRampMinY = { value: minY };
+    shader.uniforms.uRampMaxY = { value: maxY };
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying float vRampY;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\n  vRampY = position.y;");
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        "#include <common>\nvarying float vRampY;\nuniform float uRampTop;\nuniform float uRampBottom;\nuniform float uRampMinY;\nuniform float uRampMaxY;",
+      )
+      .replace(
+        "#include <emissivemap_fragment>",
+        "#include <emissivemap_fragment>\n  float _ramp = clamp((vRampY - uRampMinY) / max(1e-4, (uRampMaxY - uRampMinY)), 0.0, 1.0);\n  totalEmissiveRadiance *= mix(uRampBottom, uRampTop, _ramp);",
+      );
+  };
+  mat.needsUpdate = true;
 }
 
 function buildRotate(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
@@ -736,8 +808,125 @@ function buildRender3d(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
     if (ln.name === "ambient") ctx.lights.push(buildAmbient(ln));
     else if (ln.name === "directional") ctx.lights.push(buildDirectional(ln));
     else if (ln.name === "spotlight" || ln.name === "point") ctx.lights.push(buildPointLight(ln));
+    // `bloom(strength:, radius:, threshold:)` rides in the lights list as
+    // an opt-in post-process: it doesn't add a scene light, it flags the
+    // frame to render through the bloom composer. Threshold picks which
+    // luminance blooms (emissive prism, not the matte background).
+    else if (ln.name === "bloom") {
+      const bf = namedFields(ln);
+      ctx.bloom = {
+        strength: numberOf(bf.strength, 0.8),
+        radius: numberOf(bf.radius, 0.4),
+        threshold: numberOf(bf.threshold, 0.6),
+      };
+    }
   }
   return buildLayer(args[0], ctx);
+}
+
+// Read a string node, stripping either """triple""" or "normal" quotes.
+// The value tree carries the raw source slice (JSON-escaped), so a
+// triple-quoted SVG/JSON blob arrives here verbatim.
+function svgStringOf(node: JsonNode | undefined): string | null {
+  if (!node || node.kind !== "string" || typeof (node as any).raw !== "string") return null;
+  const r = (node as any).raw as string;
+  if (r.length >= 6 && r.startsWith('"""') && r.endsWith('"""')) return r.slice(3, -3);
+  if (r.length >= 2 && r.startsWith('"') && r.endsWith('"')) return r.slice(1, -1);
+  return r;
+}
+
+// Give a flat (z=0) triangulated geometry real Z thickness: a front face
+// at +depth/2, a back face at -depth/2 (reversed winding), and side walls
+// along the boundary edges (directed edges with no reverse twin). Welds
+// first so boundary detection is robust. Generic over fills (ShapeGeometry)
+// and strokes (SVGLoader.pointsToStroke) alike.
+function thickenFlat(flat: THREE.BufferGeometry, depth: number): THREE.BufferGeometry {
+  const g = BufferGeometryUtils.mergeVertices(flat.toNonIndexed(), 1e-4);
+  const pos = g.getAttribute("position");
+  const idx = g.getIndex()!.array as ArrayLike<number>;
+  const hd = depth / 2;
+  const verts: number[] = [];
+  const push = (i: number, z: number) => verts.push(pos.getX(i), pos.getY(i), z);
+  const dir = new Map<number, number>();
+  const ek = (a: number, b: number) => a * 1_000_003 + b;
+  for (let t = 0; t < idx.length; t += 3) {
+    const a = idx[t], b = idx[t + 1], c = idx[t + 2];
+    for (const [u, v] of [[a, b], [b, c], [c, a]] as const) dir.set(ek(u, v), (dir.get(ek(u, v)) ?? 0) + 1);
+  }
+  for (let t = 0; t < idx.length; t += 3) {
+    const a = idx[t], b = idx[t + 1], c = idx[t + 2];
+    push(a, hd); push(b, hd); push(c, hd);          // front
+    push(c, -hd); push(b, -hd); push(a, -hd);       // back (reversed)
+    for (const [u, v] of [[a, b], [b, c], [c, a]] as const) {
+      if (!dir.get(ek(v, u))) {                      // boundary edge u→v → wall
+        push(u, hd); push(v, hd); push(v, -hd);
+        push(u, hd); push(v, -hd); push(u, -hd);
+      }
+    }
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+  out.computeVertexNormals();
+  return out;
+}
+
+// svg(source, depth?, size?) — turn an SVG string into an extruded 3D mesh.
+// Handles filled shapes (SVGLoader.createShapes → ShapeGeometry) and
+// stroked paths (lucide-style outline icons → pointsToStroke ribbons),
+// flattens + merges them, normalises (centre, Y-flip, scale so the icon is
+// `size` cmotion-px tall), then gives it `depth` px of thickness. Wrap with
+// .material()/.rotate()/… like any other mesh. `size` is pixel-honest via
+// pxToWorld, matching the rest of the scene.
+function buildSvg(node: JsonNode): THREE.Object3D | null {
+  const f = namedFields(node);
+  const args = positionalArgs(node);
+  const src = svgStringOf(f.source ?? args[0]);
+  if (!src) { console.warn("[cmotion-viewer] svg(): missing source string"); return null; }
+  const depthPx = numberOf(f.depth, 16);
+  const sizePx = numberOf(f.size, 400);
+
+  let data: ReturnType<SVGLoader["parse"]>;
+  try { data = new SVGLoader().parse(src); }
+  catch (e) { console.warn("[cmotion-viewer] svg(): parse failed", e); return null; }
+
+  const flats: THREE.BufferGeometry[] = [];
+  const onlyPos = (g: THREE.BufferGeometry) => {
+    const n = g.toNonIndexed();
+    const p = new THREE.BufferGeometry();
+    p.setAttribute("position", n.getAttribute("position"));
+    return p;
+  };
+  for (const path of data.paths) {
+    const style: any = (path as any).userData?.style ?? {};
+    const hasFill = style.fill && style.fill !== "none";
+    const hasStroke = style.stroke && style.stroke !== "none";
+    if (hasFill || (!hasFill && !hasStroke)) {
+      for (const shape of SVGLoader.createShapes(path)) flats.push(onlyPos(new THREE.ShapeGeometry(shape, 16)));
+    }
+    if (hasStroke) {
+      for (const sub of path.subPaths) {
+        const pts = sub.getPoints();
+        if (pts.length < 2) continue;
+        const g = SVGLoader.pointsToStroke(pts, style);
+        if (g) flats.push(onlyPos(g));
+      }
+    }
+  }
+  if (flats.length === 0) { console.warn("[cmotion-viewer] svg(): nothing to render"); return null; }
+
+  const flat = flats.length === 1 ? flats[0] : (BufferGeometryUtils.mergeGeometries(flats, false) ?? flats[0]);
+  flat.computeBoundingBox();
+  const bb = flat.boundingBox!;
+  const h = Math.max(1e-4, bb.max.y - bb.min.y);
+  const cx = (bb.max.x + bb.min.x) / 2;
+  const cy = (bb.max.y + bb.min.y) / 2;
+  const s = (sizePx * pxToWorld) / h;
+  // centre at origin, flip SVG's y-down to scene y-up, scale to size
+  const m = new THREE.Matrix4().makeScale(s, -s, 1).multiply(new THREE.Matrix4().makeTranslation(-cx, -cy, 0));
+  flat.applyMatrix4(m);
+
+  const solid = thickenFlat(flat, depthPx * pxToWorld);
+  return new THREE.Mesh(solid, new THREE.MeshStandardMaterial({ color: 0xffffff }));
 }
 
 // Dispatches on a single value-tree node. `compose` is handled separately
@@ -769,6 +958,8 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       return buildRender3d(node, ctx);
     case "extrude":
       return buildExtrude(node, ctx);
+    case "svg":
+      return buildSvg(node);
     case "material":
       return buildMaterial(node, ctx);
     case "rotate":
@@ -889,6 +1080,42 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x000000);
 
+  // Bloom is opt-in (a `bloom(...)` entry in render3d's lights). When off,
+  // we render straight through the renderer so non-bloom sources stay
+  // byte-identical to earlier runners. When on, we route through an
+  // EffectComposer (RenderPass → UnrealBloomPass → OutputPass). The
+  // composer is built lazily on first use and reused.
+  let composer: EffectComposer | null = null;
+  let bloomPass: UnrealBloomPass | null = null;
+  let currentBloom: BuildCtx["bloom"] = null;
+
+  function ensureComposer(): EffectComposer {
+    if (!composer) {
+      composer = new EffectComposer(renderer);
+      composer.addPass(new RenderPass(scene, camera));
+      bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.8, 0.4, 0.6);
+      composer.addPass(bloomPass);
+      composer.addPass(new OutputPass());
+      const sz = renderer.getSize(new THREE.Vector2());
+      composer.setSize(sz.x, sz.y);
+    }
+    return composer;
+  }
+
+  function renderScene() {
+    if (currentBloom) {
+      const c = ensureComposer();
+      if (bloomPass) {
+        bloomPass.strength = currentBloom.strength;
+        bloomPass.radius = currentBloom.radius;
+        bloomPass.threshold = currentBloom.threshold;
+      }
+      c.render();
+    } else {
+      renderer.render(scene, camera);
+    }
+  }
+
   // Letterbox the canvas inside its parent: largest box matching sceneAspect
   // that fits the available area (minus the stage's CSS padding).
   function resize() {
@@ -909,11 +1136,12 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
     canvas.style.width = `${w}px`;
     canvas.style.height = `${h}px`;
     renderer.setSize(w, h, false);
+    composer?.setSize(w, h);
     camera.aspect = sceneAspect;
     camera.updateProjectionMatrix();
     // Re-render at the last applied time so the new size shows correct
     // pixels immediately (otherwise we wait for the next applyFrame).
-    if (handle) renderer.render(scene, camera);
+    if (handle) renderScene();
   }
   // Observe the parent — the canvas is sized by us, so observing it would
   // race with our own updates.
@@ -957,11 +1185,12 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
       scene.add(root);
       currentRoot = root;
     }
+    currentBloom = ctx.bloom;
     if (Math.abs(ctx.sceneAspect - sceneAspect) > 1e-6) {
       sceneAspect = ctx.sceneAspect;
       resize();
     }
-    renderer.render(scene, camera);
+    renderScene();
   }
 
   function load(source: string) {
@@ -1057,6 +1286,7 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
         handle = 0;
       }
       clearRoot();
+      composer?.dispose();
       renderer.dispose();
     },
   };
