@@ -274,7 +274,12 @@ scene quick(duration: Duration = 6s) -> Frame {
 
       <section class="pane">
         <div class="stage" id="stage">
-          <img src="/playground-preview.png" alt="Example render — a 3D extruded star, portrait" />
+          <video
+            src="/playground-preview.mp4"
+            poster="/playground-preview.png"
+            autoplay loop muted playsinline
+            aria-label="Example render — a 3D extruded star spinning, portrait"
+          ></video>
           <div class="caption">
             Pre-rendered example. Hit <strong>Render frame</strong> or
             <strong>Render video</strong> to render the source above via
