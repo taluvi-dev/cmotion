@@ -47,11 +47,12 @@
     <canvas id="stage"></canvas>
 
     <script>
-      import { boot } from "../scripts/cmotion-viewer.ts";
+      import { boot, svgToGlb } from "../scripts/cmotion-viewer.ts";
 
       declare global {
         interface Window {
           __job?: { source: string; params?: Record<string, unknown> };
+          __meshMode?: boolean;
           __viewerReady?: boolean;
           __viewerError?: { message: string; code?: string };
           __viewer?: {
@@ -59,8 +60,19 @@
             durationSeconds: number;
             versions: { cmotion: string; three: string };
           };
+          // SVG → .glb export (base64), used by the container's mesh job.
+          __svgToGlbB64?: (svg: string, depth: number, size: number) => Promise<string>;
         }
       }
+
+      // Always expose the mesh exporter (no scene/wasm needed). The driver's
+      // KIND=mesh path calls this directly and never boots the scene.
+      window.__svgToGlbB64 = async (svg, depth, size) => {
+        const bytes = await svgToGlb(svg, depth, size);
+        let bin = "";
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin);
+      };
 
       function readJob(): { source: string } | null {
         if (window.__job?.source) return { source: window.__job.source };
@@ -85,6 +97,8 @@
       }
 
       (async () => {
+        // Mesh jobs only need __svgToGlbB64 (set above); skip the scene boot.
+        if (window.__meshMode) return;
         const canvas = document.getElementById("stage") as HTMLCanvasElement;
         const job = readJob();
         if (!job) {

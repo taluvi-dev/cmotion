@@ -110,3 +110,10 @@ Worker can surface the diagnostic to the client.
   image from this directory, pushing it as `cmotion-runner:0.0.5-amd64`
   (`wrangler containers push`), and redeploying with
   `apps/api/scripts/deploy.sh`. Sources opt in with `runner "0.0.5";`.
+
+- `0.0.6/` — adds a `KIND=mesh` output: SVG → extruded 3D mesh exported as
+  binary glTF (`.glb`) via three's GLTFExporter (no pixels rendered — the
+  driver loads the viewer in mesh mode and calls its `svgToGlb` export).
+  Wired to the API's `POST /v1/mesh`. `apps/api/wrangler.jsonc` pins
+  `0.0.6-amd64`; build from this directory, push as
+  `cmotion-runner:0.0.6-amd64`, redeploy with `apps/api/scripts/deploy.sh`.

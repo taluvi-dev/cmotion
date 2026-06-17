@@ -18,6 +18,7 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { SVGLoader } from "three/examples/jsm/loaders/SVGLoader.js";
+import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 // ---- WASM bridge -------------------------------------------------
@@ -877,14 +878,12 @@ function thickenFlat(flat: THREE.BufferGeometry, depth: number): THREE.BufferGeo
 // `size` cmotion-px tall), then gives it `depth` px of thickness. Wrap with
 // .material()/.rotate()/… like any other mesh. `size` is pixel-honest via
 // pxToWorld, matching the rest of the scene.
-function buildSvg(node: JsonNode): THREE.Object3D | null {
-  const f = namedFields(node);
-  const args = positionalArgs(node);
-  const src = svgStringOf(f.source ?? args[0]);
-  if (!src) { console.warn("[cmotion-viewer] svg(): missing source string"); return null; }
-  const depthPx = numberOf(f.depth, 16);
-  const sizePx = numberOf(f.size, 400);
-
+// Core SVG → solid geometry, in absolute units: the result is centred at
+// the origin, `sizeUnits` tall, `depthUnits` thick (Y-flipped from SVG's
+// y-down). Shared by the in-scene svg() primitive (which passes world
+// units via pxToWorld) and the standalone svgToGlb() export (which passes
+// the caller's units directly).
+function svgMeshGeometry(src: string, depthUnits: number, sizeUnits: number): THREE.BufferGeometry | null {
   let data: ReturnType<SVGLoader["parse"]>;
   try { data = new SVGLoader().parse(src); }
   catch (e) { console.warn("[cmotion-viewer] svg(): parse failed", e); return null; }
@@ -920,13 +919,37 @@ function buildSvg(node: JsonNode): THREE.Object3D | null {
   const h = Math.max(1e-4, bb.max.y - bb.min.y);
   const cx = (bb.max.x + bb.min.x) / 2;
   const cy = (bb.max.y + bb.min.y) / 2;
-  const s = (sizePx * pxToWorld) / h;
+  const s = sizeUnits / h;
   // centre at origin, flip SVG's y-down to scene y-up, scale to size
   const m = new THREE.Matrix4().makeScale(s, -s, 1).multiply(new THREE.Matrix4().makeTranslation(-cx, -cy, 0));
   flat.applyMatrix4(m);
+  return thickenFlat(flat, depthUnits);
+}
 
-  const solid = thickenFlat(flat, depthPx * pxToWorld);
-  return new THREE.Mesh(solid, new THREE.MeshStandardMaterial({ color: 0xffffff }));
+function buildSvg(node: JsonNode): THREE.Object3D | null {
+  const f = namedFields(node);
+  const args = positionalArgs(node);
+  const src = svgStringOf(f.source ?? args[0]);
+  if (!src) { console.warn("[cmotion-viewer] svg(): missing source string"); return null; }
+  const geom = svgMeshGeometry(src, numberOf(f.depth, 16) * pxToWorld, numberOf(f.size, 400) * pxToWorld);
+  if (!geom) return null;
+  return new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0xffffff }));
+}
+
+// Standalone SVG → glTF-binary (.glb) export. Builds the same solid the
+// svg() primitive renders and serialises it to a .glb byte array via
+// three's GLTFExporter — no canvas/WebGL/wasm needed, so the render
+// container can call it headlessly for POST /v1/mesh. `depth`/`size` are
+// in mesh units (the icon ends up `size` tall, `depth` thick).
+export async function svgToGlb(src: string, depth = 0.4, size = 2): Promise<Uint8Array> {
+  const geom = svgMeshGeometry(src, depth, size);
+  if (!geom) throw new Error("svg(): nothing to export");
+  const mesh = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.2, roughness: 0.5 }));
+  const scene = new THREE.Scene();
+  scene.add(mesh);
+  const exporter = new GLTFExporter();
+  const result = await exporter.parseAsync(scene, { binary: true });
+  return new Uint8Array(result as ArrayBuffer);
 }
 
 // Dispatches on a single value-tree node. `compose` is handled separately

@@ -45,7 +45,7 @@ export class RenderRunner extends Container<Env> {
   // we tried to render inline.
   async runJob(
     id: string,
-    kind: "video" | "frame" | "gif",
+    kind: "video" | "frame" | "gif" | "mesh",
     source: string,
     params: Record<string, unknown>,
     assets: Record<string, string>,
@@ -57,7 +57,7 @@ export class RenderRunner extends Container<Env> {
   // so it doesn't share the Worker request's deadline.
   private async executeJob(
     id: string,
-    kind: "video" | "frame" | "gif",
+    kind: "video" | "frame" | "gif" | "mesh",
     source: string,
     params: Record<string, unknown>,
     assets: Record<string, string>,
@@ -96,8 +96,8 @@ export class RenderRunner extends Container<Env> {
         return;
       }
 
-      const ext = kind === "frame" ? "png" : kind === "gif" ? "gif" : "mp4";
-      const mime = kind === "frame" ? "image/png" : kind === "gif" ? "image/gif" : "video/mp4";
+      const ext = kind === "frame" ? "png" : kind === "gif" ? "gif" : kind === "mesh" ? "glb" : "mp4";
+      const mime = kind === "frame" ? "image/png" : kind === "gif" ? "image/gif" : kind === "mesh" ? "model/gltf-binary" : "video/mp4";
       const key = `outputs/${id}.${ext}`;
 
       const bytes = await containerRes.arrayBuffer();
@@ -244,6 +244,32 @@ const OPENAPI_SPEC = {
         },
       },
     },
+    "/v1/mesh": {
+      post: {
+        summary: "Enqueue an SVG → 3D mesh export",
+        description:
+          "Extrudes an SVG (`source`) into a 3D mesh and returns a binary glTF (`.glb`). Handles filled shapes and stroked outlines (e.g. lucide icons). `params.depth` / `params.size` set thickness / height in mesh units. Returns a `job_id`; poll until ready, then download the `model/gltf-binary`.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: { $ref: "#/components/schemas/RenderRequest" },
+            },
+          },
+        },
+        responses: {
+          "202": {
+            description: "Job accepted, exporting in the background.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/EnqueueResponse" },
+              },
+            },
+          },
+          "400": { $ref: "#/components/responses/BadRequest" },
+        },
+      },
+    },
     "/v1/jobs/{id}": {
       get: {
         summary: "Poll render job status",
@@ -373,7 +399,7 @@ const OPENAPI_SPEC = {
         properties: {
           job_id: { type: "string", format: "uuid" },
           status: { type: "string", enum: ["pending"] },
-          kind: { type: "string", enum: ["video", "frame", "gif"] },
+          kind: { type: "string", enum: ["video", "frame", "gif", "mesh"] },
         },
       },
       JobPending: {
@@ -381,7 +407,7 @@ const OPENAPI_SPEC = {
         required: ["job_id", "kind", "status", "created_at"],
         properties: {
           job_id: { type: "string", format: "uuid" },
-          kind: { type: "string", enum: ["video", "frame", "gif"] },
+          kind: { type: "string", enum: ["video", "frame", "gif", "mesh"] },
           status: { type: "string", enum: ["pending"] },
           created_at: { type: "integer", description: "Unix milliseconds." },
         },
@@ -391,7 +417,7 @@ const OPENAPI_SPEC = {
         required: ["job_id", "kind", "status", "url", "mime"],
         properties: {
           job_id: { type: "string", format: "uuid" },
-          kind: { type: "string", enum: ["video", "frame", "gif"] },
+          kind: { type: "string", enum: ["video", "frame", "gif", "mesh"] },
           status: { type: "string", enum: ["ready"] },
           url: {
             type: "string",
@@ -408,7 +434,7 @@ const OPENAPI_SPEC = {
         required: ["job_id", "kind", "status", "message"],
         properties: {
           job_id: { type: "string", format: "uuid" },
-          kind: { type: "string", enum: ["video", "frame", "gif"] },
+          kind: { type: "string", enum: ["video", "frame", "gif", "mesh"] },
           status: { type: "string", enum: ["error"] },
           message: {
             type: "string",
@@ -489,7 +515,7 @@ async function handleEnqueue(
   request: Request,
   env: Env,
   ctx: ExecutionContext,
-  kind: "video" | "frame" | "gif",
+  kind: "video" | "frame" | "gif" | "mesh",
 ): Promise<Response> {
   if (request.method !== "POST") return err(405, "method not allowed");
 
@@ -697,6 +723,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (path === "/v1/render") return handleEnqueue(request, env, ctx, "video");
     if (path === "/v1/frame")  return handleEnqueue(request, env, ctx, "frame");
     if (path === "/v1/gif")    return handleEnqueue(request, env, ctx, "gif");
+    if (path === "/v1/mesh")   return handleEnqueue(request, env, ctx, "mesh");
 
     if (path.startsWith("/v1/jobs/")) {
       const id = path.slice("/v1/jobs/".length);
@@ -733,6 +760,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
           "POST /v1/render          { source, params? }  →  202 { job_id }\n" +
           "POST /v1/frame           { source, params? }  →  202 { job_id }\n" +
           "POST /v1/gif             { source, params? }  →  202 { job_id }\n" +
+          "POST /v1/mesh            { source: <svg>, params? } → 202 { job_id }  (.glb)\n" +
           "GET  /v1/jobs/<id>                              →  status + url when ready\n" +
           "GET  /v1/outputs/<file>                          →  streams the render\n" +
           "GET  /openapi.json                               →  OpenAPI 3.1 schema\n" +

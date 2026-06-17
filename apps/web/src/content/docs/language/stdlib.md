@@ -85,5 +85,6 @@ These land in runner `0.0.5` (the hosted API + editor viewer); opt in with
   earlier runners.
 
 The hosted API also gains **`POST /v1/gif`** — an animated-GIF render of
-the scene loop (ffmpeg two-pass palette), alongside `/v1/render` (mp4) and
+the scene loop (ffmpeg two-pass palette) — and **`POST /v1/mesh`** —
+an SVG → 3D mesh export (`.glb`), alongside `/v1/render` (mp4) and
 `/v1/frame` (png).
