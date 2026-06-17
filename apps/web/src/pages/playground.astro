@@ -23,7 +23,8 @@ use std.lighting.*;
 use std.anim.*;
 
 scene quick(duration: Duration = 6s) -> Frame {
-  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.12, 0.05, 265));
+  // Portrait 9:16 — small and mobile-friendly by default.
+  let bg = rect(width: 1080px, height: 1920px, fill: oklch(0.12, 0.05, 265));
 
   // Spins a full turn; starts pre-rotated so a single frame already
   // shows the extruded depth.
@@ -31,14 +32,14 @@ scene quick(duration: Duration = 6s) -> Frame {
 
   // A 2D path (five-point star) extruded into a lit 3D solid.
   let outline = path(points: [
-    vec2(0, 150),    vec2(35, 46),
-    vec2(143, 46),   vec2(57, -18),
-    vec2(88, -121),  vec2(0, -57),
-    vec2(-88, -121), vec2(-57, -18),
-    vec2(-143, 46),  vec2(-35, 46),
+    vec2(0, 230),    vec2(54, 70),
+    vec2(219, 70),   vec2(87, -28),
+    vec2(135, -185), vec2(0, -87),
+    vec2(-135, -185), vec2(-87, -28),
+    vec2(-219, 70),  vec2(-54, 70),
   ]);
 
-  let star = extrude(outline, depth: 70px)
+  let star = extrude(outline, depth: 90px)
                .material(fill: oklch(0.82, 0.19, 95),
                          metalness: 0.25,
                          roughness: 0.4)
@@ -161,6 +162,15 @@ scene quick(duration: Duration = 6s) -> Frame {
         color: #888; font-size: 13px; text-align: center;
         padding: 20px; box-sizing: border-box; line-height: 1.5;
       }
+      /* Caption under the pre-rendered example — sits at the bottom so
+         it doesn't cover the render. Cleared once a real render runs. */
+      .stage .caption {
+        position: absolute; left: 0; right: 0; bottom: 0;
+        padding: 8px 14px; box-sizing: border-box;
+        background: linear-gradient(transparent, rgba(0,0,0,0.6));
+        color: #bbb; font-size: 12px; text-align: center; line-height: 1.4;
+      }
+      .stage .caption strong { color: #eee; }
       /* The reliable "media fits inside a frame" pattern: position
          the element at the stage edges (inset by the padding we
          want) and let object-fit: contain handle the letterboxing.
@@ -225,9 +235,9 @@ scene quick(duration: Duration = 6s) -> Frame {
             <h2>Params</h2>
             <div class="params">
               <label for="p-width">width</label>
-              <input id="p-width" type="number" value="1920" min="16" max="3840" />
+              <input id="p-width" type="number" value="540" min="16" max="3840" />
               <label for="p-height">height</label>
-              <input id="p-height" type="number" value="1080" min="16" max="2160" />
+              <input id="p-height" type="number" value="960" min="16" max="2160" />
               <label for="p-fps">fps</label>
               <input id="p-fps" type="number" value="30" min="1" max="60" />
               <label for="p-duration">duration (s)</label>
@@ -264,10 +274,11 @@ scene quick(duration: Duration = 6s) -> Frame {
 
       <section class="pane">
         <div class="stage" id="stage">
-          <div class="placeholder">
-            Hit <strong>Render frame</strong> or <strong>Render video</strong>
-            to send the source to <code>api.cmotion.org</code>. The result
-            appears here once the job flips to <code>ready</code>.
+          <img src="/playground-preview.png" alt="Example render — a 3D extruded star, portrait" />
+          <div class="caption">
+            Pre-rendered example. Hit <strong>Render frame</strong> or
+            <strong>Render video</strong> to render the source above via
+            <code>api.cmotion.org</code>.
           </div>
         </div>
         <div class="transport" id="transport"></div>
