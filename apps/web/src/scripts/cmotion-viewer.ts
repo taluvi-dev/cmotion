@@ -981,6 +981,43 @@ function svgMeshGeometry(src: string, depthUnits: number, sizeUnits: number, rou
   return geom;
 }
 
+// vectorize(image("..."), stroke_width?, simplify?, bridge?, threshold?,
+// stitch?, depth?, size?, round?) — trace a raster image to a uniform
+// centreline and extrude it, like svg() but from a bitmap. Tracing is async
+// (image decode + canvas + skeletonize), but the scene builds synchronously,
+// so we cache the geometry by (path + params): the first build kicks off the
+// trace and returns nothing; when it lands we cache it and ask for a redraw,
+// and subsequent frames use the cached mesh. Same deferred-asset pattern as
+// texture loading.
+const vectorizeCache = new Map<string, THREE.BufferGeometry>();
+const vectorizePending = new Set<string>();
+let requestFrame: (() => void) | null = null;
+
+function buildVectorize(node: JsonNode): THREE.Object3D | null {
+  const f = namedFields(node);
+  const path = imagePath(f.source ?? positionalArgs(node)[0]);
+  if (!path) { console.warn("[cmotion-viewer] vectorize(): needs image(\"...\")"); return null; }
+  const depthPx = numberOf(f.depth, 16), sizePx = numberOf(f.size, 400), roundPx = numberOf(f.round, 0);
+  const sw = numberOf(f.stroke_width ?? f.strokeWidth, 6);
+  const trace = { strokeWidth: sw, simplify: numberOf(f.simplify, 1.5), bridge: numberOf(f.bridge, 2), threshold: numberOf(f.threshold, 0.5), stitch: numberOf(f.stitch, 6) };
+  const key = JSON.stringify([path, trace, depthPx, sizePx, roundPx, pxToWorld]);
+
+  const cached = vectorizeCache.get(key);
+  if (cached) return new THREE.Mesh(cached, new THREE.MeshStandardMaterial({ color: 0xffffff }));
+  if (!vectorizePending.has(key)) {
+    vectorizePending.add(key);
+    (async () => {
+      try {
+        const svg = await imageToCenterlineSvg(path, trace);
+        const geom = svgMeshGeometry(svg, depthPx * pxToWorld, sizePx * pxToWorld, roundPx * pxToWorld);
+        if (geom) vectorizeCache.set(key, geom);
+      } catch (e) { console.warn("[cmotion-viewer] vectorize() failed", e); }
+      finally { vectorizePending.delete(key); requestFrame?.(); }
+    })();
+  }
+  return null; // appears on the next frame once the trace resolves
+}
+
 function buildSvg(node: JsonNode): THREE.Object3D | null {
   const f = namedFields(node);
   const args = positionalArgs(node);
@@ -1236,6 +1273,8 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       return buildExtrude(node, ctx);
     case "svg":
       return buildSvg(node);
+    case "vectorize":
+      return buildVectorize(node);
     case "material":
       return buildMaterial(node, ctx);
     case "rotate":
@@ -1319,6 +1358,7 @@ export interface ViewerHandle {
   seek(t: number): void;
   resize(): void;
   durationSeconds: number;
+  pending: number;
   versions: { cmotion: string; three: string };
   captureFrame(): Promise<Blob | null>;
   captureClip(opts?: {
@@ -1469,6 +1509,10 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
     renderScene();
   }
 
+  // Redraw the current frame when a deferred asset (e.g. vectorize() trace)
+  // resolves, so it appears without waiting for the next animation tick.
+  requestFrame = () => { if (handle) applyFrame(lastT); };
+
   function load(source: string) {
     if (handle) {
       exp.release(handle);
@@ -1487,6 +1531,9 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
       return durationSeconds;
     },
     versions: { cmotion: interpVersion, three: THREE.REVISION },
+    // Count of deferred assets still resolving (e.g. vectorize() traces).
+    // The headless render driver waits for this to hit 0 before screenshotting.
+    get pending() { return vectorizePending.size; },
     captureFrame() {
       // Re-render in the same tick as toBlob — even with preserveDrawingBuffer
       // the WebGL back buffer can be undefined between paints, so we redraw

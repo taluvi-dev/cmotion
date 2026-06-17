@@ -376,3 +376,36 @@ scene plinken_svg(duration: Duration = 6s) -> Frame {
   ]
 }
 `;
+
+// Hand-drawn -> 3D: vectorize() traces a raster line drawing to a uniform
+// centreline and extrudes it, the bitmap counterpart to svg().
+export const HANDDRAWN_SOURCE = `runner "0.0.12";
+
+use std.shapes.*;
+use std.scene3d.*;
+use std.lighting.*;
+use std.anim.*;
+
+scene handdrawn(duration: Duration = 8s) -> Frame {
+  let bg = rect(width: 1080px, height: 1080px, fill: oklch(0.10, 0.03, 280));
+
+  // vectorize() traces a raster line drawing to a uniform single-line
+  // centreline (binarize -> bridge gaps -> thin -> trace -> simplify) and
+  // extrudes it just like svg(): one hand drawing -> a turning 3D mark.
+  let spin = animate { 0s => -20deg, 4s => 20deg, 8s => -20deg } with { easing: easing.in_out_cubic };
+
+  let mark = vectorize(image("/img/handdrawn.jpg"),
+                       stroke_width: 7px, simplify: 2.5, bridge: 2,
+                       depth: 70px, size: 780px, round: 10px)
+               .material(fill: oklch(0.72, 0.15, 250), metalness: 0.3, roughness: 0.3)
+               .rotate(x: 12deg, y: spin);
+
+  let lights = [
+    ambient(0.5),
+    directional(from: vec3(2, 3, 5), intensity: 1.4),
+    point(at: vec3(-220px, 220px, 420px), intensity: 1.0),
+  ];
+
+  compose [ bg, render3d(mark, lights: lights, camera: camera(distance: 2166)) ]
+}
+`;

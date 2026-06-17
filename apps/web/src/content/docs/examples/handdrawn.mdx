@@ -1,0 +1,25 @@
+---
+title: Hand-drawn → 3D
+description: A hand-drawn line image traced to a uniform single line with vectorize(), then extruded to a turning 3D mark.
+---
+
+import ExampleScene from '../../../components/ExampleScene.astro';
+import { HANDDRAWN_SOURCE } from '../../../examples/sources.ts';
+
+`vectorize(image("..."))` is the bitmap counterpart to `svg()`: it traces a
+raster line drawing to a **uniform single-line centreline** (binarize →
+bridge gaps → thin → trace → simplify), then strokes + extrudes it to a
+watertight 3D solid — same `depth` / `size` / `round` controls. Tracing runs
+once and is cached, so the animation stays smooth.
+
+The original hand drawing:
+
+<figure>
+  <img src="/img/handdrawn.jpg" alt="The original hand-drawn line sketch" width="320"
+       style="background:#fff;border-radius:8px;border:1px solid var(--sl-color-hairline)" />
+</figure>
+
+…and the same sketch, vectorized to one uniform line and extruded to a
+turning 3D mark:
+
+<ExampleScene source={HANDDRAWN_SOURCE} />

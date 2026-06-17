@@ -140,3 +140,9 @@ Worker can surface the diagnostic to the client.
   endpoint stitch). Output feeds straight into /v1/mesh, so a hand drawing
   becomes a watertight 3D solid. Image arrives via the assets flow; params:
   strokeWidth, threshold, simplify, bridge, stitch, maxDim. Pins 0.0.12.
+
+- `0.0.13/` — adds the in-language `vectorize(image("..."), stroke_width?,
+  simplify?, bridge?, depth?, size?, round?)` primitive (raster → centreline
+  → extruded mesh, async-cached) and a render-driver prewarm that waits for
+  deferred traces before screenshotting, so vectorize() scenes render via the
+  API. Bundles the hand-drawn example image. Pins 0.0.13.

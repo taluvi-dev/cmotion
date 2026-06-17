@@ -58,6 +58,7 @@
           __viewer?: {
             seek: (t: number) => void;
             durationSeconds: number;
+            pending: number;
             versions: { cmotion: string; three: string };
           };
           // SVG → .glb export (base64), used by the container's mesh job.
@@ -115,6 +116,7 @@
           window.__viewer = {
             seek: (t) => view.seek(t),
             durationSeconds: view.durationSeconds,
+            get pending() { return view.pending; },
             versions: view.versions,
           };
           // Re-seek to 0 so the first screenshot is deterministic

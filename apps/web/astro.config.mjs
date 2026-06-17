@@ -57,6 +57,7 @@ export default defineConfig({
 						{ label: 'Lava lamp', slug: 'examples/lava-lamp' },
 						{ label: 'Bouncing ball', slug: 'examples/bouncing-ball' },
 						{ label: 'Plinken SVG', slug: 'examples/plinken-svg' },
+						{ label: 'Hand-drawn → 3D', slug: 'examples/handdrawn' },
 					],
 				},
 				{
