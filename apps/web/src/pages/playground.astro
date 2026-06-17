@@ -17,13 +17,40 @@
 const defaultSource = `runner "0.0.3";
 
 use std.shapes.*;
+use std.mesh3d.*;
+use std.scene3d.*;
+use std.lighting.*;
 use std.anim.*;
 
-scene quick(duration: Duration = 3s) -> Frame {
-  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
-  let hue = animate { 0s => 0deg, 3s => 360deg } with { repeat: forever };
-  let fg = rect(width: 300px, height: 300px, fill: oklch(0.65, 0.20, hue));
-  compose [bg, fg]
+scene quick(duration: Duration = 6s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.12, 0.05, 265));
+
+  // Spins a full turn; starts pre-rotated so a single frame already
+  // shows the extruded depth.
+  let spin = animate { 0s => -22deg, 6s => 338deg } with { repeat: forever };
+
+  // A 2D path (five-point star) extruded into a lit 3D solid.
+  let outline = path(points: [
+    vec2(0, 150),    vec2(35, 46),
+    vec2(143, 46),   vec2(57, -18),
+    vec2(88, -121),  vec2(0, -57),
+    vec2(-88, -121), vec2(-57, -18),
+    vec2(-143, 46),  vec2(-35, 46),
+  ]);
+
+  let star = extrude(outline, depth: 70px)
+               .material(fill: oklch(0.82, 0.19, 95),
+                         metalness: 0.25,
+                         roughness: 0.4)
+               .rotate(x: -14deg, y: spin);
+
+  let lights = [
+    ambient(0.35),
+    directional(from: vec3(3, 4, 5),   intensity: 1.5),
+    directional(from: vec3(-4, -2, 1), intensity: 0.6),
+  ];
+
+  compose [bg, render3d(star, lights: lights)]
 }
 `;
 ---
