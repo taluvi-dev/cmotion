@@ -1174,6 +1174,34 @@ function stitchPaths(paths: [number, number][][], tol: number): [number, number]
   return segs;
 }
 
+// Close T-junction gaps. stitchPaths only welds endpoint-to-endpoint, but a
+// branch that meets the *middle* of a through-stroke leaves its endpoint a
+// pixel or two from an interior vertex — endpoint stitching never touches it,
+// so the extruded mesh shows a gap the original drawing didn't have. For each
+// still-loose endpoint, snap it onto the nearest vertex of any *other* path
+// within `tol` by appending that vertex, bridging the branch into the stroke.
+function snapEndpoints(paths: [number, number][][], tol: number): [number, number][][] {
+  const dist = (a: [number, number], b: [number, number]) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  for (let i = 0; i < paths.length; i++) {
+    const P = paths[i];
+    for (const head of [true, false]) {
+      const e = head ? P[0] : P[P.length - 1];
+      let best: [number, number] | null = null, bestD = tol;
+      for (let j = 0; j < paths.length; j++) {
+        if (j === i) continue;
+        const Q = paths[j];
+        for (let k = 0; k < Q.length; k++) {
+          const d = dist(e, Q[k]);
+          // d > 0.5 skips vertices stitchPaths already merged (coincident).
+          if (d > 0.5 && d < bestD) { bestD = d; best = Q[k]; }
+        }
+      }
+      if (best) { if (head) P.unshift([best[0], best[1]]); else P.push([best[0], best[1]]); }
+    }
+  }
+  return paths;
+}
+
 export async function imageToCenterlineSvg(
   url: string,
   opts: { strokeWidth?: number; threshold?: number; simplify?: number; maxDim?: number; bridge?: number; stitch?: number } = {},
@@ -1231,6 +1259,7 @@ export async function imageToCenterlineSvg(
     .map((p) => rdp(p, simplify * scale))
     .filter((p) => p.length >= 2);
   paths = stitchPaths(paths, (opts.stitch ?? 6) * scale);
+  paths = snapEndpoints(paths, (opts.stitch ?? 6) * scale);
 
   const d = paths
     .map((p) => "M" + p.map(([x, y]) => `${(x * inv).toFixed(1)} ${(y * inv).toFixed(1)}`).join(" L"))
