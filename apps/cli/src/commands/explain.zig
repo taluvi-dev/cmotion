@@ -145,6 +145,26 @@ const entries = [_]Entry{
         ,
     },
     .{
+        .code = "NAM007",
+        .title = "No 3D shape translator inside extrude(...)",
+        .body =
+        \\`extrude(<shape>, depth: ...)` builds a solid from a 2D
+        \\outline, but only two outline sources have a 3D translator
+        \\today:
+        \\
+        \\  - `text.glyph("C", ...)` — a font glyph outline, and
+        \\  - `path(points: [vec2(x, y), ...])` — an explicit polygon.
+        \\
+        \\Any other shape (`rect`, `circle`, ...) passed directly to
+        \\extrude renders to nothing. The check is syntactic: it only
+        \\fires when the argument is a *direct* call to a non-extrudable
+        \\shape, not when the shape arrives through a `let` binding (that
+        \\needs the full typechecker).
+        \\
+        \\Repair: extrude a `text.glyph(...)` or a `path(...)`.
+        ,
+    },
+    .{
         .code = "LWR000",
         .title = "Lowering failed on a clean CST",
         .body =
@@ -152,6 +172,24 @@ const entries = [_]Entry{
         \\src/lower.zig failed to map some node kind into the AST. This
         \\means the lowering pass has a gap. The diagnostic's `message`
         \\field names the Zig error variant that fired.
+        ,
+    },
+    .{
+        .code = "LWR001",
+        .title = "Path can't be extruded as written",
+        .body =
+        \\`path(points: [vec2(x, y), ...])` lowers fine, but the 3D
+        \\renderer can only extrude a *closed* polygon of three or more
+        \\points into a solid. Two forms slip through the grammar yet
+        \\produce no geometry, so they're flagged here:
+        \\
+        \\  - `closed: false` — an open path has no cap face to extrude.
+        \\  - fewer than 3 points — there's no polygon to fill.
+        \\
+        \\Curved segments (quadratic/cubic) are not part of this slice
+        \\yet either; build the outline from straight `vec2` points for
+        \\now. The check is syntactic — it counts literal points in the
+        \\call, not points assembled at runtime.
         ,
     },
     .{

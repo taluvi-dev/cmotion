@@ -372,12 +372,59 @@ function buildTranslate(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   return inner;
 }
 
-// extrude(shape, depth: ...). Shape is a positional first arg; today the
-// only translator-supported shape is `text.glyph(...)`.
+// Read a single vec2(x, y) node into {x, y} (px, frame space). Accepts
+// positional (vec2(100, 50)) and named (vec2(x: 100, y: 50)) forms.
+function vec2Of(node: JsonNode): { x: number; y: number } | null {
+  if (!node || node.kind !== "constructed" || node.name !== "vec2") return null;
+  const f = namedFields(node);
+  const pos = positionalArgs(node);
+  const x = f.x ? numberOf(f.x) : numberOf(pos[0]);
+  const y = f.y ? numberOf(f.y) : numberOf(pos[1]);
+  return { x, y };
+}
+
+// path(points: [vec2(x, y), ...]) → an extruded solid. The polygon is a
+// single closed contour in frame px; scale to world by pxToWorld so the
+// path shares the pixel-honest frame the multi-letter title uses. Depth
+// is in px → world. closed:false / <3 points produce nothing (cmo check
+// flags them as LWR001 before render).
+function buildExtrudePath(inner: JsonNode, depthPx: number): THREE.Mesh | null {
+  const pf = namedFields(inner);
+  const ppos = positionalArgs(inner);
+  const ptsNode = pf.points ?? ppos.find((a) => a.kind === "array");
+  const pts = arrayElems(ptsNode).map(vec2Of).filter((p): p is { x: number; y: number } => p !== null);
+  if (pts.length < 3) {
+    console.warn(`[cmotion-viewer] extrude(path): need ≥3 points, got ${pts.length}`);
+    return null;
+  }
+  const shape = new THREE.Shape();
+  shape.moveTo(pts[0].x * pxToWorld, pts[0].y * pxToWorld);
+  for (let i = 1; i < pts.length; i++) shape.lineTo(pts[i].x * pxToWorld, pts[i].y * pxToWorld);
+  shape.closePath();
+
+  const depth = depthPx * pxToWorld;
+  const bevel = Math.max(depth * 0.1, 0.5 * pxToWorld);
+  const geom = new THREE.ExtrudeGeometry(shape, {
+    depth,
+    bevelEnabled: true,
+    bevelThickness: bevel,
+    bevelSize: bevel,
+    bevelSegments: 4,
+    curveSegments: 1,
+  });
+  geom.center();
+  return new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0xffffff }));
+}
+
+// extrude(shape, depth: ...). Shape is a positional first arg; supported
+// shapes are `text.glyph(...)` (font outline) and `path(...)` (polygon).
 function buildExtrude(node: JsonNode, ctx: BuildCtx): THREE.Mesh | null {
   const args = positionalArgs(node);
   const f = namedFields(node);
   const inner = args[0];
+  if (inner && inner.kind === "constructed" && inner.name === "path") {
+    return buildExtrudePath(inner, numberOf(f.depth, 16));
+  }
   if (!inner || inner.kind !== "constructed" || inner.name !== "text.glyph") {
     console.warn(`[cmotion-viewer] extrude: unsupported inner ${inner?.name}`);
     return null;

@@ -5,20 +5,36 @@ description: The minimal standard library — shapes, 3D, text, lighting, compos
 
 The stdlib is intentionally small. Hosts extend it; the core stays narrow.
 
-## Planned modules
+The modules below marked **(rendered)** have a working translator in
+both render paths — the native renderer (`cmo render`) and the web
+viewer that the `/editor`, `/playground`, and the hosted API drive.
+The rest are still planned.
 
 ### 2D
 
-- `std.shapes` — `rect`, `circle`, `ellipse`, `path`, `image`
-- `std.text` — `text.glyph(string, font, size?)` returning a 2D path
-- `std.compose` — layer stacking, blend modes, masks
-- `std.filter` — `blur(radius)`, `color_grade`, masks
+- `std.shapes` **(rendered)** — `rect`, `circle`, `sphere`, `path`, plus
+  `image`. `path(points: [vec2(x, y), …])` is the generic closed-outline
+  primitive; feed it to `extrude(...)` to make a solid. `ellipse` is
+  still planned.
+- `std.text` **(rendered)** — `text.glyph(string, font, size?)` returns a
+  2D glyph outline (the non-`path` way to get an extrudable shape).
+- `std.compose` **(rendered)** — `compose [...]` layer stacking. Blend
+  modes and masks are planned.
+- `std.filter` — `blur(radius)`, `color_grade`, masks. Planned.
 
 ### 3D
 
-- `std.mesh3d` — `extrude(path, depth)` plus the transform postfix methods `.rotate(x/y/z: Angle)`, `.translate(...)`, `.scale(...)`, and `.material(fill, metalness?, roughness?, emissive?)`
-- `std.lighting` — `ambient(intensity)`, `directional(from: Vec3, intensity)`, `point(at: Vec3, intensity)`
-- `std.scene3d` — `render3d(mesh, lights, camera?)` projects a 3D scene to a 2D `Layer` so it can be `compose`d with 2D layers. Camera defaults to a sensible perspective; pass `camera: perspective(fov: 28deg)` or `orthographic(...)` to override.
+- `std.mesh3d` **(rendered)** — `extrude(shape, depth, bevel?)` where
+  `shape` is a `path(...)` or `text.glyph(...)`, plus the transform
+  postfix methods `.rotate(x/y/z: Angle)`, `.translate(...)`,
+  `.scale(...)`, and `.material(fill, metalness?, roughness?, emissive?, emissive_intensity?)`.
+- `std.lighting` **(rendered)** — `ambient(intensity)`,
+  `directional(from: Vec3, intensity)`, `point(at: Vec3, intensity)`,
+  `spotlight(...)`. An optional `color:`/`tint:` tints any light.
+- `std.scene3d` **(rendered)** — `render3d(mesh, lights, camera?)`
+  projects a 3D scene to a 2D `Layer` so it can be `compose`d with 2D
+  layers. Camera defaults to a sensible perspective; pass
+  `camera(fov: 28deg, distance: …)` to override.
 
 ### Math
 
@@ -37,4 +53,7 @@ Every function is tagged `pure` or `effectful`. Pure functions are safe to call 
 
 A scene's render output is deterministic if every function it calls is pure — which is the whole point of the [CanvasKit backend](/impl/backends/).
 
-Status: not started. See [Roadmap](/roadmap/) stage 3.
+Status: in progress. The **(rendered)** modules above run today in both
+the native renderer and the web viewer; the `pure`/`effectful` tagging
+and the remaining modules (`std.filter`, `std.transport`, `std.audio`)
+are still ahead. See [Roadmap](/roadmap/) stage 3.

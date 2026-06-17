@@ -114,7 +114,7 @@ Per-subcommand extras:
 | Subcommand | Extra fields |
 | --- | --- |
 | `parse`   | `path`, `cst` (S-expression CST as a string), `ast` (typed tree; `null` when syntax errors prevented lowering) |
-| `check`   | `path`. The `diagnostics[]` carry the findings (NAM003/004/005/006, TYP002, UNT001/002, LWR000). Exits 0 on clean, 1 on any error diagnostic. |
+| `check`   | `path`. The `diagnostics[]` carry the findings (NAM003/004/005/006/007, TYP002, UNT001/002, LWR000/001). Exits 0 on clean, 1 on any error diagnostic. |
 | `explain` | `code`, `title`, `body` |
 | `version` | `name`, `version` |
 | `fmt`     | `path`, `changed` (bool), `formatted` (the rewritten source). FMT001 in `diagnostics[]` under `--check` when the file would change. Exits 1 only when `--check` and `changed`. |

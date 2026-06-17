@@ -81,12 +81,17 @@ the authoritative status; this list is a quick orientation.
       determinism partition of stdlib. Lives as a separate document, not in
       BNF. `cmo check` implements a narrow first slice today
       (literal-vs-annotation, unit categories); the full spec is the gap.
-- [ ] **3. Minimal stdlib** — `rect`, `image`, `mesh3d`, `compose`,
-      `animate`, `oklch`, `vec2`, `vec3`, `transport`, audio analyzers.
-- [ ] **4. Reference interpreter in Zig** — walks the AST directly, no
-      codegen. Lets us exercise the type system and stdlib without
-      committing to WASM yet, and serves as the conformance oracle for
-      every later backend.
+- [~] **3. Minimal stdlib** — in progress. `rect`, `circle`, `sphere`,
+      `path`, `image`, `text.glyph`, `mesh3d` (`extrude` + transforms +
+      `material`), `lighting`, `scene3d` (`render3d`), `compose`,
+      `animate`, `oklch`, `vec2`, `vec3` all render today. `transport`
+      and audio analyzers are still ahead.
+- [~] **4. Reference interpreter in Zig** — in progress. `cmo eval` /
+      `cmo render` walk the AST directly (no codegen) through
+      `eval.zig` → `sampler.zig` → `render.zig`, and the same core is
+      built to WASM (`cmotion-render.wasm`) for the browser editor and
+      the hosted render API. It already serves as the conformance oracle
+      for the renderers.
 - [ ] **5. WASM component codegen** — once the language and stdlib are
       stable, this is mostly mechanical.
 - [ ] **6. CanvasKit backend** — deterministic offline render.

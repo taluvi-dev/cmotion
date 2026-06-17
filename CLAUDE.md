@@ -13,9 +13,11 @@ that aren't always obvious from the source.
 
 ## Repo layout
 
-- `apps/cli/` — the `cmotion` (`cmo`) binary, written in Zig 0.15.1. The
-  only execution surface today. Parses, type-checks (narrowly), and
-  formats `.cm` files.
+- `apps/cli/` — the `cmotion` (`cmo`) binary, written in Zig 0.15.1.
+  Parses, type-checks (narrowly), formats, **evaluates, and renders**
+  `.cm` files (`cmo eval` / `cmo render` / `cmo open`). The same core is
+  also compiled to `cmotion-render.wasm` for the browser editor and the
+  hosted API.
 - `apps/web/` — cmotion.org, an Astro static site. Docs + an unlinked
   `/editor` page. The homepage `ScenePreview` is driven by
   `cmotion-render.wasm` (the same interpreter `cmo open` and `/editor`
@@ -35,8 +37,9 @@ that aren't always obvious from the source.
   `apps/cli/vendor/tree-sitter/`. Required before the first build; the
   hook calls it. The vendor dir is gitignored.
 - From `apps/cli/`:
-  - `zig build` — debug build at `zig-out/bin/cmotion`
-  - `zig build test --summary all` — unit tests, currently 17/17
+  - `zig build` — debug build at `zig-out/bin/cmotion` (also builds the
+    WASM artifact the editor/parity tests use)
+  - `zig build test --summary all` — unit tests (104 at last count)
   - `zig build -Doptimize=ReleaseFast` — release build
 - From the repo root, `pnpm install` covers `apps/web` and the
   tree-sitter package; `pnpm dev` runs the web app.
@@ -73,9 +76,22 @@ owns the Pages project. Pushing to `main` does **not** publish.
 - `lower.zig` — CST → AST lowering. One `Lowerer` per parse. Field-name
   driven: the grammar's `field('foo', …)` annotations match the lookups
   here.
-- `check.zig` — narrow semantic checks (NAM003/004/005/006, TYP002,
-  UNT001/002). Not a full typechecker — see "What's intentionally
-  missing".
+- `check.zig` — narrow semantic checks (NAM003/004/005/006/**007**,
+  TYP002, UNT001/002, **LWR001**). Not a full typechecker — see "What's
+  intentionally missing". NAM007 + LWR001 make the stage-3 path/extrude
+  slice fail legibly (unextrudable shape / malformed path).
+- `eval.zig` — the AST-walking evaluator. Produces a `Value` tree;
+  stages unknown calls as `Constructed(name, fields)` so new stdlib
+  forms render without an eval change.
+- `sampler.zig` — samples the time-varying `Value` tree at a `t` into a
+  shape-stable concrete tree the renderer consumes.
+- `render.zig` / `render3d.zig` / `mesh.zig` / `font.zig` — the native
+  renderer: 2D raster, 3D projection/lighting, mesh extrusion
+  (glyphs + paths), and glyph outlines.
+- `value.zig` — the `Value` union + its JSON encoding (the contract the
+  web Three.js viewer consumes).
+- `wasm_entry.zig` — the `parse_eval` / `sample_at` WASM exports the
+  browser editor + render container call.
 - `fmt.zig` — formatter engine (v0). Walks `program.decls`, rewrites
   top-level `use` and `let`, slices source verbatim for everything else.
 - `diagnostics.zig` — the diagnostic envelope. **Stable contract** — see
@@ -120,9 +136,17 @@ string-checked `endsWith(".*")` and `std . shapes . *` doesn't match
 ## What's intentionally missing
 
 The roadmap is stages 2 (full type system), 3 (stdlib), 4 (reference
-interpreter), 5 (WASM codegen), 6 (CanvasKit), 7 (WGSL). All not started.
-The CLI today is a *language frontend*, not a runtime: it never produces
-the values your code computes, only descriptions of your code.
+interpreter), 5 (WASM codegen), 6 (CanvasKit), 7 (WGSL). Stages 3 and 4
+are **in progress**: `cmo eval`/`cmo render` and the WASM interpreter
+produce real values and pixels for the implemented stdlib (shapes,
+text.glyph, mesh3d extrude + transforms + material, lighting, scene3d,
+compose, animate, color). Stage 2 (a full typechecker), stage 5 (a
+proper WASM *codegen*, distinct from today's interpreter-in-WASM), and
+stages 6–7 are not started.
+
+`check.zig` covers a deliberately narrow slice of stage 2 — but the
+renderer is no longer a stub: it walks the `Value` tree and emits
+frames.
 
 `cmo check` covers a deliberately narrow slice of stage 2 — see the
 comment at the top of `apps/cli/src/check.zig` for the exact scope and

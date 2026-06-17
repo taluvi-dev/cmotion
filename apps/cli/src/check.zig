@@ -593,6 +593,7 @@ pub const Checker = struct {
             .call => |c| {
                 try self.checkExpr(c.callee.*, scope);
                 for (c.args) |a| try self.checkExpr(a.value.*, scope);
+                try self.checkStdlibCall(c);
             },
             .method_call => |m| {
                 try self.checkExpr(m.receiver.*, scope);
@@ -632,6 +633,115 @@ pub const Checker = struct {
             .array => |a| for (a.elems) |elem| try self.checkExpr(elem, scope),
             .block => |b| try self.checkBlock(b, scope),
         }
+    }
+
+    /// Resolve the "name" a call is invoking, when it's nameable:
+    /// `path(...)` → "path", `text.glyph(...)` → "text.glyph" (a
+    /// one-level field access on an ident receiver). Anything more
+    /// complex (a call result, an index) returns null — we only reason
+    /// about the syntactically obvious cases.
+    fn calleeName(allocator: std.mem.Allocator, callee: ast.Expr) !?[]const u8 {
+        return switch (callee) {
+            .ident => |i| i.name,
+            .field_access => |f| switch (f.receiver.*) {
+                .ident => |r| try std.fmt.allocPrint(allocator, "{s}.{s}", .{ r.name, f.name.name }),
+                else => null,
+            },
+            else => null,
+        };
+    }
+
+    /// Stage-3 stdlib calls that the renderers can only partially
+    /// honour today get a legible diagnostic here instead of a silent
+    /// no-render downstream. Narrow and syntactic: we only flag the
+    /// obvious shapes (a direct call argument, a literal option), never
+    /// values that arrive through a binding — those are the full
+    /// typechecker's job.
+    fn checkStdlibCall(self: *Checker, c: ast.Call) !void {
+        const name = (try calleeName(self.allocator, c.callee.*)) orelse return;
+        if (std.mem.eql(u8, name, "extrude")) {
+            try self.checkExtrude(c);
+        } else if (std.mem.eql(u8, name, "path")) {
+            try self.checkPath(c);
+        }
+    }
+
+    fn firstPositional(c: ast.Call) ?ast.Arg {
+        for (c.args) |a| if (a.name == null) return a;
+        return null;
+    }
+
+    /// `extrude(<shape>, depth: ...)` — only `text.glyph(...)` and
+    /// `path(...)` have a 3D translator today. A direct call to any
+    /// other shape constructor (`extrude(circle(...))`) renders to
+    /// nothing; surface that as NAM007 so the failure is legible.
+    fn checkExtrude(self: *Checker, c: ast.Call) !void {
+        const arg = firstPositional(c) orelse return;
+        const inner = arg.value.*;
+        if (inner != .call) return; // a bound shape — can't reason syntactically
+        const shape = (try calleeName(self.allocator, inner.call.callee.*)) orelse return;
+        if (std.mem.eql(u8, shape, "text.glyph") or std.mem.eql(u8, shape, "path")) return;
+
+        const span = inner.span();
+        const loc = span.location(self.source);
+        try self.diagnostics.append(self.allocator, .{
+            .code = "NAM007",
+            .message = try std.fmt.allocPrint(self.allocator, "no 3D shape translator for '{s}' inside extrude(...)", .{shape}),
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = span.end - span.start },
+            .expected = "text.glyph(...) or path(...)",
+            .actual = try std.fmt.allocPrint(self.allocator, "extrude received '{s}'", .{shape}),
+            .help = "extrude a font outline with text.glyph(...) or an explicit polygon with path(points: [...])",
+            .fix_safety = .@"requires-human-review",
+            .repair = .{
+                .id = "use-extrudable-shape",
+                .summary = "Pass a text.glyph(...) or path(...) to extrude — other shapes have no 3D form yet.",
+            },
+        });
+    }
+
+    /// `path(points: [vec2(...), ...], closed?)` — the renderer extrudes
+    /// a single *closed* polygon of ≥ 3 points. Flag the two cases that
+    /// silently produce no solid: an explicit `closed: false`, and a
+    /// point list with fewer than three literal points.
+    fn checkPath(self: *Checker, c: ast.Call) !void {
+        for (c.args) |a| {
+            if (a.name) |n| if (std.mem.eql(u8, n.name, "closed")) {
+                if (a.value.* == .literal and a.value.*.literal == .@"bool" and a.value.*.literal.@"bool".value == false) {
+                    try self.emitPathLwr(c.span, "an open path (closed: false) has no cap face to extrude");
+                    return;
+                }
+            };
+        }
+        // Locate the point list: `points: [...]` or a leading positional array.
+        const points: ?ast.ArrayExpr = blk: {
+            for (c.args) |a| {
+                if (a.name) |n| {
+                    if (std.mem.eql(u8, n.name, "points") and a.value.* == .array) break :blk a.value.*.array;
+                } else if (a.value.* == .array) break :blk a.value.*.array;
+            }
+            break :blk null;
+        };
+        if (points) |arr| {
+            if (arr.elems.len < 3) {
+                try self.emitPathLwr(c.span, "a path needs at least 3 points to extrude into a solid");
+            }
+        }
+    }
+
+    fn emitPathLwr(self: *Checker, span: ast.Span, message: []const u8) !void {
+        const loc = span.location(self.source);
+        try self.diagnostics.append(self.allocator, .{
+            .code = "LWR001",
+            .message = try self.allocator.dupe(u8, message),
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = span.end - span.start },
+            .expected = "path(points: [vec2(x, y), …]) with 3+ points, closed",
+            .help = "give the path 3 or more points and leave it closed (the default) so extrude has a face",
+            .fix_safety = .@"requires-human-review",
+            .repair = .{
+                .id = "close-path-min-points",
+                .summary = "Provide at least 3 points and keep the path closed.",
+            },
+        });
     }
 
     fn checkLiteral(self: *Checker, lit: ast.Literal, scope: *const Scope) !void {
@@ -760,3 +870,87 @@ pub const Checker = struct {
         try self.checkBlock(l.body, &body_scope);
     }
 };
+
+// Tests — end-to-end through parse + lower + check.
+
+const ts = @import("tree_sitter.zig");
+const lower = @import("lower.zig");
+
+fn checkSource(source: []const u8) !struct {
+    arena: std.heap.ArenaAllocator,
+    diagnostics: []const diag.Diagnostic,
+} {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    errdefer arena.deinit();
+
+    var parsed = try ts.parse(source);
+    defer parsed.deinit();
+
+    var lowerer = lower.Lowerer.init(arena.allocator(), source);
+    const program = try lowerer.lowerProgram(parsed.root());
+
+    var checker = Checker.init(arena.allocator(), source, "<test>");
+    const diagnostics = try checker.check(program);
+    return .{ .arena = arena, .diagnostics = diagnostics };
+}
+
+fn hasCode(diagnostics: []const diag.Diagnostic, code: []const u8) bool {
+    for (diagnostics) |d| if (std.mem.eql(u8, d.code, code)) return true;
+    return false;
+}
+
+test "check: extrude(path(...)) of a 3-point polygon is clean" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\use std.mesh3d.*;
+        \\let tri = extrude(path(points: [vec2(0, 0), vec2(40, 0), vec2(20, 40)]), depth: 20px);
+    );
+    defer r.arena.deinit();
+    try std.testing.expect(!hasCode(r.diagnostics, "NAM007"));
+    try std.testing.expect(!hasCode(r.diagnostics, "LWR001"));
+}
+
+test "check: extrude of a non-extrudable shape flags NAM007" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\use std.mesh3d.*;
+        \\let bad = extrude(circle(radius: 40px), depth: 20px);
+    );
+    defer r.arena.deinit();
+    try std.testing.expect(hasCode(r.diagnostics, "NAM007"));
+}
+
+test "check: path with fewer than 3 points flags LWR001" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\use std.mesh3d.*;
+        \\let line = extrude(path(points: [vec2(0, 0), vec2(40, 0)]), depth: 20px);
+    );
+    defer r.arena.deinit();
+    try std.testing.expect(hasCode(r.diagnostics, "LWR001"));
+}
+
+test "check: an explicitly open path flags LWR001" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\use std.mesh3d.*;
+        \\let open = path(points: [vec2(0, 0), vec2(40, 0), vec2(20, 40)], closed: false);
+    );
+    defer r.arena.deinit();
+    try std.testing.expect(hasCode(r.diagnostics, "LWR001"));
+}
+
+test "conformance: the shipped path-extrude example checks clean" {
+    // The example wired into the gallery + cmo parse/check. Any new
+    // diagnostic that would fire on a valid extruded path shows up
+    // here before it reaches a user.
+    const fixture = @embedFile("path_extrude_fixture");
+    var r = try checkSource(fixture);
+    defer r.arena.deinit();
+    for (r.diagnostics) |d| {
+        if (d.severity == .@"error") {
+            std.debug.print("unexpected error diagnostic: {s} — {s}\n", .{ d.code, d.message });
+            return error.TestUnexpectedResult;
+        }
+    }
+}

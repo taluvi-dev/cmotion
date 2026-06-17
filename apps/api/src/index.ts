@@ -587,15 +587,25 @@ async function handleSyncTest(env: Env): Promise<Response> {
   });
 }
 
-// Allow the docs site (playground page) + arbitrary tools to call
-// the API from a browser. The endpoints don't read cookies and
-// don't do anything auth-sensitive in v0, so wide-open CORS is
-// fine. Once auth/rate-limit ladders land, narrow this to known
-// origins.
+// Wide-open CORS so any browser-based tool or AI agent can call the
+// API directly. The endpoints read no cookies and do nothing
+// auth-sensitive in v0, so a permissive policy has nothing to leak.
+// Notes:
+//   - `allow-headers: *` lets agents send arbitrary request headers
+//     (authorization, accept, x-*) without the preflight rejecting
+//     them — `content-type` alone was too tight for non-trivial
+//     clients.
+//   - `expose-headers: *` lets client JS read response headers
+//     (content-type, content-length), not just the CORS-safe subset.
+//   - a pure server-side agent never hits CORS at all (it's
+//     browser-enforced); this only matters for in-browser callers.
+// Once auth / rate-limit ladders land, narrow `allow-origin` to known
+// origins and drop the wildcards.
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, POST, OPTIONS",
-  "access-control-allow-headers": "content-type",
+  "access-control-allow-methods": "*",
+  "access-control-allow-headers": "*",
+  "access-control-expose-headers": "*",
   "access-control-max-age": "86400",
 };
 

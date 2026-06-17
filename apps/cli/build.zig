@@ -54,6 +54,11 @@ pub fn build(b: *std.Build) void {
     // this indirection.
     exe_mod.addAnonymousImport("font_ttf", .{ .root_source_file = b.path(font_file) });
 
+    // The path-extrude conformance fixture, embedded so check.zig's
+    // test can assert the shipped example stays clean without an
+    // on-disk read at test time (@embedFile is gated to src/).
+    exe_mod.addAnonymousImport("path_extrude_fixture", .{ .root_source_file = b.path("tests/fixtures/path-extrude.cm") });
+
     // ---- WASM step (built first; the native binary embeds the WASM
     // artifact for `cmo open` to serve). Building the WASM here also
     // means `zig build` covers both targets so the parity / interp

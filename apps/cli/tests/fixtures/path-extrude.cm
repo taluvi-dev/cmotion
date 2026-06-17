@@ -1,0 +1,50 @@
+// Stage-3 slice: extrude a 2D path into a solid and light it.
+//
+// `path(points: [...])` is the generic outline primitive in
+// std.shapes — here a glyph-like five-point star — and
+// `extrude(path, depth)` in std.mesh3d turns it into a mesh that
+// `render3d` projects to a Layer `compose` accepts. Flat-shaded,
+// one directional light; no refraction/dispersion in this slice.
+//
+// Pinned to runner 0.0.3 (the first runner that renders extruded
+// paths); 0.0.1 / 0.0.2 stay byte-stable.
+
+runner "0.0.3";
+
+use std.shapes.*;
+use std.mesh3d.*;
+use std.scene3d.*;
+use std.lighting.*;
+use std.anim.*;
+
+scene star(duration: Duration = 6s) -> Frame {
+  let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
+
+  let spin = animate { 0s => 0deg, 6s => 360deg } with { repeat: forever };
+
+  // A five-point star outline in frame px, centred on the origin.
+  // Outer points at radius 150, inner vertices at radius 62.
+  let outline = path(points: [
+    vec2(0, 150),    vec2(35, 46),
+    vec2(143, 46),   vec2(57, -18),
+    vec2(88, -121),  vec2(0, -57),
+    vec2(-88, -121), vec2(-57, -18),
+    vec2(-143, 46),  vec2(-35, 46),
+  ]);
+
+  let solid = extrude(outline, depth: 60px)
+                .material(fill: oklch(0.82, 0.19, 95),
+                          metalness: 0.2,
+                          roughness: 0.4)
+                .rotate(y: spin);
+
+  let lights = [
+    ambient(0.35),
+    directional(from: vec3(3, 4, 5), intensity: 1.5),
+  ];
+
+  compose [
+    bg,
+    render3d(solid, lights: lights),
+  ]
+}

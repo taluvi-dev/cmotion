@@ -5,9 +5,10 @@
 // POSTs to https://api.cmotion.org/v1/{frame|render}, polls
 // /v1/jobs/<id> until done, then shows the result inline.
 //
-// Asset upload is in the UI but not yet wired through — the
-// `POST /v1/assets` endpoint isn't built. See the note next to
-// the file picker.
+// Two uploads here, kept distinct: the "Upload .cm" button loads a
+// source *file* into the editor (client-side read, never sent on its
+// own), while the asset picker uploads image files to
+// `POST /v1/assets` so the source can reference them by friendly path.
 //
 // Unlike `/editor`, the render happens *server-side* (Cloudflare
 // Container + Chromium + ffmpeg). Same output bytes the editor
@@ -68,6 +69,12 @@ scene quick(duration: Duration = 3s) -> Frame {
       .controls section { display: flex; flex-direction: column; gap: 6px; }
       .controls h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
         color: var(--muted); margin: 0; font-weight: 600; }
+      .source-head { display: flex; align-items: center; justify-content: space-between;
+        margin-bottom: 6px; }
+      label.upload { font-size: 11px; color: var(--fg); cursor: pointer;
+        border: 1px solid var(--hair); border-radius: 4px; padding: 3px 8px;
+        background: transparent; }
+      label.upload:hover { border-color: var(--accent); }
       textarea#src {
         width: 100%; box-sizing: border-box; padding: 10px;
         background: var(--panel); border: 1px solid var(--hair); border-radius: 4px;
@@ -177,7 +184,13 @@ scene quick(duration: Duration = 3s) -> Frame {
       <section class="pane">
         <div class="controls">
           <section>
-            <h2>Source</h2>
+            <div class="source-head">
+              <h2>Source</h2>
+              <label class="upload" for="src-file">
+                ↑ Upload .cm
+                <input id="src-file" type="file" accept=".cm,.txt,text/plain" hidden />
+              </label>
+            </div>
             <textarea id="src" spellcheck="false" autocapitalize="off" autocorrect="off">{defaultSource}</textarea>
           </section>
 
@@ -319,6 +332,30 @@ scene quick(duration: Duration = 3s) -> Frame {
 
       $("btn-reset").addEventListener("click", () => { srcEl.value = initialSrc; });
 
+      // Upload a .cm (or .txt) source file straight into the editor.
+      // Read it client-side — the source only needs to reach the
+      // textarea; nothing is sent until you hit Render.
+      const srcFile = $("src-file") as HTMLInputElement;
+      srcFile.addEventListener("change", async () => {
+        const file = srcFile.files?.[0];
+        if (!file) return;
+        const MAX = 1024 * 1024; // 1 MiB — a .cm source is tiny
+        if (file.size > MAX) {
+          setStatus(`error: '${file.name}' is too large (max 1 MiB for a source file)`, "err");
+          srcFile.value = "";
+          return;
+        }
+        try {
+          srcEl.value = await file.text();
+          setStatus(`loaded ${file.name} (${(file.size / 1024).toFixed(1)} KB)`, "ok");
+        } catch (e: any) {
+          setStatus(`error reading '${file.name}': ${e?.message ?? e}`, "err");
+        } finally {
+          // Reset so re-selecting the same file fires change again.
+          srcFile.value = "";
+        }
+      });
+
       // Upload any selected files to /v1/assets and return the
       // path-in-source → asset-key map ready to thread into the
       // render call. Filename `earth.png` is mapped to source path
@@ -397,13 +434,33 @@ scene quick(duration: Duration = 3s) -> Frame {
           setStatus(`rendering ${kind} · ${fmtElapsed(ms)} …`);
         }, 100);
         try {
+          // Cap the wait so a stuck/unreachable backend surfaces an
+          // error instead of spinning the timer forever. Frames are
+          // quick; videos get the longer ceiling.
+          const deadline = t0 + (kind === "frame" ? 120_000 : 600_000);
           while (true) {
             await new Promise((r) => setTimeout(r, interval));
-            const res = await fetch(`${API_BASE}/v1/jobs/${id}`);
-            const body = await res.json();
+            let res: Response;
+            try {
+              res = await fetch(`${API_BASE}/v1/jobs/${id}`);
+            } catch (e: any) {
+              throw new Error(`can't reach ${API_BASE} — ${e?.message ?? e}`);
+            }
+            if (!res.ok) {
+              throw new Error(`job poll failed: HTTP ${res.status} · ${await res.text()}`);
+            }
+            let body: any;
+            try {
+              body = await res.json();
+            } catch {
+              throw new Error(`job poll returned non-JSON (HTTP ${res.status})`);
+            }
             if (body.status === "ready") return body;
             if (body.status === "error") {
               throw new Error(body.message || "render failed");
+            }
+            if (performance.now() > deadline) {
+              throw new Error(`timed out after ${Math.round((performance.now() - t0) / 1000)} s waiting for the render`);
             }
           }
         } finally {

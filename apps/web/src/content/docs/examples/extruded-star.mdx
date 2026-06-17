@@ -1,0 +1,25 @@
+---
+title: Extruded path
+description: A glyph-like 2D path extruded into a solid — the minimal stage-3 path→mesh→frame slice.
+---
+
+import ExampleScene from '../../../components/ExampleScene.astro';
+import { EXTRUDE_PATH_SOURCE } from '../../../examples/sources.ts';
+
+The generic outline primitive `path(points: [vec2(x, y), …])` in
+`std.shapes` describes any closed 2D polygon — here a five-point star.
+`extrude(path, depth)` in `std.mesh3d` turns that outline into a solid,
+`.material(...)` paints it, and `render3d(mesh, lights)` projects it to
+a `Layer` that `compose` stacks over a 2D background. One directional
+light, flat shaded — no refraction or dispersion in this slice.
+
+Paths are the non-font sibling of `text.glyph(...)`: the same
+`extrude → material → render3d` pipeline the title sequence uses, but
+the outline is points you supply rather than a glyph from a font.
+
+This example pins `runner "0.0.3"`, the first runner generation that
+renders extruded paths. Earlier runners (`0.0.1`, `0.0.2`) stay
+byte-for-byte stable; raising the pin is how a source opts into the new
+primitive.
+
+<ExampleScene source={EXTRUDE_PATH_SOURCE} />

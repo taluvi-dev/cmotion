@@ -753,8 +753,34 @@ fn centreMesh(arena: std.mem.Allocator, m: mesh_mod.Mesh) !mesh_mod.Mesh {
     };
 }
 
-/// Build a mesh for the leaf shape inside an `extrude(...)`. Today
-/// only `text.glyph` is supported; rects / paths land later.
+/// Read a single `vec2(x, y)` point into a mesh-space Vec2. Accepts
+/// both positional (`vec2(100, 50)`) and named (`vec2(x: 100, y: 50)`)
+/// forms; missing components default to 0. Anything that isn't a
+/// `vec2(...)` returns null so the path builder can skip it.
+fn readVec2Point(v: value.Value) ?mesh_mod.Vec2 {
+    if (v != .constructed) return null;
+    const c = v.constructed;
+    if (!std.mem.eql(u8, c.name, "vec2")) return null;
+    var x: f32 = 0;
+    var y: f32 = 0;
+    var pos: usize = 0;
+    for (c.fields) |f| {
+        const n = numberAsF32(f.value) orelse continue;
+        if (std.mem.eql(u8, f.name, "x")) {
+            x = n;
+        } else if (std.mem.eql(u8, f.name, "y")) {
+            y = n;
+        } else if (f.name.len == 0) {
+            if (pos == 0) x = n else if (pos == 1) y = n;
+            pos += 1;
+        }
+    }
+    return .{ .x = x, .y = y };
+}
+
+/// Build a mesh for the leaf shape inside an `extrude(...)`. Supports
+/// `text.glyph(...)` (font outline) and `path(points: [vec2, ...])`
+/// (an explicit closed polygon). Other shapes land later.
 fn meshFromShape(
     arena: std.mem.Allocator,
     leaf: value.Value,
@@ -764,6 +790,29 @@ fn meshFromShape(
 ) !?mesh_mod.Mesh {
     if (leaf != .constructed) return null;
     const c = leaf.constructed;
+    if (std.mem.eql(u8, c.name, "path")) {
+        // `path(points: [vec2(x, y), ...], closed?)` → a single closed
+        // contour, extruded. `closed: false` is not renderable as a
+        // solid (no cap face), so check.zig flags it before we get
+        // here; defensively we still treat the contour as closed.
+        var pts_val: ?value.Value = null;
+        for (c.fields) |f| {
+            if (std.mem.eql(u8, f.name, "points") or (f.name.len == 0 and f.value == .array)) {
+                pts_val = f.value;
+            }
+        }
+        const pts_arr = (pts_val orelse return null);
+        if (pts_arr != .array) return null;
+        const elems = pts_arr.array.elems;
+        var points = try std.array_list.Managed(mesh_mod.Vec2).initCapacity(arena, elems.len);
+        for (elems) |e| {
+            if (readVec2Point(e)) |p| try points.append(p);
+        }
+        // A solid extrusion needs a triangle minimum to form a face.
+        if (points.items.len < 3) return null;
+        const contour = try points.toOwnedSlice();
+        return try mesh_mod.extrudeContoursBeveled(arena, &.{contour}, depth, bevel, bevel_segments);
+    }
     if (std.mem.eql(u8, c.name, "text.glyph")) {
         var text_raw: []const u8 = "";
         var size_px: f32 = 96;
@@ -1633,6 +1682,48 @@ test "renderTree: translate(shape, x:, y:) shifts the wrapped shape" {
     // Canvas centre is now untouched.
     const center = (8 * 16 + 8) * 4;
     try std.testing.expectEqual(@as(u8, 0), fb.pixels[center + 3]);
+}
+
+test "meshFromShape: path(points: [vec2...]) extrudes a closed polygon" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // A simple triangle: (0,0), (40,0), (20,40).
+    const coords = [_][2]f64{ .{ 0, 0 }, .{ 40, 0 }, .{ 20, 40 } };
+    var elems = try a.alloc(value.Value, coords.len);
+    for (coords, 0..) |xy, i| {
+        const vf = try a.alloc(value.Field, 2);
+        vf[0] = .{ .name = "", .value = .{ .number = .{ .value = xy[0], .unit = .px } } };
+        vf[1] = .{ .name = "", .value = .{ .number = .{ .value = xy[1], .unit = .px } } };
+        elems[i] = .{ .constructed = .{ .name = "vec2", .fields = vf } };
+    }
+    const path_fields = try a.alloc(value.Field, 1);
+    path_fields[0] = .{ .name = "points", .value = .{ .array = .{ .elems = elems } } };
+    const path: value.Value = .{ .constructed = .{ .name = "path", .fields = path_fields } };
+
+    const m = (try meshFromShape(a, path, 20, 0, 0)) orelse return error.TestUnexpectedResult;
+    // Front + back caps (3 + 3) plus side walls (4 per edge × 3) → a
+    // non-empty solid with triangulated indices.
+    try std.testing.expect(m.positions.len > 0);
+    try std.testing.expect(m.indices.len > 0);
+}
+
+test "meshFromShape: path with fewer than 3 points yields no mesh" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const vf = try a.alloc(value.Field, 2);
+    vf[0] = .{ .name = "", .value = .{ .number = .{ .value = 0, .unit = .px } } };
+    vf[1] = .{ .name = "", .value = .{ .number = .{ .value = 0, .unit = .px } } };
+    var elems = try a.alloc(value.Value, 1);
+    elems[0] = .{ .constructed = .{ .name = "vec2", .fields = vf } };
+    const path_fields = try a.alloc(value.Field, 1);
+    path_fields[0] = .{ .name = "points", .value = .{ .array = .{ .elems = elems } } };
+    const path: value.Value = .{ .constructed = .{ .name = "path", .fields = path_fields } };
+
+    try std.testing.expect((try meshFromShape(a, path, 20, 0, 0)) == null);
 }
 
 test "renderTree: compose stacks layers — later wins" {

@@ -91,3 +91,12 @@ Worker can surface the diagnostic to the client.
   `cmotion-runner:0.0.2-amd64` (the same way `0.0.1` was published),
   then redeploy the worker with `apps/api/scripts/deploy.sh`. Sources
   opt into the new features with `runner "0.0.2";`.
+- `0.0.3/` — adds the extruded-path primitive: `path(points: [...])`
+  in `std.shapes` + `extrude(path, depth)` in `std.mesh3d`, rendered by
+  both the native renderer and the frozen viewer (`buildExtrudePath`).
+  `apps/api/wrangler.jsonc` pins `0.0.3-amd64`; ship it by building the
+  image from this directory, pushing it as `cmotion-runner:0.0.3-amd64`,
+  and redeploying with `apps/api/scripts/deploy.sh`. Sources opt in with
+  `runner "0.0.3";`. Note the single pinned image renders every runner's
+  sources — the per-version directories exist so each generation's bytes
+  can be reproduced, not for per-pin worker routing.

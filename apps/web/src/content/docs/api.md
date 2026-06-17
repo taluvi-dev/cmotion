@@ -135,6 +135,17 @@ than 24 h get garbage-collected from R2.
 - Container output is deleted from R2 after 24 h. Save what you
   want.
 
+## CORS & agents
+
+Every endpoint answers with fully open CORS —
+`access-control-allow-origin: *`, and `allow-headers` / `allow-methods`
+/ `expose-headers` all `*` — so an in-browser tool or agent can call the
+API directly without a preflight rejecting a custom header. A
+server-side agent doesn't deal with CORS at all (it's browser-enforced);
+just `POST /v1/frame` (or `/v1/render`) and poll `GET /v1/jobs/<id>`.
+The OpenAPI spec at `/openapi.json` is the structured contract to hand a
+client generator.
+
 ## Determinism
 
 Every renderer version is frozen in git under
