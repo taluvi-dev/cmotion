@@ -2,15 +2,21 @@
 
 > A typed DSL for video, motion, and animation. Same source, deterministic offline render and realtime GPU preview.
 
-cmotion is a small, statically-typed programming language for video, motion graphics, and animation. It is infrastructure — hosts embed it. The language is being built in public, in stages, with the grammar locked first and the implementation following.
+cmotion is a small, statically-typed programming language for video, motion graphics, and animation. It is infrastructure — hosts embed it. The reference interpreter parses, type-checks, evaluates, and renders 3D scenes to PNG or MP4 today (CLI, in-browser editor, and the hosted API); the full type system and the canonical CanvasKit/WGSL backends are still ahead.
+
+## For agents
+
+- [Agent guide](https://cmotion.org/agent/): render via the hosted API, or build your own instance in a sandbox (`docker build containers/0.0.3`); plus how to build/test the toolchain with `./init.sh`.
+- [Discovery manifest](https://cmotion.org/.well-known/agent.json): machine-readable JSON — API base, endpoints, OpenAPI, self-host pointers.
+- [OpenAPI spec](https://api.cmotion.org/openapi.json): OpenAPI 3.1 for the render endpoints (CORS-open).
 
 ## Docs
 
 - [Overview](https://cmotion.org/): pitch, code sample, status.
-- [Roadmap](https://cmotion.org/roadmap/): the 7 stages from grammar to GPU.
+- [Roadmap](https://cmotion.org/roadmap/): the 7 stages from grammar to GPU — what works now and what's ahead.
 - [Grammar](https://cmotion.org/language/grammar/): EBNF spec, v0.2.
 - [Type system](https://cmotion.org/language/types/): units, asset types, determinism partition.
-- [Stdlib](https://cmotion.org/language/stdlib/): shapes, composition, animation, color, transport, audio.
+- [Stdlib](https://cmotion.org/language/stdlib/): shapes (incl. `path`), text.glyph, mesh3d (extrude + material), lighting, scene3d, compose, animate, color — all render; transport + audio still ahead.
 - [Reference interpreter](https://cmotion.org/impl/interpreter/): the executable spec.
 - [Backends](https://cmotion.org/impl/backends/): WASM components, CanvasKit, WGSL.
 - [Render API](https://cmotion.org/api/): hosted render endpoint reference. POST a `.cm` source, get back PNG or MP4. No auth. Base URL `https://api.cmotion.org`.

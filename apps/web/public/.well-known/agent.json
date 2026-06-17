@@ -1,0 +1,31 @@
+{
+  "name": "cmotion",
+  "description": "A typed DSL for video, motion, and animation. POST a .cm source, get back a rendered PNG frame or MP4 video.",
+  "homepage": "https://cmotion.org/",
+  "documentation": "https://cmotion.org/agent/",
+  "llms_txt": "https://cmotion.org/llms.txt",
+  "openapi": "https://api.cmotion.org/openapi.json",
+  "license": "MIT",
+  "source": "https://github.com/taluvi-dev/cmotion",
+  "runner": "0.0.3",
+  "api": {
+    "base_url": "https://api.cmotion.org",
+    "auth": "none",
+    "cors": "open",
+    "endpoints": {
+      "render_video": "POST /v1/render",
+      "render_frame": "POST /v1/frame",
+      "upload_assets": "POST /v1/assets",
+      "poll_job": "GET /v1/jobs/{id}",
+      "fetch_output": "GET /v1/outputs/{file}",
+      "health": "GET /healthz"
+    },
+    "notes": "Async: enqueue returns a job_id (202); poll /v1/jobs/{id} until status is 'ready', then GET the returned url. Single shared render container — serializes jobs."
+  },
+  "self_host": {
+    "guide": "https://cmotion.org/agent/",
+    "worker": "https://github.com/taluvi-dev/cmotion/tree/main/apps/api",
+    "runner_image": "https://github.com/taluvi-dev/cmotion/tree/main/containers",
+    "quickstart": "docker build -t cmotion-runner containers/0.0.3 && docker run --rm -p 8080:8080 cmotion-runner; then POST / with { source, kind, params }"
+  }
+}

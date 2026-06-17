@@ -32,6 +32,7 @@ export default defineConfig({
 			sidebar: [
 				{ label: 'Overview', slug: 'index' },
 				{ label: 'Roadmap', slug: 'roadmap' },
+				{ label: 'For agents', slug: 'agent' },
 				{
 					label: 'Language',
 					items: [

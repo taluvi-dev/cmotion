@@ -142,6 +142,18 @@ names the Zig error variant that fired.
 - **Repair:** `extend-lowering`.
 - **Fix safety:** `requires-human-review`.
 
+### `LWR001` — Path can't be extruded as written
+
+`path(points: [vec2(x, y), …])` lowers fine, but the 3D renderer
+extrudes only a *closed* polygon of three or more points. Two forms slip
+through the grammar yet produce no geometry, so they're flagged: an
+explicit `closed: false`, and a point list with fewer than three points.
+Curved (bezier) segments aren't part of this slice yet either — build the
+outline from straight `vec2` points.
+
+- **Repair:** `close-path-min-points`.
+- **Fix safety:** `requires-human-review`.
+
 ---
 
 ## `NAM*` — Name resolution
@@ -211,6 +223,18 @@ parameter's location.
 - **Repair:** `rename-duplicate-param`.
 - **Fix safety:** `api-changing` — the parameter name is part of the
   named-argument API.
+
+### `NAM007` — No 3D shape translator inside extrude(...)
+
+`extrude(<shape>, depth: …)` builds a solid from a 2D outline, but only
+two outline sources have a 3D translator: `text.glyph("…", …)` (a font
+glyph) and `path(points: [vec2(x, y), …])` (an explicit polygon). A
+*direct* call to any other shape (`extrude(circle(…))`) renders nothing,
+so it's flagged. The check is syntactic — it fires only when the argument
+is a literal call, not when the shape arrives through a binding.
+
+- **Repair:** `use-extrudable-shape`.
+- **Fix safety:** `requires-human-review`.
 
 ---
 

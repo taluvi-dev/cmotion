@@ -3,11 +3,11 @@ title: Type system
 description: Units, asset types, function types, and the determinism partition of the stdlib.
 ---
 
-The type system specification is **not yet written**. It will live as a separate document from the [grammar](/language/grammar/) — the grammar describes how programs *parse*, the type system describes what they *mean*.
+The full type system specification is **still being written** — it lives as a separate document from the [grammar](/language/grammar/): the grammar describes how programs *parse*, the type system describes what they *mean*. A narrow slice of checking already runs in `cmo check` (see Status below); the spec below is where it's headed.
 
 ## Scope
 
-The spec will cover:
+The spec covers:
 
 - **Unit types** — `Time`, `Length`, `Frequency`, `Angle`, `Tempo`, and how the lexer's units (`ms`, `px`, `hz`, `deg`, `bpm`, `bars`, `beats`, …) inhabit them.
 - **Asset types** — `Image`, `Audio`, `Font`, opaque to the program but loadable through the stdlib.

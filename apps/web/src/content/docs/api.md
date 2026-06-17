@@ -19,9 +19,9 @@ machine. You `POST` a source, get back a `job_id`, poll
 URL the response gives you.
 
 Sources are expected to pin their runner with `runner "<semver>";`
-at the top (e.g. `runner "0.0.1";`). Absent → the loader uses the
-latest available runner. See [Grammar](/language/grammar/) §
-"Runner pin".
+at the top (e.g. `runner "0.0.3";`). Absent → the loader uses the
+latest available runner. See [Determinism](#determinism) below for how
+the pin keeps renders reproducible.
 
 ## Endpoints
 
@@ -31,7 +31,7 @@ Request body:
 
 ```json
 {
-  "source": "runner \"0.0.1\"; use std.shapes.*; scene s() -> Frame { rect(width: 1920px, height: 1080px, fill: #ff3399) }",
+  "source": "runner \"0.0.3\"; use std.shapes.*; scene s() -> Frame { rect(width: 1920px, height: 1080px, fill: #ff3399) }",
   "params": {
     "fps": 30,
     "duration": 6,
@@ -61,7 +61,7 @@ Request body:
 
 ```json
 {
-  "source": "runner \"0.0.1\"; …",
+  "source": "runner \"0.0.3\"; …",
   "params": { "at": 1.5, "width": 1920, "height": 1080 }
 }
 ```
@@ -130,10 +130,46 @@ than 24 h get garbage-collected from R2.
   subsequent requests wait.
 - Max render duration: 5 min per job.
 - Max source size: 64 KiB.
-- No authentication in v0; protected only by Cloudflare's edge
-  rate limiting.
+- No authentication in v0. Throughput is bounded by the
+  single-container queue — only one render runs at a time, so
+  requests serialize rather than fan out — plus the per-job size and
+  duration clamps above. That single-instance cap is the effective
+  rate limit and the cost ceiling.
 - Container output is deleted from R2 after 24 h. Save what you
   want.
+
+## Run your own instance
+
+The hosted endpoint at `api.cmotion.org` is a shared, best-effort,
+**single-container** service — fine for trying things and light use, but
+it serializes everyone's jobs through one renderer. cmotion is
+infrastructure, not a product, so **running your own instance is
+encouraged** and is the right move for anything beyond casual use:
+production workloads, higher throughput, private sources, or your own
+size/duration limits.
+
+Everything you need is in the (MIT-licensed) repo:
+
+- the Worker — [`apps/api/`](https://github.com/taluvi-dev/cmotion/tree/main/apps/api) (`wrangler deploy`), and
+- the frozen render runner — [`containers/<version>/`](https://github.com/taluvi-dev/cmotion/tree/main/containers) (`docker build` + push).
+
+Point your client at your own base URL; the request/response shape is
+identical. Run more than one container, or raise the per-job clamps, to
+suit your own throughput and cost trade-offs.
+
+**Agents:** if you have a sandbox, stand up a throwaway instance there
+to test against — it's faster than the shared queue and fully private.
+Build the runner and run it directly:
+
+```sh
+docker build -t cmotion-runner containers/0.0.3
+docker run --rm -p 8080:8080 cmotion-runner   # serves HTTP on :8080
+```
+
+Then `POST /` with `{ "source": "<.cm>", "kind": "frame" | "video", "params": { … } }`
+and it returns the rendered `image/png` or `video/mp4` directly (and
+`GET /healthz` → `ok`). Same engine as the hosted API, no shared
+container — ideal for iterating on a scene.
 
 ## CORS & agents
 
@@ -149,16 +185,16 @@ client generator.
 ## Determinism
 
 Every renderer version is frozen in git under
-[`containers/<version>/`](https://github.com/taluvi-dev/cmotion/tree/main/containers).
-A `.cm` source pinned to `runner "0.0.1";` is guaranteed to
-produce the same bytes against that runner forever, even after
-the live stack moves forward to `0.0.2` and beyond. Bumping the
-runner pin is an explicit opt-in to new behaviour.
+[`containers/<version>/`](https://github.com/taluvi-dev/cmotion/tree/main/containers)
+(`0.0.1`, `0.0.2`, `0.0.3`). A `.cm` source pinned to an older runner —
+say `runner "0.0.1";` — is guaranteed to produce the same bytes against
+that runner forever, even though the live stack is now at `0.0.3`.
+Bumping the pin is an explicit opt-in to new behaviour.
 
 ## End-to-end example (curl + jq)
 
 ```bash
-SRC='runner "0.0.1";
+SRC='runner "0.0.3";
 use std.shapes.*;
 scene quick() -> Frame {
   let bg = rect(width: 1920px, height: 1080px, fill: oklch(0.10, 0.04, 280));
@@ -224,8 +260,9 @@ table. Render-stage failures surface a short text reason on
 
 ## Status
 
-v0. The shape above is stable, but expect additions: asset
-uploads (`POST /v1/assets`), an MCP wrapper for one-shot agent
-use, rate-limit headers, queue-depth in pending responses,
-authentication. Removal of fields will not happen without a
-versioned route.
+v0. Asset uploads (`POST /v1/assets`) are live — multipart upload
+returns `{ assets: { "<filename>": "<key>" } }`, and the keys thread
+into a render's `assets` field so a source can reference them by path.
+Still expected: an MCP wrapper for one-shot agent use, rate-limit
+headers, queue-depth in pending responses, and authentication. Removal
+of fields will not happen without a versioned route.

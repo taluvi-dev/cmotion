@@ -9,21 +9,21 @@ The interpreter renders through two **interim** backends — a native software r
 
 ## WASM component codegen
 
-Compiles a cmotion program to a WASM component (Component Model). The component is the portable artifact — any host with a Component Model runtime (wasmtime, jco, browser) can load and run it.
+Compiles each cmotion *program* to its own WASM component (Component Model). The component is the portable artifact — any host with a Component Model runtime (wasmtime, jco, browser) can load and run it.
 
-Status: not started. See [Roadmap](/roadmap/) stage 5.
+Status: planned — distinct from the interpreter-as-wasm module (`cmotion-render.wasm`) that already ships and renders. This stage is per-program codegen, not the interpreter. See [Roadmap](/roadmap/) stage 5.
 
 ## CanvasKit (offline)
 
 Deterministic offline render. CanvasKit (Skia compiled to WASM) draws each frame to a buffer; output is bit-identical across machines. This is the canonical export path — `.mp4`/`.png` sequences for final delivery.
 
-Status: not started — offline render is handled by the interim headless-Chromium runner behind the hosted [API](/api/) (`.png`/`.mp4` out); CanvasKit is the planned canonical replacement. See [Roadmap](/roadmap/) stage 6.
+Status: planned — offline render (PNG + MP4) is handled today by the interim headless-Chromium runner behind the hosted [API](/api/); CanvasKit is the canonical, machine-independent replacement. See [Roadmap](/roadmap/) stage 6.
 
 ## WGSL (realtime)
 
 GPU codegen to WGSL for realtime preview. Runs through `wgpu` so the same shader code targets Vulkan, Metal, DX12, and WebGPU. This is the canonical editor/preview path — interactive scrubbing, parameter tweaking, live reload.
 
-Status: not started — realtime preview is handled by the interim Three.js/WebGL viewer in the [editor](/playground/); WGSL is the planned canonical replacement. See [Roadmap](/roadmap/) stage 7.
+Status: planned — realtime preview is handled today by the interim Three.js/WebGL viewer in the [editor](/playground/); WGSL is the canonical replacement. See [Roadmap](/roadmap/) stage 7.
 
 ## Conformance
 
