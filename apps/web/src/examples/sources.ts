@@ -7,7 +7,7 @@
 // 360°. One letter, three independent animations — the minimal taste
 // sample. The multi-letter title example below shares the same
 // extrude → material → render3d pipeline.
-export const HOMEPAGE_SOURCE = `runner "0.0.1";
+export const HOMEPAGE_SOURCE = `runner "0.0.3";
 
 use std.shapes.*;
 use std.mesh3d.*;
@@ -64,7 +64,7 @@ scene title(duration: Duration = 6s) -> Frame {
 // untouched.) Everything is tuned to loop seamlessly over 12s: each
 // 360° spin lands back at 0°, and the hue cycle + wobble waves (periods
 // 6s, 4s) all divide 12 evenly.
-export const TITLE_SOURCE = `runner "0.0.1";
+export const TITLE_SOURCE = `runner "0.0.3";
 
 use std.shapes.*;
 use std.mesh3d.*;
@@ -119,7 +119,7 @@ scene title(duration: Duration = 12s) -> Frame {
 }
 `;
 
-export const BOUNCING_BALL_SOURCE = `runner "0.0.1";
+export const BOUNCING_BALL_SOURCE = `runner "0.0.3";
 
 use std.shapes.*;
 use std.anim.*;
@@ -183,7 +183,7 @@ scene bouncing_ball(
 // own volume is preserved — and bobs on its own y `animate` so the cluster
 // fuses and splits over the 12s loop. The dark background reads through the
 // gaps; the glossy red body + orange fresnel rim come from the shader's lights.
-export const LAVA_LAMP_SOURCE = `runner "0.0.1";
+export const LAVA_LAMP_SOURCE = `runner "0.0.3";
 
 use std.shapes.*;
 use std.scene3d.*;
