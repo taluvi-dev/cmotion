@@ -32,7 +32,7 @@
   "containers": [
     {
       "class_name": "RenderRunner",
-      "image": "registry.cloudflare.com/CF_ACCOUNT_PLACEHOLDER/cmotion-runner:0.0.10-amd64",
+      "image": "registry.cloudflare.com/CF_ACCOUNT_PLACEHOLDER/cmotion-runner:0.0.12-amd64",
       "max_instances": 1,
       "instance_type": "standard-2",
       // Enable `wrangler containers ssh <id>` for diagnosing

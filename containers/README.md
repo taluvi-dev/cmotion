@@ -133,3 +133,10 @@ Worker can surface the diagnostic to the client.
   as outlines, watertight by construction. Adds a `round` param that bevels
   the edges (0 = square "qube"; → depth/2 rounds toward a tube). Supersedes
   the 0.0.7 hand-rolled thickener. Pins `0.0.10-amd64`.
+
+- `0.0.12/` — adds `POST /v1/vectorize`: a raster line drawing → uniform
+  single-line **centreline** SVG (binarize → gap-bridge dilation →
+  Zhang–Suen thinning → greedy straight-continuation trace → RDP simplify →
+  endpoint stitch). Output feeds straight into /v1/mesh, so a hand drawing
+  becomes a watertight 3D solid. Image arrives via the assets flow; params:
+  strokeWidth, threshold, simplify, bridge, stitch, maxDim. Pins 0.0.12.

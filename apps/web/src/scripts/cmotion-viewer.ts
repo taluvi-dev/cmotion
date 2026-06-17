@@ -1008,6 +1008,203 @@ export async function svgToGlb(src: string, depth = 0.4, size = 2, round = 0): P
   return new Uint8Array(result as ArrayBuffer);
 }
 
+// ---- Raster → centreline SVG (vectorize) -------------------------
+
+// Zhang–Suen thinning: erode a binary grid (1 = ink) to a 1-px skeleton.
+// In place. Standard two-subiteration algorithm.
+function thinZhangSuen(g: Uint8Array, w: number, h: number): void {
+  const at = (x: number, y: number) => (x < 0 || y < 0 || x >= w || y >= h ? 0 : g[y * w + x]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let step = 0; step < 2; step++) {
+      const rm: number[] = [];
+      for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+        if (!g[y * w + x]) continue;
+        const p2 = at(x, y - 1), p3 = at(x + 1, y - 1), p4 = at(x + 1, y), p5 = at(x + 1, y + 1),
+          p6 = at(x, y + 1), p7 = at(x - 1, y + 1), p8 = at(x - 1, y), p9 = at(x - 1, y - 1);
+        const nb = [p2, p3, p4, p5, p6, p7, p8, p9];
+        const B = nb.reduce((a, b) => a + b, 0);
+        if (B < 2 || B > 6) continue;
+        let A = 0;
+        for (let i = 0; i < 8; i++) if (nb[i] === 0 && nb[(i + 1) % 8] === 1) A++;
+        if (A !== 1) continue;
+        if (step === 0) { if (p2 * p4 * p6 !== 0) continue; if (p4 * p6 * p8 !== 0) continue; }
+        else { if (p2 * p4 * p8 !== 0) continue; if (p2 * p6 * p8 !== 0) continue; }
+        rm.push(y * w + x);
+      }
+      if (rm.length) { changed = true; for (const i of rm) g[i] = 0; }
+    }
+  }
+}
+
+// Ramer–Douglas–Peucker polyline simplification ("quantize").
+function rdp(pts: [number, number][], eps: number): [number, number][] {
+  if (pts.length < 3) return pts;
+  let dmax = 0, idx = 0;
+  const [ax, ay] = pts[0], [bx, by] = pts[pts.length - 1];
+  const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = Math.abs((pts[i][0] - ax) * dy - (pts[i][1] - ay) * dx) / len;
+    if (d > dmax) { dmax = d; idx = i; }
+  }
+  if (dmax > eps) {
+    const l = rdp(pts.slice(0, idx + 1), eps), r = rdp(pts.slice(idx), eps);
+    return l.slice(0, -1).concat(r);
+  }
+  return [pts[0], pts[pts.length - 1]];
+}
+
+// Trace a 1-px skeleton into long polylines by GREEDY straight-continuation:
+// from each start pixel, repeatedly step to the unvisited ink neighbour whose
+// direction best continues the current heading. This flows straight through
+// 8-connected "staircase" pixels (which a degree test would mis-read as
+// junctions and shatter the line into 2-px fragments — the bug that blew the
+// mesh up). Real branches just become separate polylines. Pixels are marked
+// visited so each is used once. Short stubs (noise/spurs) are dropped.
+function traceSkeleton(g: Uint8Array, w: number, h: number): [number, number][][] {
+  const id = (x: number, y: number) => y * w + x;
+  const inb = (x: number, y: number) => x >= 0 && y >= 0 && x < w && y < h;
+  const N8 = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]] as const;
+  const deg = (x: number, y: number) => { let c = 0; for (const [dx, dy] of N8) if (inb(x + dx, y + dy) && g[id(x + dx, y + dy)]) c++; return c; };
+  const vis = new Uint8Array(w * h);
+  const candidates = (x: number, y: number) => {
+    const out: [number, number][] = [];
+    for (const [dx, dy] of N8) { const ax = x + dx, ay = y + dy; if (inb(ax, ay) && g[id(ax, ay)] && !vis[id(ax, ay)]) out.push([ax, ay]); }
+    return out;
+  };
+  const trace = (sx: number, sy: number): [number, number][] => {
+    const pts: [number, number][] = [[sx, sy]];
+    vis[id(sx, sy)] = 1;
+    let cx = sx, cy = sy, hx = 0, hy = 0;
+    while (true) {
+      const cand = candidates(cx, cy);
+      if (cand.length === 0) break;
+      let best = cand[0];
+      if (hx || hy) {
+        let bestDot = -Infinity;
+        for (const [nx, ny] of cand) {
+          const dx = nx - cx, dy = ny - cy, l = Math.hypot(dx, dy) || 1;
+          const d = (dx / l) * hx + (dy / l) * hy;
+          if (d > bestDot) { bestDot = d; best = [nx, ny]; }
+        }
+      }
+      const [nx, ny] = best;
+      vis[id(nx, ny)] = 1;
+      pts.push([nx, ny]);
+      const l = Math.hypot(nx - cx, ny - cy) || 1;
+      hx = (nx - cx) / l; hy = (ny - cy) / l;
+      cx = nx; cy = ny;
+    }
+    return pts;
+  };
+  const paths: [number, number][][] = [];
+  // Endpoints (deg 1) first so open strokes trace end-to-end; then any
+  // remaining ink (closed loops / leftover branches).
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (g[id(x, y)] && !vis[id(x, y)] && deg(x, y) === 1) paths.push(trace(x, y));
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (g[id(x, y)] && !vis[id(x, y)]) paths.push(trace(x, y));
+  return paths.filter((p) => p.length >= 4);
+}
+
+// Vectorize a raster line drawing into a centreline SVG: binarize →
+// skeletonize (one line per drawn stroke, regardless of its hand-drawn
+// width/wobble) → trace + simplify → emit uniform-width stroke paths. The
+// result feeds straight into svg()/`/v1/mesh`. `url` is loaded via an
+// <img> (same-origin asset in the render container). Options: strokeWidth
+// (output line width, SVG units), threshold (0..1 ink cutoff), simplify
+// (RDP tolerance in source px), maxDim (processing resolution).
+// Greedily join polylines whose endpoints are within `tol`: connect head/tail
+// (trying either orientation) so dashes that bridging missed become one line.
+function stitchPaths(paths: [number, number][][], tol: number): [number, number][][] {
+  const segs = paths.map((p) => p.slice());
+  const dist = (a: [number, number], b: [number, number]) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  let merged = true;
+  while (merged) {
+    merged = false;
+    outer: for (let i = 0; i < segs.length; i++) {
+      for (let j = i + 1; j < segs.length; j++) {
+        const A = segs[i], B = segs[j];
+        const a0 = A[0], a1 = A[A.length - 1], b0 = B[0], b1 = B[B.length - 1];
+        let joined: [number, number][] | null = null;
+        if (dist(a1, b0) <= tol) joined = A.concat(B);
+        else if (dist(a1, b1) <= tol) joined = A.concat(B.slice().reverse());
+        else if (dist(a0, b0) <= tol) joined = A.slice().reverse().concat(B);
+        else if (dist(a0, b1) <= tol) joined = B.concat(A);
+        if (joined) { segs[i] = joined; segs.splice(j, 1); merged = true; break outer; }
+      }
+    }
+  }
+  return segs;
+}
+
+export async function imageToCenterlineSvg(
+  url: string,
+  opts: { strokeWidth?: number; threshold?: number; simplify?: number; maxDim?: number; bridge?: number; stitch?: number } = {},
+): Promise<string> {
+  const strokeWidth = opts.strokeWidth ?? 6;
+  const threshold = opts.threshold ?? 0.5;
+  const simplify = opts.simplify ?? 1.5;
+  const maxDim = opts.maxDim ?? 700;
+
+  const img = new Image();
+  img.crossOrigin = "anonymous";
+  img.src = url;
+  await img.decode();
+  const ow = img.naturalWidth, oh = img.naturalHeight;
+  const scale = Math.min(1, maxDim / Math.max(ow, oh));
+  const w = Math.max(1, Math.round(ow * scale)), h = Math.max(1, Math.round(oh * scale));
+
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d", { willReadFrequently: true })!;
+  ctx.drawImage(img, 0, 0, w, h);
+  const data = ctx.getImageData(0, 0, w, h).data;
+
+  // Ink = dark pixels (white paper assumed). luminance < threshold.
+  const g = new Uint8Array(w * h);
+  const cut = threshold * 255;
+  for (let i = 0; i < w * h; i++) {
+    const r = data[i * 4], gg = data[i * 4 + 1], b = data[i * 4 + 2], a = data[i * 4 + 3];
+    const lum = a < 8 ? 255 : 0.299 * r + 0.587 * gg + 0.114 * b;
+    g[i] = lum < cut ? 1 : 0;
+  }
+
+  // Bridge small gaps (pen lifts, JPEG noise) before thinning so the
+  // skeleton stays connected — otherwise it shatters into many dashes.
+  // `bridge` rounds of 8-connected dilation; thinning re-collapses to the
+  // centreline afterward.
+  const bridge = Math.max(0, Math.round(opts.bridge ?? 2));
+  for (let k = 0; k < bridge; k++) {
+    const out = g.slice();
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (g[y * w + x]) continue;
+      let hit = false;
+      for (let dy = -1; dy <= 1 && !hit; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const ax = x + dx, ay = y + dy;
+        if (ax >= 0 && ay >= 0 && ax < w && ay < h && g[ay * w + ax]) { hit = true; break; }
+      }
+      if (hit) out[y * w + x] = 1;
+    }
+    g.set(out);
+  }
+
+  thinZhangSuen(g, w, h);
+  const inv = 1 / scale;
+  let paths = traceSkeleton(g, w, h)
+    .map((p) => rdp(p, simplify * scale))
+    .filter((p) => p.length >= 2);
+  paths = stitchPaths(paths, (opts.stitch ?? 6) * scale);
+
+  const d = paths
+    .map((p) => "M" + p.map(([x, y]) => `${(x * inv).toFixed(1)} ${(y * inv).toFixed(1)}`).join(" L"))
+    .join(" ");
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${ow} ${oh}" fill="none" ` +
+    `stroke="currentColor" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round">` +
+    `<path d="${d}"/></svg>`
+  );
+}
+
 // Dispatches on a single value-tree node. `compose` is handled separately
 // because it owns the bg→background promotion.
 function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
