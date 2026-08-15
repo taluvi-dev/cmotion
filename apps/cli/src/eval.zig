@@ -98,6 +98,13 @@ pub const Evaluator = struct {
     source: []const u8,
     path: []const u8,
     diagnostics: std.ArrayListUnmanaged(diag.Diagnostic) = .{},
+    /// Optional per-name argument overrides for top-level scene/component
+    /// invocation. When a parameter's name is present here, the override
+    /// value wins over the declared default. This is how a host (the WASM
+    /// embedder today, `cmo eval --args` later) re-evaluates a scene with
+    /// user-supplied parameter values without touching the source. Values
+    /// must be arena-owned by the caller.
+    arg_overrides: ?*const std.StringArrayHashMapUnmanaged(Value) = null,
 
     pub fn init(
         arena: std.mem.Allocator,
@@ -164,6 +171,37 @@ pub const Evaluator = struct {
 
     pub fn takeDiagnostics(self: *Evaluator) ![]const diag.Diagnostic {
         return self.diagnostics.toOwnedSlice(self.gpa);
+    }
+
+    /// Evaluate the declared defaults of the first top-level scene's
+    /// parameters, with the preceding top-level `let`s in scope (a default
+    /// may reference them). No scene body is invoked. The returned map's
+    /// entries are arena-owned; the map itself is arena-allocated too, so
+    /// there is nothing to deinit. Used by hosts to reflect a scene's
+    /// parameter surface (the WASM `scene_params` / `apply_args` exports).
+    pub fn sceneParamDefaults(
+        self: *Evaluator,
+        program: ast.Program,
+    ) EvalError!std.StringArrayHashMapUnmanaged(Value) {
+        var top = Scope{ .parent = null };
+        defer top.names.deinit(self.gpa);
+        var out: std.StringArrayHashMapUnmanaged(Value) = .{};
+        for (program.decls) |decl| switch (decl) {
+            .let => |d| {
+                const v = try self.evalExpr(d.value.*, &top);
+                try top.names.put(self.gpa, d.name.name, v);
+            },
+            .scene => |cl| {
+                for (cl.params) |p| {
+                    const default = p.default orelse continue;
+                    const v = try self.evalExpr(default.*, &top);
+                    try out.put(self.arena, p.name.name, v);
+                }
+                return out;
+            },
+            else => {},
+        };
+        return out;
     }
 
     //
@@ -575,6 +613,12 @@ pub const Evaluator = struct {
         var params_scope = Scope{ .parent = parent };
         defer params_scope.names.deinit(self.gpa);
         for (decl.params) |p| {
+            if (self.arg_overrides) |ov| {
+                if (ov.get(p.name.name)) |v| {
+                    try params_scope.names.put(self.gpa, p.name.name, v);
+                    continue;
+                }
+            }
             const default = p.default orelse continue;
             const v = try self.evalExpr(default.*, parent);
             try params_scope.names.put(self.gpa, p.name.name, v);
@@ -1545,4 +1589,60 @@ test "eval: match with ident pattern binds the subject" {
 
     try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
     try std.testing.expectEqual(@as(f64, 8), r.program.bindings[0].value.number.value);
+}
+
+test "eval: arg_overrides win over scene param defaults" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const source =
+        \\scene title(size: Number = 10) -> Frame {
+        \\  rect(width: size)
+        \\}
+    ;
+    var parsed = try ts.parse(source);
+    defer parsed.deinit();
+    var lowerer = lower.Lowerer.init(a, source);
+    const program = try lowerer.lowerProgram(parsed.root());
+
+    var overrides: std.StringArrayHashMapUnmanaged(Value) = .{};
+    try overrides.put(a, "size", .{ .number = .{ .value = 42, .unit = null } });
+
+    var evaluator = Evaluator.init(a, std.testing.allocator, source, "<test>");
+    defer evaluator.deinit();
+    evaluator.arg_overrides = &overrides;
+    const result = try evaluator.evalProgram(program);
+
+    try std.testing.expectEqual(@as(usize, 1), result.bindings.len);
+    const scene = result.bindings[0].value;
+    const width = scene.constructed.fields[0].value;
+    try std.testing.expectEqual(@as(f64, 42), width.number.value);
+}
+
+test "eval: sceneParamDefaults reflects defaults without invoking the body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const source =
+        \\let base = 6s;
+        \\scene title(duration: Duration = base, label: String) -> Frame {
+        \\  rect(width: 10px)
+        \\}
+    ;
+    var parsed = try ts.parse(source);
+    defer parsed.deinit();
+    var lowerer = lower.Lowerer.init(a, source);
+    const program = try lowerer.lowerProgram(parsed.root());
+
+    var evaluator = Evaluator.init(a, std.testing.allocator, source, "<test>");
+    defer evaluator.deinit();
+    const defaults = try evaluator.sceneParamDefaults(program);
+
+    // `duration` resolves through the preceding let; `label` has no default.
+    try std.testing.expectEqual(@as(usize, 1), defaults.count());
+    const d = defaults.get("duration").?;
+    try std.testing.expectEqual(@as(f64, 6), d.number.value);
+    try std.testing.expectEqual(ast.Unit.s, d.number.unit.?);
 }
