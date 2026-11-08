@@ -1,0 +1,10 @@
+{
+  "name": "cmotion-runner-0.0.3",
+  "private": true,
+  "version": "0.0.3",
+  "description": "cmotion render runner — headless Chromium driver for one-shot jobs.",
+  "type": "module",
+  "dependencies": {
+    "playwright-core": "1.56.0"
+  }
+}

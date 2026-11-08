@@ -220,6 +220,17 @@ pub const Param = struct {
     name: Ident,
     type: Type,
     default: ?*const Expr,
+    /// `@name(args)` annotations written before the parameter, in
+    /// source order. Metadata for hosts; evaluation ignores them.
+    annotations: []const Annotation = &.{},
+};
+
+/// `@ui(min: 0, max: 10)` — a named annotation with optional call-style
+/// arguments, attached to a parameter.
+pub const Annotation = struct {
+    span: Span,
+    name: Ident,
+    args: []const Arg,
 };
 
 pub const Block = struct {

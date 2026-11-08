@@ -38,7 +38,7 @@ how much trust to extend to the repair:
 | `PAR*` | Parser (tree-sitter) | implemented |
 | `LWR*` | CST → AST lowering | implemented |
 | `NAM*` | Name resolution | implemented |
-| `TYP*` | Type checker | partial (TYP002 only) |
+| `TYP*` | Type checker | partial (TYP002, TYP003) |
 | `UNT*` | Unit checker | partial (UNT001, UNT002) |
 | `EVL*` | Reference interpreter | partial (scene arguments: EVL004, EVL005) |
 | `TIM*` | Timeline (negative duration, out-of-range keyframe) | reserved |
@@ -239,6 +239,22 @@ is a literal call, not when the shape arrives through a binding.
 
 ---
 
+### `NAM008` — Annotation or `@ui` key that nothing reads
+
+*Warning.* A parameter carries an annotation other than `@ui`, or an
+`@ui` argument other than `min`, `max`, `step` or `label` (or a
+positional one). Annotations are host metadata with no effect on
+evaluation, so the source still renders.
+
+```cm
+scene s(@ui(maxx: 10) glow: Number = 2) -> Frame { … }   // NAM008: unknown @ui key 'maxx'
+```
+
+- **Repair:** `fix-annotation`.
+- **Fix safety:** `local-edit`.
+
+---
+
 ## `TYP*` — Type checker
 
 ### `TYP002` — Type mismatch on an annotated value
@@ -270,6 +286,19 @@ Unit-category mismatches **within** the number family
 - **Repair:** `align-value-with-type`.
 - **Fix safety:** `local-edit` — usually only the value or annotation
   changes, no call sites move.
+
+---
+
+### `TYP003` — `@ui` value of the wrong kind
+
+*Warning.* `label` must be a string literal; `min`, `max` and `step`
+number literals, plain or in the parameter's unit family. Hosts get
+bounds in the parameter's unit (seconds, degrees, pixels), so
+`@ui(max: 500ms)` on a `Duration` arrives as `0.5`, and `@ui(max: 5px)`
+on a `Duration` has no meaning and is dropped.
+
+- **Repair:** `fix-annotation`.
+- **Fix safety:** `local-edit`.
 
 ---
 

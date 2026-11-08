@@ -133,11 +133,21 @@ module.exports = grammar({
       ')',
     ),
 
+    // `@name(args)` before a parameter: metadata for hosts (e.g.
+    // `@ui(min: 0, max: 10, label: "Glow")` for a props panel). It has
+    // no effect on evaluation.
     param: $ => seq(
+      repeat(field('annotation', $.annotation)),
       field('name', $.identifier),
       ':',
       field('type', $._type),
       optional(seq('=', field('default', $._expr))),
+    ),
+
+    annotation: $ => seq(
+      '@',
+      field('name', $.identifier),
+      optional(field('args', $.arg_list)),
     ),
 
     //

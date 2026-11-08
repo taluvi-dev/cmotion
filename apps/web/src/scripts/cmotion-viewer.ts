@@ -29,8 +29,11 @@ interface CmExports {
   cm_free(ptr: number, n: number): void;
   get_version(out: number, cap: number): number;
   parse_eval(src: number, len: number): number;
+  parse_eval_with(src: number, len: number, args: number, argsLen: number): number;
   sample_at(handle: number, tNs: bigint, out: number, cap: number): number;
   release(handle: number): void;
+  scene_params(src: number, len: number, out: number, cap: number): number;
+  diagnostics(out: number, cap: number): number;
 }
 
 async function loadWasm(): Promise<CmExports> {
@@ -57,14 +60,95 @@ function getVersion(exp: CmExports): string {
   return v;
 }
 
-function parseEval(exp: CmExports, source: string): number {
-  const enc = new TextEncoder().encode(source);
-  const p = exp.cm_alloc(enc.length);
+function withBytes<T>(exp: CmExports, text: string, fn: (ptr: number, len: number) => T): T {
+  const enc = new TextEncoder().encode(text);
+  const p = exp.cm_alloc(Math.max(enc.length, 1));
   new Uint8Array(exp.memory.buffer).set(enc, p);
-  const h = exp.parse_eval(p, enc.length);
-  exp.cm_free(p, enc.length);
-  if (h === 0) throw new Error("parse_eval failed — fix syntax / eval errors in the source");
+  try {
+    return fn(p, enc.length);
+  } finally {
+    exp.cm_free(p, Math.max(enc.length, 1));
+  }
+}
+
+// Every JSON-writing export returns 0 when the buffer is too small, so
+// grow it and retry.
+function readJson(exp: CmExports, call: (out: number, cap: number) => number): any {
+  for (let cap = 4096; cap <= 4 * 1024 * 1024; cap *= 4) {
+    const p = exp.cm_alloc(cap);
+    const n = call(p, cap);
+    const text = n ? readString(exp, p, n) : null;
+    exp.cm_free(p, cap);
+    if (text !== null) return JSON.parse(text);
+  }
+  return null;
+}
+
+/** One located problem from the interpreter's diagnostic envelope. */
+export interface CmDiagnostic {
+  severity: "error" | "warning" | "note";
+  code: string;
+  message: string;
+  line?: number;
+  column?: number;
+  length?: number;
+  expected?: string;
+  actual?: string;
+  help?: string;
+}
+
+/** Thrown by `load` when the source does not evaluate; carries why. */
+export class CmotionError extends Error {
+  constructor(public diagnostics: CmDiagnostic[]) {
+    const first = diagnostics.find((d) => d.severity === "error") ?? diagnostics[0];
+    super(
+      first
+        ? `${first.code}${first.line ? ` (line ${first.line}:${first.column})` : ""}: ${first.message}`
+        : "parse_eval failed — fix syntax / eval errors in the source",
+    );
+    this.name = "CmotionError";
+  }
+}
+
+function lastDiagnostics(exp: CmExports): CmDiagnostic[] {
+  return readJson(exp, (o, c) => exp.diagnostics(o, c))?.diagnostics ?? [];
+}
+
+// `args` binds the entry scene's parameters (parse_eval_with): times in
+// seconds, angles in degrees, lengths in pixels, colours "#rrggbb",
+// assets as URLs. Without it the source evaluates as it always has.
+function parseEval(exp: CmExports, source: string, args?: Record<string, unknown>): number {
+  const h = withBytes(exp, source, (p, n) =>
+    args === undefined
+      ? exp.parse_eval(p, n)
+      : withBytes(exp, JSON.stringify(args), (ap, an) => exp.parse_eval_with(p, n, ap, an)),
+  );
+  if (h === 0) throw new CmotionError(lastDiagnostics(exp));
   return h;
+}
+
+/** A parameter of the entry scene, as `scene_params` reports it. */
+export interface CmSceneParam {
+  name: string;
+  type: string;
+  prop: "number" | "int" | "bool" | "string" | "color" | "asset" | null;
+  asset: "image" | "video" | "audio" | "font" | null;
+  unit: string | null;
+  required: boolean;
+  default: { source: string; value: unknown; url?: string | null } | null;
+  ui: { min?: number; max?: number; step?: number; label?: string } | null;
+  doc: string | null;
+}
+
+export interface CmSceneParams {
+  ok: boolean;
+  diagnostics: CmDiagnostic[];
+  scene: string | null;
+  params: CmSceneParam[];
+}
+
+function sceneParams(exp: CmExports, source: string): CmSceneParams {
+  return withBytes(exp, source, (p, n) => readJson(exp, (o, c) => exp.scene_params(p, n, o, c)));
 }
 
 function sample(exp: CmExports, handle: number, tSeconds: number): unknown {
@@ -190,6 +274,9 @@ function imagePath(node: JsonNode): string | null {
   }
   if (node.name === "image") {
     const raw = positionalArgs(node)[0];
+    // `image(logo)` where `logo: Image` is a parameter: the parameter's
+    // value is already `image("url")`.
+    if (raw?.kind === "constructed" && raw.name === "image") return imagePath(raw);
     if (!raw || raw.kind !== "string") return null;
     return String(raw.raw).replace(/^"|"$/g, "");
   }
@@ -211,6 +298,169 @@ function loadFont(): Promise<opentype.Font> {
       .then((buf) => opentype.parse(buf) as opentype.Font);
   }
   return fontPromise;
+}
+
+// Fonts named by a `Font` asset (`font("/fonts/Inter.ttf")`), loaded on
+// first use and cached by URL. Until a font arrives the text using it
+// is skipped and counted in `pending`, so a headless render or a bake
+// waits for it; `requestFrame` redraws when it lands. Font *names*
+// (`font: "Inter Bold"`) are not files and keep the default font.
+const urlFonts = new Map<string, opentype.Font>();
+const fontPending = new Set<string>();
+const fontFailed = new Set<string>();
+
+function fontUrl(v: JsonNode): string | null {
+  if (!v || v.kind !== "constructed" || v.name !== "font") return null;
+  const raw = positionalArgs(v)[0];
+  if (!raw || raw.kind !== "string") return null;
+  return String(raw.raw).replace(/^"|"$/g, "") || null;
+}
+
+function fontFor(node: JsonNode, ctx: BuildCtx): opentype.Font | null {
+  const url = fontUrl(namedFields(node).font);
+  if (!url || fontFailed.has(url)) return ctx.font;
+  const loaded = urlFonts.get(url);
+  if (loaded) return loaded;
+  if (!fontPending.has(url)) {
+    fontPending.add(url);
+    fetch(url)
+      .then((r) => {
+        if (!r.ok) throw new Error(`font fetch failed: ${r.status}`);
+        return r.arrayBuffer();
+      })
+      .then((buf) => urlFonts.set(url, opentype.parse(buf) as opentype.Font))
+      .catch((e) => {
+        console.warn(`[cmotion-viewer] font ${url} failed, using the default font`, e);
+        fontFailed.add(url);
+      })
+      .finally(() => {
+        fontPending.delete(url);
+        requestFrame?.();
+      });
+  }
+  return null;
+}
+
+// ---- text.block layout -------------------------------------------
+//
+// Port of apps/cli/src/text_layout.zig — keep the two in step: same
+// escapes, same greedy wrap, same box. Pixels, y down, relative to the
+// box's top-left; a glyph's y is its baseline. Sizes follow the native
+// renderer's stb_truetype basis (size = ascender − descender), so a
+// block measures the same in both.
+
+interface BlockOptions {
+  size: number;
+  lineHeight: number;
+  align: "left" | "center" | "right";
+  width: number | null;
+  kerning: boolean;
+}
+
+interface PlacedGlyph { glyph: opentype.Glyph; x: number; y: number }
+
+function unescapeText(raw: string): string {
+  const inner = raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw;
+  return inner.replace(/\\(.)/g, (m, c) =>
+    c === "n" ? "\n" : c === "t" ? "\t" : c === '"' ? '"' : c === "\\" ? "\\" : m,
+  );
+}
+
+function blockOptions(node: JsonNode): BlockOptions {
+  const f = namedFields(node);
+  const alignName =
+    f.align?.kind === "string" ? String(f.align.raw).replace(/^"|"$/g, "") :
+    f.align?.kind === "constructed" ? f.align.name : "left";
+  return {
+    size: numberOf(f.size, 96),
+    lineHeight: numberOf(f.line_height, 1.2),
+    align: alignName === "center" || alignName === "right" ? alignName : "left",
+    width: f.width?.kind === "number" ? f.width.value : null,
+    kerning: f.kerning?.kind === "bool" ? f.kerning.value : true,
+  };
+}
+
+function layoutBlock(font: opentype.Font, text: string, o: BlockOptions) {
+  const hhea = (font as any).tables.hhea;
+  const scale = o.size / (hhea.ascender - hhea.descender);
+  const ascent = hhea.ascender * scale;
+  const descent = hhea.descender * scale;
+  const glyphs = (s: string) => Array.from(s).map((ch) => font.charToGlyph(ch));
+  const adv = (g: opentype.Glyph) => (g.advanceWidth ?? 0) * scale;
+  const kern = (a: opentype.Glyph, b: opentype.Glyph) => (o.kerning ? font.getKerningValue(a, b) * scale : 0);
+  const runWidth = (run: opentype.Glyph[]) =>
+    run.reduce((w, g, i) => w + adv(g) + (i + 1 < run.length ? kern(g, run[i + 1]) : 0), 0);
+
+  // Lines: split at \n, then greedily wrap at spaces within `width`.
+  const lines: opentype.Glyph[][] = [];
+  for (const para of text.split("\n")) {
+    const chars = Array.from(para);
+    const run = glyphs(para);
+    if (o.width === null) { lines.push(run); continue; }
+    let start = 0;
+    let lastBreak: number | null = null;
+    for (let j = 0; j < run.length; j++) {
+      if (chars[j] === " ") lastBreak = j;
+      if (runWidth(run.slice(start, j + 1)) <= o.width) continue;
+      if (lastBreak !== null && lastBreak > start) {
+        lines.push(run.slice(start, lastBreak));
+        start = lastBreak + 1;
+        lastBreak = null;
+      }
+    }
+    lines.push(run.slice(start));
+  }
+
+  const widths = lines.map(runWidth);
+  const boxW = o.width ?? Math.max(0, ...widths);
+  const step = o.lineHeight * o.size;
+  const placed: PlacedGlyph[] = [];
+  lines.forEach((line, i) => {
+    let x = o.align === "center" ? (boxW - widths[i]) / 2 : o.align === "right" ? boxW - widths[i] : 0;
+    const y = ascent + i * step;
+    line.forEach((g, k) => {
+      placed.push({ glyph: g, x, y });
+      x += adv(g) + (k + 1 < line.length ? kern(g, line[k + 1]) : 0);
+    });
+  });
+  const height = ascent + Math.max(0, lines.length - 1) * step - descent;
+  return { placed, width: boxW, height, emSize: scale * font.unitsPerEm };
+}
+
+// The block's outlines as THREE.Shapes in pixels, y up, box centred on
+// the origin. Same containment-based hole classification as
+// stringShapes.
+function blockShapes(font: opentype.Font, text: string, o: BlockOptions): THREE.Shape[] {
+  const l = layoutBlock(font, text, o);
+  const sp = new THREE.ShapePath();
+  for (const p of l.placed) {
+    const path = p.glyph.getPath(p.x - l.width / 2, p.y - l.height / 2, l.emSize);
+    for (const cmd of path.commands as any[]) {
+      switch (cmd.type) {
+        case "M": sp.moveTo(cmd.x, -cmd.y); break;
+        case "L": sp.lineTo(cmd.x, -cmd.y); break;
+        case "Q": sp.quadraticCurveTo(cmd.x1, -cmd.y1, cmd.x, -cmd.y); break;
+        case "C": sp.bezierCurveTo(cmd.x1, -cmd.y1, cmd.x2, -cmd.y2, cmd.x, -cmd.y); break;
+      }
+    }
+  }
+  return sp.toShapes(false);
+}
+
+// text.block(...) as a flat 2D layer: filled outlines, `fill:` colour
+// (white by default), centred like the native renderer paints it.
+function buildTextBlock(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
+  const font = fontFor(node, ctx);
+  if (!font) return null;
+  const raw = positionalArgs(node)[0];
+  if (!raw || raw.kind !== "string") return null;
+  const shapes = blockShapes(font, unescapeText(String(raw.raw)), blockOptions(node));
+  if (shapes.length === 0) return null;
+  const geom = new THREE.ShapeGeometry(shapes, 16);
+  geom.scale(pxToWorld, pxToWorld, 1);
+  const fill = namedFields(node).fill;
+  const mat = new THREE.MeshBasicMaterial({ color: fill ? toThreeColor(fill) : 0xffffff });
+  return new THREE.Mesh(geom, mat);
 }
 
 // Build extrude-ready THREE.Shapes for the whole string, laid out
@@ -437,13 +687,36 @@ function buildExtrude(node: JsonNode, ctx: BuildCtx): THREE.Mesh | null {
   if (inner && inner.kind === "constructed" && inner.name === "path") {
     return buildExtrudePath(inner, numberOf(f.depth, 16));
   }
+  if (inner && inner.kind === "constructed" && inner.name === "text.block") {
+    const font = fontFor(inner, ctx);
+    const raw = positionalArgs(inner)[0];
+    if (!font || !raw || raw.kind !== "string") return null;
+    const shapes = blockShapes(font, unescapeText(String(raw.raw)), blockOptions(inner));
+    if (shapes.length === 0) return null;
+    // Same bevel default as the native extruder (render.zig): 10 % of
+    // the depth, at least 1.5 px, overridable with `bevel:`.
+    const depthPx = numberOf(f.depth, 16);
+    const bevelPx = f.bevel?.kind === "number" ? f.bevel.value : Math.max(depthPx * 0.1, 1.5);
+    const geom = new THREE.ExtrudeGeometry(shapes, {
+      depth: depthPx,
+      bevelEnabled: bevelPx > 0,
+      bevelThickness: bevelPx,
+      bevelSize: bevelPx,
+      bevelSegments: numberOf(f.bevel_segments, 4),
+      curveSegments: 32,
+    });
+    geom.scale(pxToWorld, pxToWorld, pxToWorld);
+    return new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0xffffff }));
+  }
   if (!inner || inner.kind !== "constructed" || inner.name !== "text.glyph") {
     console.warn(`[cmotion-viewer] extrude: unsupported inner ${inner?.name}`);
     return null;
   }
+  const glyphFont = fontFor(inner, ctx);
+  if (!glyphFont) return null;
   const glyphArgs = positionalArgs(inner);
   const text = String(glyphArgs[0]?.raw ?? '""').replace(/^"|"$/g, "") || "?";
-  const shapes = stringShapes(ctx.font, text);
+  const shapes = stringShapes(glyphFont, text);
   if (shapes.length === 0) return null;
 
   const depthPx = numberOf(f.depth, 16);
@@ -458,8 +731,8 @@ function buildExtrude(node: JsonNode, ctx: BuildCtx): THREE.Mesh | null {
   if (sizeField && sizeField.kind === "number") {
     // 1 em of shape → world: px × (unitsPerEm / (ascender−descender)) × pxToWorld.
     // The hhea metric matches stb_truetype's ScaleForPixelHeight basis.
-    const hhea = (ctx.font as any).tables.hhea;
-    const emFactor = ctx.font.unitsPerEm / (hhea.ascender - hhea.descender);
+    const hhea = (glyphFont as any).tables.hhea;
+    const emFactor = glyphFont.unitsPerEm / (hhea.ascender - hhea.descender);
     const scale = sizeField.value * emFactor * pxToWorld;
     const depth = depthPx * pxToWorld;
     const bevel = depth * 0.3;
@@ -1291,6 +1564,8 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
     }
     case "rect":
       return buildRect(node);
+    case "text.block":
+      return buildTextBlock(node, ctx);
     case "circle":
       return buildCircle(node);
     case "sphere":
@@ -1384,11 +1659,14 @@ export function detectDurationSeconds(source: string, fallback = 6): number {
 // ---- Public viewer -----------------------------------------------
 
 export interface ViewerHandle {
-  load(source: string): void;
+  /** Throws a CmotionError with the diagnostics when the source fails. */
+  load(source: string, args?: Record<string, unknown>): void;
   seek(t: number): void;
   resize(): void;
   durationSeconds: number;
+  /** Deferred assets still loading (vectorize traces, fonts). */
   pending: number;
+  sceneParams(source: string): CmSceneParams;
   versions: { cmotion: string; three: string };
   captureFrame(): Promise<Blob | null>;
   captureClip(opts?: {
@@ -1548,12 +1826,13 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
   // resolves, so it appears without waiting for the next animation tick.
   requestFrame = () => { if (handle) applyFrame(lastT); };
 
-  function load(source: string) {
-    if (handle) {
-      exp.release(handle);
-      handle = 0;
-    }
-    handle = parseEval(exp, source);
+  // `args` binds the entry scene's parameters (see parseEval). A source
+  // that does not evaluate throws a CmotionError carrying the
+  // diagnostics, and the previous scene stays loaded.
+  function load(source: string, args?: Record<string, unknown>) {
+    const next = parseEval(exp, source, args);
+    if (handle) exp.release(handle);
+    handle = next;
     durationSeconds = detectDurationSeconds(source);
     applyFrame(0);
   }
@@ -1568,7 +1847,10 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
     versions: { cmotion: interpVersion, three: THREE.REVISION },
     // Count of deferred assets still resolving (e.g. vectorize() traces).
     // The headless render driver waits for this to hit 0 before screenshotting.
-    get pending() { return vectorizePending.size; },
+    get pending() { return vectorizePending.size + fontPending.size; },
+    // The entry scene's parameters (the clip's props) and the
+    // diagnostics of the source, without evaluating its body.
+    sceneParams(source: string): CmSceneParams { return sceneParams(exp, source); },
     captureFrame() {
       // Re-render in the same tick as toBlob — even with preserveDrawingBuffer
       // the WebGL back buffer can be undefined between paints, so we redraw

@@ -14,6 +14,11 @@
 //!   - NAM005: duplicate top-level declaration. Two `component foo` or
 //!     two imports landing on the same local name.
 //!   - NAM006: duplicate parameter name in a signature.
+//!   - NAM008 (warning): an annotation, or an `@ui` key, that nothing
+//!     reads. TYP003 (warning): an `@ui` value of the wrong kind (a
+//!     label that isn't a string literal, a bound that isn't a number
+//!     literal in the parameter's unit family). Annotations are host
+//!     metadata, so these never block a render.
 //!   - TYP002: literal value doesn't match an annotated type. Fires
 //!     only when both sides are inferable: a `simple_type` whose name
 //!     names a known category (String / Bool / Color / Number / unit-
@@ -37,6 +42,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const diag = @import("diagnostics.zig");
+const host = @import("host.zig");
 
 const SymbolKind = enum {
     import,
@@ -501,9 +507,100 @@ pub const Checker = struct {
             try self.declareParam(&body_scope, p);
             if (p.default) |def| try self.checkExpr(def.*, parent); // defaults see only the outer scope
             try self.checkParamAnnotation(p);
+            try self.checkHostAnnotations(p);
         }
 
         try self.checkBlock(d.body, &body_scope);
+    }
+
+    fn checkHostAnnotations(self: *Checker, p: ast.Param) !void {
+        for (p.annotations) |a| {
+            if (!std.mem.eql(u8, a.name.name, "ui")) {
+                try self.annotationWarning(
+                    "NAM008",
+                    a.name.span,
+                    try std.fmt.allocPrint(self.allocator, "unknown annotation '@{s}'", .{a.name.name}),
+                    "@ui",
+                    "remove the annotation, or use @ui(min:, max:, step:, label:)",
+                );
+                continue;
+            }
+            for (a.args) |arg| {
+                const key = arg.name orelse {
+                    try self.annotationWarning("NAM008", arg.span, "@ui takes named arguments", "min, max, step, label", "name the argument, e.g. @ui(max: 10)");
+                    continue;
+                };
+                const spec = for (host.ui_keys) |k| {
+                    if (std.mem.eql(u8, k.name, key.name)) break k;
+                } else {
+                    try self.annotationWarning(
+                        "NAM008",
+                        key.span,
+                        try std.fmt.allocPrint(self.allocator, "unknown @ui key '{s}'", .{key.name}),
+                        "min, max, step, label",
+                        "use one of min, max, step, label",
+                    );
+                    continue;
+                };
+                if (!spec.number) {
+                    if (host.literalString(arg.value.*) == null)
+                        try self.annotationWarning(
+                            "TYP003",
+                            arg.span,
+                            try std.fmt.allocPrint(self.allocator, "@ui {s} must be a string literal", .{key.name}),
+                            "a string literal",
+                            "write the label as \"…\"",
+                        );
+                    continue;
+                }
+                const n = host.literalNumber(arg.value.*) orelse {
+                    try self.annotationWarning(
+                        "TYP003",
+                        arg.span,
+                        try std.fmt.allocPrint(self.allocator, "@ui {s} must be a number literal", .{key.name}),
+                        "a number literal",
+                        "write the bound as a number, e.g. 10 or 500ms",
+                    );
+                    continue;
+                };
+                const unit: ?ast.Unit = switch (host.propKind(p.type)) {
+                    .number => |u| u,
+                    else => null,
+                };
+                if (host.toUnit(n, unit) == null)
+                    try self.annotationWarning(
+                        "TYP003",
+                        arg.span,
+                        try std.fmt.allocPrint(self.allocator, "@ui {s} has a unit that does not fit parameter '{s}'", .{ key.name, p.name.name }),
+                        "a number in the parameter's unit family",
+                        "use the parameter's unit, or a plain number",
+                    );
+            }
+        }
+    }
+
+    fn annotationWarning(
+        self: *Checker,
+        code: []const u8,
+        span: ast.Span,
+        message: []const u8,
+        expected: []const u8,
+        help: []const u8,
+    ) !void {
+        const loc = span.location(self.source);
+        try self.diagnostics.append(self.allocator, .{
+            .severity = .warning,
+            .code = code,
+            .message = message,
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = span.end - span.start },
+            .expected = expected,
+            .help = help,
+            .fix_safety = .@"local-edit",
+            .repair = .{
+                .id = "fix-annotation",
+                .summary = "Hosts read @ui(min:, max:, step:, label:) with literal values; fix or remove the rest.",
+            },
+        });
     }
 
     fn declareParam(self: *Checker, scope: *Scope, p: ast.Param) !void {
@@ -680,7 +777,7 @@ pub const Checker = struct {
         const inner = arg.value.*;
         if (inner != .call) return; // a bound shape — can't reason syntactically
         const shape = (try calleeName(self.allocator, inner.call.callee.*)) orelse return;
-        if (std.mem.eql(u8, shape, "text.glyph") or std.mem.eql(u8, shape, "path")) return;
+        if (std.mem.eql(u8, shape, "text.glyph") or std.mem.eql(u8, shape, "text.block") or std.mem.eql(u8, shape, "path")) return;
 
         const span = inner.span();
         const loc = span.location(self.source);
@@ -688,7 +785,7 @@ pub const Checker = struct {
             .code = "NAM007",
             .message = try std.fmt.allocPrint(self.allocator, "no 3D shape translator for '{s}' inside extrude(...)", .{shape}),
             .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = span.end - span.start },
-            .expected = "text.glyph(...) or path(...)",
+            .expected = "text.glyph(...), text.block(...) or path(...)",
             .actual = try std.fmt.allocPrint(self.allocator, "extrude received '{s}'", .{shape}),
             .help = "extrude a font outline with text.glyph(...) or an explicit polygon with path(points: [...])",
             .fix_safety = .@"requires-human-review",
@@ -953,4 +1050,36 @@ test "conformance: the shipped path-extrude example checks clean" {
             return error.TestUnexpectedResult;
         }
     }
+}
+
+test "check: a well-formed @ui hint is clean" {
+    var r = try checkSource(
+        \\scene s(
+        \\  @ui(min: 0s, max: 500ms, step: 0.1, label: "Fade")
+        \\  fade: Duration = 0.2s,
+        \\) -> Frame { fade }
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+}
+
+test "check: unknown annotations and @ui keys warn with NAM008" {
+    var r = try checkSource(
+        \\scene s(@colour(1) @ui(maxx: 1, 2) x: Number = 1) -> Frame { x }
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 3), r.diagnostics.len);
+    for (r.diagnostics) |d| {
+        try std.testing.expectEqualStrings("NAM008", d.code);
+        try std.testing.expectEqual(diag.Severity.warning, d.severity);
+    }
+}
+
+test "check: @ui values of the wrong kind warn with TYP003" {
+    var r = try checkSource(
+        \\scene s(@ui(label: 3, max: 5px) d: Duration = 1s) -> Frame { d }
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 2), r.diagnostics.len);
+    try std.testing.expect(hasCode(r.diagnostics, "TYP003"));
 }

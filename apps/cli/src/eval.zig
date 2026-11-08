@@ -336,7 +336,8 @@ pub const Evaluator = struct {
     ) EvalError!void {
         // Track which call args have already been bound to a param so
         // a name can't be double-consumed (and so we can later warn
-        // about leftover args — TODO when we add EVL005 for that).
+        // about leftover args — TODO, under a new EVL code: EVL005 is
+        // taken by scene arguments).
         const consumed = try self.gpa.alloc(bool, args.len);
         defer self.gpa.free(consumed);
         @memset(consumed, false);
@@ -1027,7 +1028,7 @@ pub const Evaluator = struct {
 // Helpers (pure)
 //
 
-fn parseNumber(n: ast.NumberLit) value.Number {
+pub fn parseNumber(n: ast.NumberLit) value.Number {
     // The lexer guarantees `n.text` is a well-formed numeric literal
     // (digits + optional `.` + digits + optional `_` separators). We
     // strip the underscores and feed it to std.fmt.parseFloat. An

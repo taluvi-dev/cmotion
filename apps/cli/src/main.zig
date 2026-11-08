@@ -43,6 +43,7 @@ test {
     _ = @import("value.zig");
     _ = @import("eval.zig");
     _ = @import("host.zig");
+    _ = @import("text_layout.zig");
     _ = @import("sampler.zig");
     _ = @import("render.zig");
     _ = @import("font.zig");

@@ -88,3 +88,43 @@ The hosted API also gains **`POST /v1/gif`** — an animated-GIF render of
 the scene loop (ffmpeg two-pass palette) — and **`POST /v1/mesh`** —
 an SVG → 3D mesh export (`.glb`), alongside `/v1/render` (mp4) and
 `/v1/frame` (png).
+
+## Runner 0.0.14 additions
+
+Opt in with `runner "0.0.14";`. Nothing here changes how an existing
+source renders: `text.glyph` keeps its layout, and every addition is a
+new constructor, type or argument. (0.0.14 also freezes the
+`vectorize()` endpoint-snapping fix that landed after 0.0.13, so
+`vectorize` scenes pinned to 0.0.14 trace slightly differently from
+0.0.13.)
+
+- **`text.block(string, size?, line_height?, align?, width?, kerning?, fill?, font?)`**
+  **(rendered)** — a laid-out text block. Draws flat as a 2D layer in
+  `compose` (filled with `fill:`, white by default), or extrudes:
+  `extrude(text.block("TITLE", size: 120px), depth: 30px)`.
+  - `size` — px, the font's ascender-to-descender height (default 96);
+  - `"line one\nline two"` — `\n` breaks a line; `line_height` is the
+    baseline distance as a multiple of `size` (default 1.2);
+  - `width: 600px` — wrap greedily at spaces; a word wider than the
+    width stays whole;
+  - `align: left | center | right` — each line in the box (default
+    `left`); the box itself is centred like any layer and moved with
+    `translate`;
+  - `kerning: false` — turn off the font's pair kerning (on by default).
+- **`font("/fonts/Inter-Bold.ttf")`** — a font file for `text.block` and
+  `text.glyph`'s `font:` argument. The web viewer loads it (TTF, OTF or
+  WOFF) and waits for it before a render or bake; the native renderer
+  ships one font (DM Sans Bold) and uses it for every font. A font
+  *name* (`font: "Inter Bold"`) still selects the default font.
+- **Asset parameter types** — `Image`, `Video`, `Audio`, `Font`. A scene
+  parameter of one of these types is a file the host resolves:
+  `scene card(logo: Image = image("/img/logo.png"), face: Font = font("/fonts/Inter.ttf"))`.
+  Its value is the matching constructor, so `fill: logo` works wherever
+  `fill: image("…")` does. A host passes the URL (see the
+  [host API](/impl/interpreter/#embedding-the-wasm-host-api)); cmotion
+  never fetches by asset id. `Video` and `Audio` parameters declare the
+  slot; the viewer does not draw video or play audio from them yet.
+- **`@ui(min:, max:, step:, label:)`** on a scene parameter — hints for a
+  host's props panel. No effect on evaluation. `cmo check` warns on an
+  unknown annotation or key (`NAM008`) and on a value of the wrong kind
+  (`TYP003`).

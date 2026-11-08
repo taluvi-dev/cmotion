@@ -157,6 +157,26 @@ pub fn advance(codepoint: u32, size_px: f32) f32 {
     return @as(f32, @floatFromInt(adv)) * scale;
 }
 
+/// Kerning between two codepoints at `size_px`, in pixels (negative
+/// pulls the pair together). stb_truetype reads the `kern` table and
+/// GPOS pair positioning.
+pub fn kern(left: u32, right: u32, size_px: f32) f32 {
+    ensureInit();
+    const scale = c.stbtt_ScaleForPixelHeight(&info, size_px);
+    const k = c.stbtt_GetCodepointKernAdvance(&info, @intCast(left), @intCast(right));
+    return @as(f32, @floatFromInt(k)) * scale;
+}
+
+/// The bundled font's metrics for `text_layout.layout`.
+pub fn layoutMetrics(size_px: f32) @import("text_layout.zig").Metrics {
+    const vm = vmetrics(size_px);
+    return .{ .advance = advanceFn, .kern = kern, .ascent = vm.ascent, .descent = vm.descent };
+}
+
+fn advanceFn(cp: u32, size_px: f32) f32 {
+    return advance(cp, size_px);
+}
+
 pub fn freeBitmap(bitmap: GlyphBitmap) void {
     // stb_truetype uses its own malloc (STBTT_malloc → malloc by default).
     // Free with the matching deallocator.

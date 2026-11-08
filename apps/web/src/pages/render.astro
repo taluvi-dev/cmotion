@@ -51,7 +51,8 @@
 
       declare global {
         interface Window {
-          __job?: { source: string; params?: Record<string, unknown> };
+          // `args` binds the entry scene's parameters (runner 0.0.14+).
+          __job?: { source: string; params?: Record<string, unknown>; args?: Record<string, unknown> };
           __meshMode?: boolean;
           __viewerReady?: boolean;
           __viewerError?: { message: string; code?: string };
@@ -79,8 +80,8 @@
       };
       window.__vectorize = (url, opts) => imageToCenterlineSvg(url, opts);
 
-      function readJob(): { source: string } | null {
-        if (window.__job?.source) return { source: window.__job.source };
+      function readJob(): { source: string; args?: Record<string, unknown> } | null {
+        if (window.__job?.source) return { source: window.__job.source, args: window.__job.args };
         // Fallback for local browser testing: /render/#source=<base64>
         const hash = location.hash.startsWith("#") ? location.hash.slice(1) : "";
         if (!hash) return null;
@@ -112,7 +113,7 @@
         }
         try {
           const view = await boot(canvas);
-          view.load(job.source);
+          view.load(job.source, job.args);
           window.__viewer = {
             seek: (t) => view.seek(t),
             durationSeconds: view.durationSeconds,
@@ -125,7 +126,10 @@
           view.seek(0);
           window.__viewerReady = true;
         } catch (e: any) {
-          fail(e?.message ?? String(e));
+          // A CmotionError carries the interpreter's diagnostics; pass
+          // the first error's code (PAR100, EVL005, …) to the driver.
+          const code = e?.diagnostics?.find((d: any) => d.severity === "error")?.code;
+          fail(e?.message ?? String(e), code);
         }
       })();
     </script>

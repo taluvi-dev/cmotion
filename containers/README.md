@@ -146,3 +146,13 @@ Worker can surface the diagnostic to the client.
   → extruded mesh, async-cached) and a render-driver prewarm that waits for
   deferred traces before screenshotting, so vectorize() scenes render via the
   API. Bundles the hand-drawn example image. Pins 0.0.13.
+
+- `0.0.14/` — text and props. Adds `text.block(...)` (kerning, `\n` line
+  breaks, `line_height`, `align`, `width` wrapping, `fill`, flat or
+  extruded), `font("url")` for `text.block` / `text.glyph`, the asset
+  parameter types (`Image`, `Video`, `Audio`, `Font`) and `@ui(...)`
+  parameter hints, and a viewer `load(source, args)` that binds scene
+  parameters through the WASM's `parse_eval_with`. Existing sources
+  render pixel-identically to 0.0.13 except `vectorize()` scenes, which
+  pick up the endpoint-snapping fix (5e396b8) that landed after 0.0.13
+  was frozen. Not yet pushed to the registry or set as the API's image.

@@ -144,9 +144,32 @@ pub const PropKind = union(enum) {
     boolean,
     string,
     color,
+    /// A file the host resolved: the argument is its URL, and the value
+    /// is the matching constructor (`image("…")`, `font("…")`, …), so a
+    /// parameter can stand wherever the call would.
+    asset: AssetKind,
     /// No host value maps onto this type yet (records, tuples,
     /// functions, `Animation<T>`, unknown names).
     unsupported,
+};
+
+/// Asset parameter types. cmotion never fetches by asset id: the host
+/// resolves its own asset to a URL and passes that.
+pub const AssetKind = enum {
+    image,
+    video,
+    audio,
+    font,
+
+    /// The parameter type that declares it (`Image`, …).
+    pub fn typeName(self: AssetKind) []const u8 {
+        return switch (self) {
+            .image => "Image",
+            .video => "Video",
+            .audio => "Audio",
+            .font => "Font",
+        };
+    }
 };
 
 pub fn propKind(t: ast.Type) PropKind {
@@ -170,6 +193,10 @@ pub fn propKind(t: ast.Type) PropKind {
     if (eq(u8, n, "Bool")) return .boolean;
     if (eq(u8, n, "String")) return .string;
     if (eq(u8, n, "Color")) return .color;
+    inline for (std.meta.fields(AssetKind)) |f| {
+        const k: AssetKind = @enumFromInt(f.value);
+        if (eq(u8, n, k.typeName())) return .{ .asset = k };
+    }
     return .unsupported;
 }
 
@@ -180,6 +207,7 @@ fn propKindName(k: PropKind) ?[]const u8 {
         .boolean => "bool",
         .string => "string",
         .color => "color",
+        .asset => "asset",
         .unsupported => null,
     };
 }
@@ -214,7 +242,9 @@ fn spanText(source: []const u8, s: ast.Span) []const u8 {
 ///
 /// The scene body does not run. `prop` is the host value kind that sets
 /// the parameter (null: props cannot set it yet), `unit` the unit that
-/// value is in. `doc` is the `//` comment block directly above the
+/// value is in. For `prop: "asset"`, `asset` names the kind (`image`,
+/// `video`, `audio`, `font`) and `default.url` is the URL a default
+/// `image("…")` names. `doc` is the `//` comment block directly above the
 /// parameter. `ok` is false when the source has errors; `params` is then
 /// whatever could still be read (empty after a syntax error).
 pub fn writeSceneParams(
@@ -247,6 +277,11 @@ pub fn writeSceneParams(
             try diag.writeJsonString(w, spanText(source, typeSpan(p.type)));
             try w.writeAll(",\"prop\":");
             if (propKindName(kind)) |k| try diag.writeJsonString(w, k) else try w.writeAll("null");
+            try w.writeAll(",\"asset\":");
+            switch (kind) {
+                .asset => |k| try diag.writeJsonString(w, @tagName(k)),
+                else => try w.writeAll("null"),
+            }
             try w.writeAll(",\"unit\":");
             switch (kind) {
                 .number => |u| if (u) |unit| try diag.writeJsonString(w, @tagName(unit)) else try w.writeAll("null"),
@@ -260,8 +295,14 @@ pub fn writeSceneParams(
                 try diag.writeJsonString(w, spanText(source, d.span()));
                 try w.writeAll(",\"value\":");
                 if (defaults[i]) |v| try v.writeJson(w) else try w.writeAll("null");
+                if (kind == .asset) {
+                    try w.writeAll(",\"url\":");
+                    if (defaultUrl(kind.asset, d.*)) |url| try diag.writeJsonString(w, url) else try w.writeAll("null");
+                }
                 try w.writeAll("}");
             } else try w.writeAll("null");
+            try w.writeAll(",\"ui\":");
+            try writeUi(w, p, kind);
             try w.writeAll(",\"doc\":");
             const lower_bound = if (i == 0) s.name.span.end else s.params[i - 1].span.end;
             if (try docComment(arena, source, analysis.comments, lower_bound, p.span.start)) |doc|
@@ -273,6 +314,120 @@ pub fn writeSceneParams(
     }
     try w.writeAll("]");
     try diag.writeJsonFooter(w);
+}
+
+//
+// `@ui(...)` hints
+//
+
+/// The `@ui` keys a host reads, and the kind of literal each takes.
+pub const ui_keys = [_]struct { name: []const u8, number: bool }{
+    .{ .name = "min", .number = true },
+    .{ .name = "max", .number = true },
+    .{ .name = "step", .number = true },
+    .{ .name = "label", .number = false },
+};
+
+/// Write the parameter's `@ui` hints as a plain JSON object, or `null`
+/// without one. Numbers are converted into the parameter's prop unit
+/// (`@ui(max: 500ms)` on a Duration is `0.5`), so a host can compare
+/// them with the values it passes. Keys or values `cmo check` warns
+/// about (NAM008, TYP003) are left out.
+fn writeUi(w: *std.Io.Writer, p: ast.Param, kind: PropKind) !void {
+    const ann = for (p.annotations) |a| {
+        if (std.mem.eql(u8, a.name.name, "ui")) break a;
+    } else {
+        try w.writeAll("null");
+        return;
+    };
+    const prop_unit: ?ast.Unit = switch (kind) {
+        .number => |u| u,
+        else => null,
+    };
+    try w.writeAll("{");
+    var first = true;
+    for (ann.args) |arg| {
+        const key = (arg.name orelse continue).name;
+        const spec = for (ui_keys) |k| {
+            if (std.mem.eql(u8, k.name, key)) break k;
+        } else continue;
+        if (spec.number) {
+            const n = literalNumber(arg.value.*) orelse continue;
+            const v = toUnit(n, prop_unit) orelse continue;
+            if (!first) try w.writeAll(",");
+            first = false;
+            try diag.writeJsonString(w, key);
+            try w.print(":{d}", .{v});
+        } else {
+            const text = literalString(arg.value.*) orelse continue;
+            if (!first) try w.writeAll(",");
+            first = false;
+            try diag.writeJsonString(w, key);
+            try w.writeAll(":");
+            try diag.writeJsonString(w, text);
+        }
+    }
+    try w.writeAll("}");
+}
+
+/// A number literal, optionally negated.
+pub fn literalNumber(e: ast.Expr) ?value.Number {
+    return switch (e) {
+        .literal => |l| switch (l) {
+            .number => |n| eval_mod.parseNumber(n),
+            else => null,
+        },
+        .unary => |u| if (u.op == .neg) blk: {
+            const n = literalNumber(u.operand.*) orelse break :blk null;
+            break :blk .{ .value = -n.value, .unit = n.unit };
+        } else null,
+        .paren => |p| literalNumber(p.inner.*),
+        else => null,
+    };
+}
+
+/// The text of a string literal, without its quotes.
+pub fn literalString(e: ast.Expr) ?[]const u8 {
+    return switch (e) {
+        .literal => |l| switch (l) {
+            .string => |s| if (s.raw.len >= 2) s.raw[1 .. s.raw.len - 1] else s.raw,
+            else => null,
+        },
+        else => null,
+    };
+}
+
+/// `n` in `target` (the prop unit), or null when the units belong to
+/// different families. A unitless number is taken as already in the
+/// prop unit.
+pub fn toUnit(n: value.Number, target: ?ast.Unit) ?f64 {
+    const from = n.unit orelse return n.value;
+    const to = target orelse return null;
+    const f = unitFactor(from) orelse return null;
+    const t = unitFactor(to) orelse return null;
+    if (f.family != t.family) return null;
+    return n.value * f.scale / t.scale;
+}
+
+const UnitFamily = enum { time, angle, frequency, length, percent, tempo, bars, beats };
+
+fn unitFactor(u: ast.Unit) ?struct { family: UnitFamily, scale: f64 } {
+    return switch (u) {
+        .s => .{ .family = .time, .scale = 1 },
+        .ms => .{ .family = .time, .scale = 1e-3 },
+        .us => .{ .family = .time, .scale = 1e-6 },
+        .ns => .{ .family = .time, .scale = 1e-9 },
+        .deg => .{ .family = .angle, .scale = 1 },
+        .rad => .{ .family = .angle, .scale = 180.0 / std.math.pi },
+        .turn => .{ .family = .angle, .scale = 360 },
+        .hz => .{ .family = .frequency, .scale = 1 },
+        .khz => .{ .family = .frequency, .scale = 1000 },
+        .px => .{ .family = .length, .scale = 1 },
+        .percent => .{ .family = .percent, .scale = 1 },
+        .bpm => .{ .family = .tempo, .scale = 1 },
+        .bars => .{ .family = .bars, .scale = 1 },
+        .beats => .{ .family = .beats, .scale = 1 },
+    };
 }
 
 fn collectComments(arena: std.mem.Allocator, root: ts.Node) ![]const Comment {
@@ -471,6 +626,7 @@ fn expectedText(kind: PropKind, type_text: []const u8, arena: std.mem.Allocator)
         .boolean => "Bool as true or false",
         .string => "String as a string",
         .color => "Color as a \"#rrggbb\" string",
+        .asset => try std.fmt.allocPrint(arena, "{s} as a URL string", .{type_text}),
         .unsupported => type_text,
     };
 }
@@ -513,8 +669,34 @@ fn argValue(arena: std.mem.Allocator, param: ast.Param, j: std.json.Value) !?Val
             .string => |s| if (hexDigits(s)) |digits| .{ .color = .{ .hex = .{ .digits = try arena.dupe(u8, digits) } } } else null,
             else => null,
         },
+        .asset => |k| switch (j) {
+            .string => |s| if (s.len == 0) null else try assetValue(arena, k, s),
+            else => null,
+        },
         .unsupported => null,
     };
+}
+
+/// The constructor value an asset argument stands for: `image("url")`.
+fn assetValue(arena: std.mem.Allocator, kind: AssetKind, url: []const u8) !Value {
+    const fields = try arena.alloc(value.Field, 1);
+    fields[0] = .{ .name = "", .value = .{ .string = try quote(arena, url) } };
+    return .{ .constructed = .{ .name = @tagName(kind), .fields = fields } };
+}
+
+/// The URL in an asset default written as the constructor call with a
+/// string literal (`image("/logo.png")`), else null.
+fn defaultUrl(kind: AssetKind, e: ast.Expr) ?[]const u8 {
+    const call = switch (e) {
+        .call => |c| c,
+        else => return null,
+    };
+    const callee = switch (call.callee.*) {
+        .ident => |id| id.name,
+        else => return null,
+    };
+    if (!std.mem.eql(u8, callee, @tagName(kind)) or call.args.len == 0) return null;
+    return literalString(call.args[0].value.*);
 }
 
 /// `Value.string` is the raw quoted source slice, so a host string is
@@ -716,4 +898,54 @@ test "host: the entry scene is sampled even after a top-level let" {
     defer arena.deinit();
     const built = try build(arena.allocator(), "let n = 1;\nscene s(x: Number = 2) -> Frame { x }", "<test>", "{\"x\":5}");
     try testing.expectEqual(@as(f64, 5), built.value.?.number.value);
+}
+
+test "host: @ui hints come out in the parameter's unit, with the doc above them" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const out = try paramsJson(arena.allocator(),
+        \\scene s(
+        \\  // Fade length.
+        \\  @ui(min: 0, max: 500ms, step: 0.05, label: "Fade", bogus: 1)
+        \\  fade: Duration = 0.2s,
+        \\  plain: Number = 1,
+        \\) -> Frame { fade }
+    );
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), out, .{});
+    const params = parsed.object.get("params").?.array.items;
+    const ui = params[0].object.get("ui").?.object;
+    try testing.expectEqual(@as(f64, 0.5), ui.get("max").?.float);
+    try testing.expectEqualStrings("Fade", ui.get("label").?.string);
+    try testing.expect(ui.get("bogus") == null);
+    try testing.expectEqualStrings("Fade length.", params[0].object.get("doc").?.string);
+    try testing.expect(params[1].object.get("ui").? == .null);
+    // The unknown key is a warning, not an error.
+    try testing.expect(parsed.object.get("ok").?.bool);
+}
+
+test "host: asset parameters take a URL and stand for their constructor" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src =
+        \\use std.shapes.*;
+        \\scene card(logo: Image = image("/logo.png"), face: Font = font("/DMSans-Bold.ttf")) -> Frame {
+        \\  rect(width: 10px, height: 10px, fill: logo)
+        \\}
+    ;
+    const out = try paramsJson(a, src);
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, out, .{});
+    const params = parsed.object.get("params").?.array.items;
+    try testing.expectEqualStrings("asset", params[0].object.get("prop").?.string);
+    try testing.expectEqualStrings("image", params[0].object.get("asset").?.string);
+    try testing.expectEqualStrings("/logo.png", params[0].object.get("default").?.object.get("url").?.string);
+    try testing.expectEqualStrings("font", params[1].object.get("asset").?.string);
+
+    const built = try build(a, src, "<test>", "{\"logo\":\"https://cdn.example/a.png\"}");
+    var w = std.Io.Writer.Allocating.init(a);
+    try built.value.?.writeJson(&w.writer);
+    try testing.expect(std.mem.indexOf(u8, w.written(), "{\"kind\":\"constructed\",\"name\":\"image\",\"fields\":[{\"name\":\"\",\"value\":{\"kind\":\"string\",\"raw\":\"\\\"https://cdn.example/a.png\\\"\"}}]}") != null);
+
+    const bad = try build(a, src, "<test>", "{\"logo\":42}");
+    try testing.expectEqualStrings("EVL005", bad.diagnostics[0].code);
 }

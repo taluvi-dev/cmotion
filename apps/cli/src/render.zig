@@ -62,6 +62,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const value = @import("value.zig");
 const mesh_mod = @import("mesh.zig");
+const text_layout = @import("text_layout.zig");
 
 /// True for the native build only. The 3D rasteriser needs libm
 /// (sqrt, sin, cos, tan, …) which the freestanding WASM target
@@ -151,6 +152,8 @@ fn paintValue(v: value.Value, fb: *Framebuffer, off: Offset, style: Style) void 
                 paintTranslate(c, fb, off, style);
             } else if (std.mem.eql(u8, c.name, "text.glyph")) {
                 paintTextGlyph(c, fb, off, style);
+            } else if (std.mem.eql(u8, c.name, "text.block")) {
+                paintTextBlock(c, fb, off, style);
             } else if (has_3d and std.mem.eql(u8, c.name, "render3d")) {
                 paintRender3D(c, fb, off, style);
             } else if (isFlatFallback(c.name)) {
@@ -211,6 +214,77 @@ fn paintTextGlyph(c: value.Constructed, fb: *Framebuffer, off: Offset, style: St
         paintTextGlyphTTF(text, size_px, fb, off, rgba);
     } else {
         paintTextGlyphBlocks(text, size_px, fb, off, rgba);
+    }
+}
+
+/// `text.block(string, size?, line_height?, align?, width?, kerning?,
+/// fill?, font?)` read off its constructor. Shared by the flat painter
+/// and the extruder.
+const TextBlock = struct {
+    raw: []const u8 = "",
+    opts: text_layout.Options = .{},
+    fill: ?value.Value = null,
+};
+
+fn readTextBlock(c: value.Constructed) TextBlock {
+    var tb: TextBlock = .{};
+    for (c.fields) |f| {
+        if (f.name.len == 0) {
+            if (tb.raw.len == 0 and f.value == .string) tb.raw = f.value.string;
+        } else if (std.mem.eql(u8, f.name, "size")) {
+            if (numberAsPixels(f.value)) |s| tb.opts.size = @floatCast(s);
+        } else if (std.mem.eql(u8, f.name, "line_height")) {
+            if (numberAsPixels(f.value)) |s| tb.opts.line_height = @floatCast(s);
+        } else if (std.mem.eql(u8, f.name, "width")) {
+            if (numberAsPixels(f.value)) |s| tb.opts.width = @floatCast(s);
+        } else if (std.mem.eql(u8, f.name, "kerning")) {
+            if (f.value == .@"bool") tb.opts.kerning = f.value.@"bool";
+        } else if (std.mem.eql(u8, f.name, "align")) {
+            if (alignOf(f.value)) |a| tb.opts.@"align" = a;
+        } else if (std.mem.eql(u8, f.name, "fill")) {
+            tb.fill = f.value;
+        }
+        // `font:` selects a font in the web viewer; the native renderer
+        // ships one font (font.zig) and draws every block with it.
+    }
+    return tb;
+}
+
+/// `align: center` (a bare name) or `align: "center"`.
+fn alignOf(v: value.Value) ?text_layout.Align {
+    const name = switch (v) {
+        .string => |s| stripQuotes(s),
+        .constructed => |c| if (c.fields.len == 0) c.name else return null,
+        else => return null,
+    };
+    return std.meta.stringToEnum(text_layout.Align, name);
+}
+
+/// Lay out and paint a `text.block` centred on the canvas centre plus
+/// the outer offset. Native only (the TTF path); the WASM build has no
+/// font, and its value tree is drawn by the web viewer instead.
+fn paintTextBlock(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) void {
+    if (!has_ttf_font) return;
+    const tb = readTextBlock(c);
+    // Layout scratch: a fixed buffer, since painting has no allocator.
+    // A block too long for it is not drawn rather than drawn cut off.
+    var scratch: [128 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const a = fba.allocator();
+    const text = text_layout.unescape(a, tb.raw) catch return;
+    if (text.len == 0) return;
+    const l = text_layout.layout(a, text, tb.opts, font.layoutMetrics(tb.opts.size)) catch return;
+
+    const fill = tb.fill orelse style.fill;
+    const rgba: [4]u8 = if (fill) |fv| valueToRgba(fv) else .{ 255, 255, 255, 255 };
+    const x0 = @as(f64, @floatFromInt(fb.width)) / 2.0 + off.x - @as(f64, l.width) / 2.0;
+    const y0 = @as(f64, @floatFromInt(fb.height)) / 2.0 + off.y - @as(f64, l.height) / 2.0;
+    for (l.glyphs) |p| {
+        const g = font.rasterise(p.cp, tb.opts.size) orelse continue;
+        defer font.freeBitmap(g);
+        const gx = x0 + @as(f64, p.x) + @as(f64, @floatFromInt(g.x_offset));
+        const gy = y0 + @as(f64, p.y) + @as(f64, @floatFromInt(g.y_offset));
+        blitCoverage(fb, g.pixels, g.width, g.height, gx, gy, rgba);
     }
 }
 
@@ -829,6 +903,19 @@ fn meshFromShape(
         const text = stripQuotes(text_raw);
         if (text.len == 0) return null;
         return try mesh_mod.extrudeText(arena, text, size_px, depth, bevel, bevel_segments, curve_segments);
+    }
+    if (std.mem.eql(u8, c.name, "text.block")) {
+        const tb = readTextBlock(c);
+        var curve_segments: u32 = 32;
+        for (c.fields) |f| {
+            if (std.mem.eql(u8, f.name, "curve_segments")) {
+                if (numberAsF32(f.value)) |s| curve_segments = @intFromFloat(@max(2.0, s));
+            }
+        }
+        const text = try text_layout.unescape(arena, tb.raw);
+        if (text.len == 0) return null;
+        const l = try text_layout.layout(arena, text, tb.opts, font_mod.layoutMetrics(tb.opts.size));
+        return try mesh_mod.extrudeTextBlock(arena, l.glyphs, l.width, l.height, tb.opts.size, depth, bevel, bevel_segments, curve_segments);
     }
     return null;
 }
@@ -2049,4 +2136,27 @@ test "writePpm: header + payload byte count" {
     // Header form is fixed; payload is 4*4*3 = 48 bytes.
     try std.testing.expect(std.mem.startsWith(u8, out, "P6\n4 4\n255\n"));
     try std.testing.expectEqual(@as(usize, "P6\n4 4\n255\n".len + 48), out.len);
+}
+
+test "renderTree: text.block paints a laid-out, multi-line block" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const fields = try a.alloc(value.Field, 2);
+    fields[0] = .{ .name = "", .value = .{ .string = "\"AV\\nAV\"" } };
+    fields[1] = .{ .name = "size", .value = .{ .number = .{ .value = 40, .unit = .px } } };
+    const tree: value.Value = .{ .constructed = .{ .name = "text.block", .fields = fields } };
+
+    const fb = try renderTree(a, tree, 200, 200);
+    // Ink above and below the canvas centre: two lines, centred.
+    var top: usize = 0;
+    var bottom: usize = 0;
+    var i: usize = 3;
+    while (i < fb.pixels.len) : (i += 4) {
+        if (fb.pixels[i] == 0) continue;
+        if ((i / 4) / 200 < 100) top += 1 else bottom += 1;
+    }
+    try std.testing.expect(top > 50);
+    try std.testing.expect(bottom > 50);
 }

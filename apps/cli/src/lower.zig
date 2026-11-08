@@ -144,7 +144,27 @@ pub const Lowerer = struct {
             .name = self.identOf(ts.childByFieldName(node, "name") orelse return error.MissingRequiredField),
             .type = try self.lowerType(ts.childByFieldName(node, "type") orelse return error.MissingRequiredField),
             .default = if (ts.childByFieldName(node, "default")) |d| try self.lowerExprPtr(d) else null,
+            .annotations = try self.lowerAnnotations(node),
         };
+    }
+
+    // Walks the param's children for `annotation` nodes rather than
+    // using `childByFieldName`, which only returns the first of a
+    // repeated field.
+    fn lowerAnnotations(self: *Lowerer, param: ts.Node) LoweringError![]const ast.Annotation {
+        var out: std.ArrayListUnmanaged(ast.Annotation) = .{};
+        const n = ts.namedChildCount(param);
+        var i: u32 = 0;
+        while (i < n) : (i += 1) {
+            const c = ts.namedChild(param, i);
+            if (!std.mem.eql(u8, ts.kind(c), "annotation")) continue;
+            try out.append(self.arena, .{
+                .span = self.spanOf(c),
+                .name = self.identOf(ts.childByFieldName(c, "name") orelse return error.MissingRequiredField),
+                .args = if (ts.childByFieldName(c, "args")) |args| try self.lowerArgList(args) else &.{},
+            });
+        }
+        return out.toOwnedSlice(self.arena);
     }
 
     fn lowerBlock(self: *Lowerer, node: ts.Node) LoweringError!ast.Block {

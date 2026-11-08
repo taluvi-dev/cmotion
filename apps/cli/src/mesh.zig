@@ -907,6 +907,41 @@ pub fn extrudeText(
     };
 }
 
+/// Extrude a laid-out `text.block`: every placed glyph, moved so the
+/// layout box (y-down pixels from its top-left) is centred on the
+/// origin in the mesh's y-up space.
+pub fn extrudeTextBlock(
+    arena: std.mem.Allocator,
+    glyphs: []const @import("text_layout.zig").Placed,
+    box_w: f32,
+    box_h: f32,
+    size_px: f32,
+    depth: f32,
+    bevel: f32,
+    bevel_segments: u32,
+    curve_segments: u32,
+) !?Mesh {
+    var positions = std.array_list.Managed(Vec3).init(arena);
+    var normals = std.array_list.Managed(Vec3).init(arena);
+    var indices = std.array_list.Managed(u32).init(arena);
+
+    for (glyphs) |p| {
+        const g = (try extrudeGlyph(arena, p.cp, size_px, depth, bevel, bevel_segments, curve_segments)) orelse continue;
+        const base: u32 = @intCast(positions.items.len);
+        const dx = p.x - box_w / 2;
+        const dy = box_h / 2 - p.y;
+        for (g.positions) |v| try positions.append(.{ .x = v.x + dx, .y = v.y + dy, .z = v.z });
+        try normals.appendSlice(g.normals);
+        for (g.indices) |idx| try indices.append(idx + base);
+    }
+    if (positions.items.len == 0) return null;
+    return Mesh{
+        .positions = try positions.toOwnedSlice(),
+        .normals = try normals.toOwnedSlice(),
+        .indices = try indices.toOwnedSlice(),
+    };
+}
+
 /// Move every vertex of a contour along its angle bisector by
 /// `distance`. The bisector is computed from the two adjacent
 /// edges' outward normals (rotate edge -90°). The `ccw_outer`

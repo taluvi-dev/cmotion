@@ -10,7 +10,7 @@ The full type system specification is **still being written** — it lives as a 
 The spec covers:
 
 - **Unit types** — `Time`, `Length`, `Frequency`, `Angle`, `Tempo`, and how the lexer's units (`ms`, `px`, `hz`, `deg`, `bpm`, `bars`, `beats`, …) inhabit them.
-- **Asset types** — `Image`, `Audio`, `Font`, opaque to the program but loadable through the stdlib.
+- **Asset types** — `Image`, `Video`, `Audio`, `Font`, opaque to the program. As a scene parameter, an asset is a file the host resolves and passes as a URL; its value is the matching constructor (`image("…")`, `font("…")`). See [Runner 0.0.14 additions](/language/stdlib/#runner-0014-additions).
 - **2D types** — `Path`, `Layer`, `Frame`, and the rules for `compose [...]`.
 - **3D types** — `Mesh3d`, `Material`, `Light`, `Camera`, and the bridge from 3D back to a 2D `Layer` via `render3d(...)`.
 - **Color** — a single `Color` type inhabited by every `color_lit` form (`#hex`, `oklch(...)`, `oklab(...)`, `srgb(...)`). Color space is part of the value, not the type, so mixing colors across spaces is allowed and well-defined.

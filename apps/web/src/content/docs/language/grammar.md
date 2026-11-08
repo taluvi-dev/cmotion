@@ -63,9 +63,14 @@ export_decl    = "export" , ident ,
 
 param_list     = "(" , [ param , { "," , param } ] , ")" ;
 
-param          = ident ,
+param          = { annotation } ,
+                 ident ,
                  ":" , type ,
                  [ "=" , expr ] ;
+
+(* Host metadata, no effect on evaluation. The one annotation hosts
+   read is @ui(min:, max:, step:, label:) for a props panel. *)
+annotation     = "@" , ident , [ arg_list ] ;
 
 (* -------------------------------------------------- *)
 (* Blocks                                             *)

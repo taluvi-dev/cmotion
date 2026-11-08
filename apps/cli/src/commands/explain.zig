@@ -165,6 +165,23 @@ const entries = [_]Entry{
         ,
     },
     .{
+        .code = "NAM008",
+        .title = "Annotation or @ui key that nothing reads",
+        .body =
+        \\A parameter carries an `@name(...)` annotation, or an `@ui`
+        \\argument, that no host reads. Annotations are metadata for
+        \\hosts — `@ui` drives a props panel — and have no effect on
+        \\evaluation, so this is a warning: the source still renders.
+        \\
+        \\The one annotation is `@ui`, with named arguments:
+        \\
+        \\  @ui(min: 0, max: 10, step: 0.1, label: "Glow")
+        \\  glow: Number = 2,
+        \\
+        \\Repair: fix the typo, name the argument, or remove it.
+        ,
+    },
+    .{
         .code = "LWR000",
         .title = "Lowering failed on a clean CST",
         .body =
@@ -210,6 +227,21 @@ const entries = [_]Entry{
         \\annotation to match the value. Unit-category checks within the
         \\number family (e.g. `let x: Duration = 6deg`) belong to UNT*
         \\codes, not TYP002.
+        ,
+    },
+    .{
+        .code = "TYP003",
+        .title = "@ui value of the wrong kind",
+        .body =
+        \\An `@ui` hint has a value a host cannot use: `label` must be a
+        \\string literal, and `min`, `max` and `step` must be number
+        \\literals — plain, or with a unit from the parameter's family
+        \\(`@ui(max: 500ms)` on a `Duration` is fine, `@ui(max: 5px)` is
+        \\not). Hosts receive bounds converted into the parameter's unit
+        \\(seconds, degrees, pixels), so a bound in the wrong family has
+        \\no meaning. A warning: the hint is dropped, the source renders.
+        \\
+        \\Repair: write the value as a literal of the right kind.
         ,
     },
     .{
