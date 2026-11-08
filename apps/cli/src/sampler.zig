@@ -35,6 +35,13 @@
 //!     colours step from keyframe to keyframe.
 //!   - `spring(from:, to:, at:, stiffness:, damping:, mass:)`, `noise(seed,
 //!     period, amplitude?)` and `random(seed)` resolve to numbers.
+//!   - Time structure on any layer — `shift(by, layer)`, `loop(period,
+//!     layer)`, `freeze(at, layer)`, `during(from, to, layer, fade_in?,
+//!     fade_out?)`, `series([layers], [durations])` — resolve to the inner
+//!     layer sampled at its own local time. Called or chained
+//!     (`title.during(1s, 4s)`): the layer is the argument that is not a
+//!     number. A layer outside its window, or fading, comes out as
+//!     `opacity(k, layer)`, the one node renderers need to know.
 //!   - `wave(amplitude, period)` resolves to `amplitude · sin(2π·t /
 //!     period)` — continuous trig oscillation, not keyframes. The
 //!     amplitude's unit (deg, rad, px, …) carries through to the
@@ -127,6 +134,8 @@ fn sampleConstructed(
         if (tryEvalNoise(c, t)) |sampled| return sampled;
     } else if (std.mem.eql(u8, c.name, "random")) {
         if (tryEvalRandom(c)) |sampled| return sampled;
+    } else if (isTimeCombinator(c.name)) {
+        if (try tryEvalTimeCombinator(arena, c, t)) |sampled| return sampled;
     } else if (std.mem.eql(u8, c.name, "bounce")) {
         if (try tryEvalBounce(arena, c, t)) |sampled| return sampled;
     } else if (std.mem.eql(u8, c.name, "on_event")) {
@@ -164,6 +173,137 @@ fn tryEvalWave(c: value.Constructed, t: f64) ?Value {
     const phase = (2.0 * std.math.pi * t) / per_seconds;
     const result = amp.value * std.math.sin(phase);
     return .{ .number = .{ .value = result, .unit = amp.unit } };
+}
+
+fn isTimeCombinator(name: []const u8) bool {
+    const names = [_][]const u8{ "shift", "loop", "freeze", "during", "series" };
+    for (names) |n| if (std.mem.eql(u8, n, name)) return true;
+    return false;
+}
+
+/// The arguments of a combinator call: its layer (the positional
+/// argument that is not a plain number, or a `layer:` field), its
+/// positional numbers in order, and its named numbers.
+const CombinatorArgs = struct {
+    layer: ?Value = null,
+    nums: [3]?f64 = .{ null, null, null },
+    n_nums: usize = 0,
+
+    fn num(self: CombinatorArgs, i: usize) ?f64 {
+        return if (i < self.n_nums) self.nums[i] else null;
+    }
+};
+
+fn combinatorArgs(arena: std.mem.Allocator, c: value.Constructed, t: f64, named_order: []const []const u8) SampleError!CombinatorArgs {
+    var out: CombinatorArgs = .{};
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "layer") or std.mem.eql(u8, f.name, "layers")) {
+            out.layer = f.value;
+            continue;
+        }
+        // The layer is the positional argument that is not a plain
+        // number: last in the called form, first (the receiver) in the
+        // chained form `layer.during(1s, 3s)`.
+        if (f.name.len == 0 and f.value != .number) {
+            out.layer = f.value;
+            continue;
+        }
+        const sampled = try sampleAt(arena, f.value, t);
+        if (sampled != .number) continue;
+        const secs = numberToSeconds(sampled.number);
+        if (f.name.len == 0) {
+            if (out.n_nums < out.nums.len) {
+                out.nums[out.n_nums] = secs;
+                out.n_nums += 1;
+            }
+            continue;
+        }
+        for (named_order, 0..) |n, i| {
+            if (!std.mem.eql(u8, n, f.name)) continue;
+            while (out.n_nums <= i) : (out.n_nums += 1) out.nums[out.n_nums] = null;
+            out.nums[i] = secs;
+        }
+    }
+    return out;
+}
+
+fn namedSeconds(c: value.Constructed, name: []const u8) ?f64 {
+    for (c.fields) |f| if (std.mem.eql(u8, f.name, name) and f.value == .number) return numberToSeconds(f.value.number);
+    return null;
+}
+
+/// `opacity(k, layer)` with `k` clamped to 0..1.
+fn opacityNode(arena: std.mem.Allocator, k: f64, layer: Value) SampleError!Value {
+    const fields = try arena.alloc(value.Field, 2);
+    fields[0] = .{ .name = "", .value = .{ .number = .{ .value = std.math.clamp(k, 0, 1), .unit = null } } };
+    fields[1] = .{ .name = "", .value = layer };
+    return .{ .constructed = .{ .name = "opacity", .fields = fields } };
+}
+
+fn tryEvalTimeCombinator(arena: std.mem.Allocator, c: value.Constructed, t: f64) SampleError!?Value {
+    if (std.mem.eql(u8, c.name, "series")) return try tryEvalSeries(arena, c, t);
+    const order: []const []const u8 = if (std.mem.eql(u8, c.name, "shift"))
+        &.{"by"}
+    else if (std.mem.eql(u8, c.name, "loop"))
+        &.{"period"}
+    else if (std.mem.eql(u8, c.name, "freeze"))
+        &.{"at"}
+    else
+        &.{ "from", "to" };
+    const args = try combinatorArgs(arena, c, t, order);
+    const layer = args.layer orelse return null;
+
+    if (std.mem.eql(u8, c.name, "shift")) return try sampleAt(arena, layer, t - (args.num(0) orelse return null));
+    if (std.mem.eql(u8, c.name, "freeze")) return try sampleAt(arena, layer, args.num(0) orelse return null);
+    if (std.mem.eql(u8, c.name, "loop")) {
+        const p = args.num(0) orelse return null;
+        if (p <= 0) return null;
+        return try sampleAt(arena, layer, @mod(t, p));
+    }
+
+    // during(from, to, layer, fade_in?, fade_out?): the layer runs on its
+    // own clock from `from`; outside [from, to) it is hidden.
+    const from = args.num(0) orelse 0;
+    const to = args.num(1) orelse std.math.inf(f64);
+    const local = t - from;
+    const inner = try sampleAt(arena, layer, std.math.clamp(local, 0, @max(0, to - from)));
+    if (t < from or t >= to) return try opacityNode(arena, 0, inner);
+    var k: f64 = 1;
+    if (namedSeconds(c, "fade_in")) |d| if (d > 0) {
+        k = @min(k, local / d);
+    };
+    if (namedSeconds(c, "fade_out")) |d| if (d > 0) {
+        k = @min(k, (to - t) / d);
+    };
+    return if (k < 1) try opacityNode(arena, k, inner) else inner;
+}
+
+/// `series([a, b, c], [2s, 1s, 3s])`: each layer in turn, each on its
+/// own clock from 0; nothing after the last one ends (Remotion's
+/// `<Series>`).
+fn tryEvalSeries(arena: std.mem.Allocator, c: value.Constructed, t: f64) SampleError!?Value {
+    var layers: ?[]const Value = null;
+    var durs: ?[]const Value = null;
+    for (c.fields) |f| {
+        if (f.value != .array) continue;
+        if (std.mem.eql(u8, f.name, "layers") or (f.name.len == 0 and layers == null)) {
+            layers = f.value.array.elems;
+        } else if (std.mem.eql(u8, f.name, "durations") or f.name.len == 0) {
+            durs = f.value.array.elems;
+        }
+    }
+    const ls = layers orelse return null;
+    const ds = durs orelse return null;
+    if (ls.len == 0 or ls.len != ds.len) return null;
+    var start: f64 = 0;
+    for (ls, ds) |layer, d| {
+        if (d != .number) return null;
+        const len = numberToSeconds(d.number);
+        if (t < start + len) return try sampleAt(arena, layer, @max(0, t - start));
+        start += len;
+    }
+    const last = ls[ls.len - 1];
+    return try opacityNode(arena, 0, try sampleAt(arena, last, numberToSeconds(ds[ds.len - 1].number)));
 }
 
 /// `spring(from:, to:, at:, stiffness:, damping:, mass:)` → the value a
@@ -1072,4 +1212,43 @@ test "sampleAt: spring, noise and random resolve to numbers" {
     const r1 = try evalAndSample(a, "let x = random(\"a\");", 0);
     const r2 = try evalAndSample(a, "let x = random(\"a\");", 5);
     try std.testing.expectEqual(r1.number.value, r2.number.value);
+}
+
+test "sampleAt: during shows a layer on its own clock, hidden outside" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "let x = during(1s, 3s, animate { 0s => 0px, 1s => 100px }, fade_in: 0.5s);";
+    const before = try evalAndSample(a, src, 0.5);
+    try std.testing.expectEqualStrings("opacity", before.constructed.name);
+    try std.testing.expectEqual(@as(f64, 0), before.constructed.fields[0].value.number.value);
+    const fading = try evalAndSample(a, src, 1.25);
+    try std.testing.expectEqualStrings("opacity", fading.constructed.name);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), fading.constructed.fields[0].value.number.value, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 25), fading.constructed.fields[1].value.number.value, 1e-9);
+    const on = try evalAndSample(a, src, 2);
+    try std.testing.expectApproxEqAbs(@as(f64, 100), on.number.value, 1e-9);
+}
+
+test "sampleAt: shift, loop, freeze and the chained form" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const anim = "animate { 0s => 0px, 1s => 100px }";
+    const shift_src = try std.fmt.allocPrint(a, "let x = shift(2s, {s});", .{anim});
+    try std.testing.expectApproxEqAbs(@as(f64, 50), (try evalAndSample(a, shift_src, 2.5)).number.value, 1e-9);
+    const loop_src = try std.fmt.allocPrint(a, "let x = {s}.loop(0.5s);", .{anim});
+    try std.testing.expectApproxEqAbs(@as(f64, 25), (try evalAndSample(a, loop_src, 1.25)).number.value, 1e-9);
+    const freeze_src = try std.fmt.allocPrint(a, "let x = freeze(0.3s, {s});", .{anim});
+    try std.testing.expectApproxEqAbs(@as(f64, 30), (try evalAndSample(a, freeze_src, 9)).number.value, 1e-9);
+}
+
+test "sampleAt: series plays each layer in turn, then nothing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "let x = series([animate { 0s => 0px, 1s => 10px }, animate { 0s => 100px, 1s => 200px }], [1s, 2s]);";
+    try std.testing.expectApproxEqAbs(@as(f64, 5), (try evalAndSample(a, src, 0.5)).number.value, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 150), (try evalAndSample(a, src, 1.5)).number.value, 1e-9);
+    try std.testing.expectEqualStrings("opacity", (try evalAndSample(a, src, 3.5)).constructed.name);
 }

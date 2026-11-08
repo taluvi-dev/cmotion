@@ -447,6 +447,26 @@ function blockShapes(font: opentype.Font, text: string, o: BlockOptions): THREE.
   return sp.toShapes(false);
 }
 
+// opacity(k, layer): the sampler's output for a layer that is fading or
+// outside its `during` window (and the user-facing form). k = 0 builds
+// nothing; otherwise every material under the layer is faded by k.
+function buildOpacity(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
+  const args = positionalArgs(node);
+  const k = Math.max(0, Math.min(1, numberOf(args.find((a: JsonNode) => a?.kind === "number"), 1)));
+  if (k <= 0) return null;
+  const inner = buildLayer(args.find((a: JsonNode) => a?.kind === "constructed"), ctx);
+  if (!inner || k >= 1) return inner;
+  inner.traverse((o: any) => {
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    for (const m of mats) {
+      if (m.uniforms) continue; // raymarched shaders carry no opacity
+      m.transparent = true;
+      m.opacity = (m.opacity ?? 1) * k;
+    }
+  });
+  return inner;
+}
+
 // text.block(...) as a flat 2D layer: filled outlines, `fill:` colour
 // (white by default), centred like the native renderer paints it.
 function buildTextBlock(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
@@ -1566,6 +1586,8 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       return buildRect(node);
     case "text.block":
       return buildTextBlock(node, ctx);
+    case "opacity":
+      return buildOpacity(node, ctx);
     case "circle":
       return buildCircle(node);
     case "sphere":

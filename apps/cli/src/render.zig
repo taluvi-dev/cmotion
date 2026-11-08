@@ -154,6 +154,8 @@ fn paintValue(v: value.Value, fb: *Framebuffer, off: Offset, style: Style) void 
                 paintTextGlyph(c, fb, off, style);
             } else if (std.mem.eql(u8, c.name, "text.block")) {
                 paintTextBlock(c, fb, off, style);
+            } else if (std.mem.eql(u8, c.name, "opacity")) {
+                paintOpacity(c, fb, off, style);
             } else if (has_3d and std.mem.eql(u8, c.name, "render3d")) {
                 paintRender3D(c, fb, off, style);
             } else if (isFlatFallback(c.name)) {
@@ -214,6 +216,29 @@ fn paintTextGlyph(c: value.Constructed, fb: *Framebuffer, off: Offset, style: St
         paintTextGlyphTTF(text, size_px, fb, off, rgba);
     } else {
         paintTextGlyphBlocks(text, size_px, fb, off, rgba);
+    }
+}
+
+/// `opacity(k, layer)` — group opacity: the layer is painted at full
+/// strength over a snapshot of the frame, then the result is blended
+/// back with the snapshot by `k`, so overlapping parts of the layer do
+/// not show through each other (CSS `opacity`, not per-shape alpha).
+fn paintOpacity(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) void {
+    var k: f64 = 1;
+    var layer: ?value.Value = null;
+    for (c.fields) |f| {
+        if (f.name.len != 0) continue;
+        if (f.value == .number) k = std.math.clamp(f.value.number.value, 0, 1) else layer = f.value;
+    }
+    const inner = layer orelse return;
+    if (k <= 0) return;
+    if (k >= 1) return paintValue(inner, fb, off, style);
+    const before = std.heap.page_allocator.dupe(u8, fb.pixels) catch return paintValue(inner, fb, off, style);
+    defer std.heap.page_allocator.free(before);
+    paintValue(inner, fb, off, style);
+    for (fb.pixels, before) |*after, b| {
+        const mixed = @as(f64, @floatFromInt(b)) + (@as(f64, @floatFromInt(after.*)) - @as(f64, @floatFromInt(b))) * k;
+        after.* = @intFromFloat(@round(std.math.clamp(mixed, 0, 255)));
     }
 }
 
@@ -2159,4 +2184,27 @@ test "renderTree: text.block paints a laid-out, multi-line block" {
     }
     try std.testing.expect(top > 50);
     try std.testing.expect(bottom > 50);
+}
+
+test "renderTree: opacity(k, layer) blends the layer by k, 0 hides it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rect_fields = try a.alloc(value.Field, 3);
+    rect_fields[0] = .{ .name = "width", .value = .{ .number = .{ .value = 8, .unit = .px } } };
+    rect_fields[1] = .{ .name = "height", .value = .{ .number = .{ .value = 8, .unit = .px } } };
+    rect_fields[2] = .{ .name = "fill", .value = .{ .color = .{ .hex = .{ .digits = "ffffff" } } } };
+    const rect: value.Value = .{ .constructed = .{ .name = "rect", .fields = rect_fields } };
+    for ([_]f64{ 0, 0.5 }) |k| {
+        const fields = try a.alloc(value.Field, 2);
+        fields[0] = .{ .name = "", .value = .{ .number = .{ .value = k, .unit = null } } };
+        fields[1] = .{ .name = "", .value = rect };
+        const fb = try renderTree(a, .{ .constructed = .{ .name = "opacity", .fields = fields } }, 8, 8);
+        const centre = (4 * 8 + 4) * 4;
+        if (k == 0) {
+            try std.testing.expectEqual(@as(u8, 0), fb.pixels[centre + 3]);
+        } else {
+            try std.testing.expect(fb.pixels[centre] > 100 and fb.pixels[centre] < 160);
+        }
+    }
 }

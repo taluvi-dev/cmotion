@@ -160,6 +160,20 @@ new constructor, type or argument. (0.0.14 also freezes the
   `rotate(z: noise("wind", 1.5s, 4deg))`.
 - **`random(seed)`** — a number in [0, 1) that is the same for the same
   seed on every renderer: `random("star-7") * 360deg`.
+- **Time structure on any layer** — Remotion's `<Sequence>`, `<Series>`,
+  `<Loop>` and `<Freeze>`. Each runs the layer on its own clock, called
+  as a function or chained:
+  - `during(from, to, layer, fade_in?, fade_out?)` — shown from `from`
+    to `to`, its time starting at 0 at `from`;
+    `title.during(0.5s, 4s, fade_out: 0.4s)`;
+  - `shift(by, layer)` — starts `by` later;
+  - `loop(period, layer)` — repeats its first `period`;
+  - `freeze(at, layer)` — holds the frame at `at`;
+  - `series([a, b, c], [2s, 1s, 3s])` — each layer in turn, nothing
+    after the last.
+- **`opacity(k, layer)`** — fades any layer, as a group (overlapping
+  parts don't show through each other); `k` can be animated. A layer
+  outside its `during` window, or fading, renders through it.
 - **`@ui(min:, max:, step:, label:)`** on a scene parameter — hints for a
   host's props panel. No effect on evaluation. `cmo check` warns on an
   unknown annotation or key (`NAM008`) and on a value of the wrong kind
