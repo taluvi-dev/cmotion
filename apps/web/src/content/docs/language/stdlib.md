@@ -110,7 +110,12 @@ new constructor, type or argument. (0.0.14 also freezes the
   - `align: left | center | right` — each line in the box (default
     `left`); the box itself is centred like any layer and moved with
     `translate`;
-  - `kerning: false` — turn off the font's pair kerning (on by default).
+  - `kerning: false` — turn off the font's pair kerning (on by default);
+  - `fit: 900px` — the size at which the widest line is exactly that
+    wide (Remotion's `fitText`);
+  - `reveal: 0..1` with `by: char | word | line` — the text appears unit
+    by unit, each fading in, and with `rise: 40px` each rises into place
+    as it appears: `reveal: animate { 0s => 0, 1.5s => 1 }`.
 - **`font("/fonts/Inter-Bold.ttf")`** — a font file for `text.block` and
   `text.glyph`'s `font:` argument. The web viewer loads it (TTF, OTF or
   WOFF) and waits for it before a render or bake; the native renderer
@@ -171,6 +176,12 @@ new constructor, type or argument. (0.0.14 also freezes the
   - `freeze(at, layer)` — holds the frame at `at`;
   - `series([a, b, c], [2s, 1s, 3s])` — each layer in turn, nothing
     after the last.
+- **`transition(a, b, at:, duration:, kind:, easing:, distance:)`** —
+  Remotion's `TransitionSeries` inside one clip: `a` until `at`, then over
+  `duration` into `b`. `kind: fade` (default), `slide_left`,
+  `slide_right`, `slide_up`, `slide_down` (pushing by `distance`, default
+  1920px). `a` keeps the clip's time; `b` starts its own clock at `at`.
+  Between clips on a timeline, use the host's transitions.
 - **`opacity(k, layer)`** — fades any layer, as a group (overlapping
   parts don't show through each other); `k` can be animated. A layer
   outside its `during` window, or fading, renders through it.

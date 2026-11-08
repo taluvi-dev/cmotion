@@ -359,9 +359,20 @@ interface BlockOptions {
   align: "left" | "center" | "right";
   width: number | null;
   kerning: boolean;
+  // reveal 0..1 unit by unit (char / word / line), each unit rising
+  // `rise` px into place; `fit` sizes the widest line to that width.
+  reveal: number;
+  by: "char" | "word" | "line";
+  rise: number;
+  fit: number | null;
 }
 
-interface PlacedGlyph { glyph: opentype.Glyph; x: number; y: number }
+interface PlacedGlyph { glyph: opentype.Glyph; x: number; y: number; char: number; word: number; line: number }
+
+// text_layout.zig revealAmount / unitCount.
+function revealAmount(reveal: number, i: number, n: number): number {
+  return n === 0 ? 1 : Math.max(0, Math.min(1, reveal * n - i));
+}
 
 function unescapeText(raw: string): string {
   const inner = raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"') ? raw.slice(1, -1) : raw;
@@ -375,16 +386,28 @@ function blockOptions(node: JsonNode): BlockOptions {
   const alignName =
     f.align?.kind === "string" ? String(f.align.raw).replace(/^"|"$/g, "") :
     f.align?.kind === "constructed" ? f.align.name : "left";
+  const byName =
+    f.by?.kind === "string" ? String(f.by.raw).replace(/^"|"$/g, "") :
+    f.by?.kind === "constructed" ? f.by.name : "char";
   return {
     size: numberOf(f.size, 96),
     lineHeight: numberOf(f.line_height, 1.2),
     align: alignName === "center" || alignName === "right" ? alignName : "left",
     width: f.width?.kind === "number" ? f.width.value : null,
     kerning: f.kerning?.kind === "bool" ? f.kerning.value : true,
+    reveal: f.reveal?.kind === "number" ? Math.max(0, Math.min(1, f.reveal.value)) : 1,
+    by: byName === "word" || byName === "line" ? byName : "char",
+    rise: numberOf(f.rise, 0),
+    fit: f.fit?.kind === "number" ? f.fit.value : null,
   };
 }
 
-function layoutBlock(font: opentype.Font, text: string, o: BlockOptions) {
+function layoutBlock(font: opentype.Font, text: string, o0: BlockOptions) {
+  let o = o0;
+  if (o.fit !== null) {
+    const probe = layoutBlock(font, text, { ...o, fit: null, width: null });
+    if (probe.width > 0) o = { ...o, fit: null, size: (o.size * o0.fit!) / probe.width };
+  }
   const hhea = (font as any).tables.hhea;
   const scale = o.size / (hhea.ascender - hhea.descender);
   const ascent = hhea.ascender * scale;
@@ -419,11 +442,17 @@ function layoutBlock(font: opentype.Font, text: string, o: BlockOptions) {
   const boxW = o.width ?? Math.max(0, ...widths);
   const step = o.lineHeight * o.size;
   const placed: PlacedGlyph[] = [];
+  let charI = 0, wordI = 0, anyWord = false;
   lines.forEach((line, i) => {
     let x = o.align === "center" ? (boxW - widths[i]) / 2 : o.align === "right" ? boxW - widths[i] : 0;
     const y = ascent + i * step;
+    let inWord = false;
     line.forEach((g, k) => {
-      placed.push({ glyph: g, x, y });
+      const space = g.unicode === 32 || g.unicode === 9;
+      if (!space && !inWord) { if (anyWord) wordI++; anyWord = true; inWord = true; }
+      if (space) inWord = false;
+      placed.push({ glyph: g, x, y, char: charI, word: wordI, line: i });
+      if (!space) charI++;
       x += adv(g) + (k + 1 < line.length ? kern(g, line[k + 1]) : 0);
     });
   });
@@ -435,9 +464,13 @@ function layoutBlock(font: opentype.Font, text: string, o: BlockOptions) {
 // the origin. Same containment-based hole classification as
 // stringShapes.
 function blockShapes(font: opentype.Font, text: string, o: BlockOptions): THREE.Shape[] {
-  const l = layoutBlock(font, text, o);
+  return placedShapes(layoutBlock(font, text, o));
+}
+
+function placedShapes(l: ReturnType<typeof layoutBlock>, only?: (p: PlacedGlyph) => boolean): THREE.Shape[] {
   const sp = new THREE.ShapePath();
   for (const p of l.placed) {
+    if (only && !only(p)) continue;
     const path = p.glyph.getPath(p.x - l.width / 2, p.y - l.height / 2, l.emSize);
     for (const cmd of path.commands as any[]) {
       switch (cmd.type) {
@@ -548,13 +581,32 @@ function buildTextBlock(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   if (!font) return null;
   const raw = positionalArgs(node)[0];
   if (!raw || raw.kind !== "string") return null;
-  const shapes = blockShapes(font, unescapeText(String(raw.raw)), blockOptions(node));
-  if (shapes.length === 0) return null;
-  const geom = new THREE.ShapeGeometry(shapes, 16);
-  geom.scale(pxToWorld, pxToWorld, 1);
+  const o = blockOptions(node);
   const fill = namedFields(node).fill;
-  const mat = new THREE.MeshBasicMaterial({ color: fill ? toThreeColor(fill) : 0xffffff });
-  return new THREE.Mesh(geom, mat);
+  const color = fill ? toThreeColor(fill) : new THREE.Color(0xffffff);
+  const l = layoutBlock(font, unescapeText(String(raw.raw)), o);
+  const mesh = (shapes: THREE.Shape[], k: number, dyPx: number) => {
+    const geom = new THREE.ShapeGeometry(shapes, 16);
+    geom.scale(pxToWorld, pxToWorld, 1);
+    const m = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ color, transparent: k < 1, opacity: k }));
+    m.position.y = -dyPx * pxToWorld;
+    return m;
+  };
+  if (o.reveal >= 1) {
+    const shapes = placedShapes(l);
+    return shapes.length ? mesh(shapes, 1, 0) : null;
+  }
+  // Reveal: one mesh per unit, faded and risen by how far it has appeared.
+  const unit = (p: PlacedGlyph) => p[o.by];
+  const n = l.placed.reduce((m, p) => Math.max(m, unit(p) + 1), 0);
+  const group = new THREE.Group();
+  for (let i = 0; i < n; i++) {
+    const k = revealAmount(o.reveal, i, n);
+    if (k <= 0) continue;
+    const shapes = placedShapes(l, (p) => unit(p) === i);
+    if (shapes.length) group.add(mesh(shapes, k, o.rise * (1 - k)));
+  }
+  return group;
 }
 
 // Build extrude-ready THREE.Shapes for the whole string, laid out

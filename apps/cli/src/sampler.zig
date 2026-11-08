@@ -176,7 +176,7 @@ fn tryEvalWave(c: value.Constructed, t: f64) ?Value {
 }
 
 fn isTimeCombinator(name: []const u8) bool {
-    const names = [_][]const u8{ "shift", "loop", "freeze", "during", "series" };
+    const names = [_][]const u8{ "shift", "loop", "freeze", "during", "series", "transition" };
     for (names) |n| if (std.mem.eql(u8, n, name)) return true;
     return false;
 }
@@ -242,6 +242,7 @@ fn opacityNode(arena: std.mem.Allocator, k: f64, layer: Value) SampleError!Value
 
 fn tryEvalTimeCombinator(arena: std.mem.Allocator, c: value.Constructed, t: f64) SampleError!?Value {
     if (std.mem.eql(u8, c.name, "series")) return try tryEvalSeries(arena, c, t);
+    if (std.mem.eql(u8, c.name, "transition")) return try tryEvalTransition(arena, c, t);
     const order: []const []const u8 = if (std.mem.eql(u8, c.name, "shift"))
         &.{"by"}
     else if (std.mem.eql(u8, c.name, "loop"))
@@ -276,6 +277,70 @@ fn tryEvalTimeCombinator(arena: std.mem.Allocator, c: value.Constructed, t: f64)
         k = @min(k, (to - t) / d);
     };
     return if (k < 1) try opacityNode(arena, k, inner) else inner;
+}
+
+/// `transition(a, b, at:, duration:, kind:, easing:, distance:)` —
+/// Remotion's `TransitionSeries` inside one clip: `a` until `at`, then
+/// over `duration` from `a` to `b`, then `b`. `a` keeps its clip time;
+/// `b` starts its own clock at `at`. Kinds: `fade` (default), and
+/// `slide_left` / `slide_right` / `slide_up` / `slide_down`, which push
+/// `a` out and `b` in by `distance` (default 1920px). Built from
+/// `compose`, `opacity` and `translate`, which every renderer draws.
+fn tryEvalTransition(arena: std.mem.Allocator, c: value.Constructed, t: f64) SampleError!?Value {
+    var a: ?Value = null;
+    var b: ?Value = null;
+    var kind: []const u8 = "fade";
+    var ease: ?easing.Easing = null;
+    var distance: f64 = 1920;
+    for (c.fields) |f| {
+        if (f.name.len == 0 and f.value != .number) {
+            if (a == null) a = f.value else if (b == null) b = f.value;
+        } else if (std.mem.eql(u8, f.name, "kind")) {
+            if (f.value == .constructed and f.value.constructed.fields.len == 0) kind = f.value.constructed.name;
+        } else if (std.mem.eql(u8, f.name, "easing")) {
+            ease = easingOf(f.value);
+        } else if (std.mem.eql(u8, f.name, "distance") and f.value == .number) {
+            distance = f.value.number.value;
+        }
+    }
+    const from = a orelse return null;
+    const to = b orelse return null;
+    const at = namedSeconds(c, "at") orelse 0;
+    const dur = namedSeconds(c, "duration") orelse 0.5;
+    if (t < at) return try sampleAt(arena, from, t);
+    if (t >= at + dur) return try sampleAt(arena, to, t - at);
+    const lin = if (dur > 0) (t - at) / dur else 1;
+    const p = if (ease) |e| easing.apply(e, lin) else lin;
+    const out_layer = try sampleAt(arena, from, t);
+    const in_layer = try sampleAt(arena, to, t - at);
+    const pair = try arena.alloc(Value, 2);
+    if (std.mem.startsWith(u8, kind, "slide_")) {
+        // Direction b travels in; a leaves the same way.
+        const dir: [2]f64 = if (std.mem.eql(u8, kind, "slide_left"))
+            .{ -1, 0 }
+        else if (std.mem.eql(u8, kind, "slide_right"))
+            .{ 1, 0 }
+        else if (std.mem.eql(u8, kind, "slide_up"))
+            .{ 0, 1 }
+        else
+            .{ 0, -1 };
+        pair[0] = try translated(arena, out_layer, dir[0] * distance * p, dir[1] * distance * p);
+        pair[1] = try translated(arena, in_layer, -dir[0] * distance * (1 - p), -dir[1] * distance * (1 - p));
+    } else {
+        pair[0] = try opacityNode(arena, 1 - p, out_layer);
+        pair[1] = try opacityNode(arena, p, in_layer);
+    }
+    const fields = try arena.alloc(value.Field, 1);
+    fields[0] = .{ .name = "layers", .value = .{ .array = .{ .elems = pair } } };
+    return .{ .constructed = .{ .name = "compose", .fields = fields } };
+}
+
+fn translated(arena: std.mem.Allocator, layer: Value, x: f64, y: f64) SampleError!Value {
+    const fields = try arena.alloc(value.Field, 3);
+    fields[0] = .{ .name = "", .value = layer };
+    fields[1] = .{ .name = "x", .value = .{ .number = .{ .value = x, .unit = .px } } };
+    fields[2] = .{ .name = "y", .value = .{ .number = .{ .value = y, .unit = .px } } };
+    return .{ .constructed = .{ .name = "translate", .fields = fields } };
 }
 
 /// `series([a, b, c], [2s, 1s, 3s])`: each layer in turn, each on its
@@ -1251,4 +1316,22 @@ test "sampleAt: series plays each layer in turn, then nothing" {
     try std.testing.expectApproxEqAbs(@as(f64, 5), (try evalAndSample(a, src, 0.5)).number.value, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 150), (try evalAndSample(a, src, 1.5)).number.value, 1e-9);
     try std.testing.expectEqualStrings("opacity", (try evalAndSample(a, src, 3.5)).constructed.name);
+}
+
+test "sampleAt: transition fades or slides from one layer to the next" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "let x = transition(rect(width: 10px), circle(radius: 5px), at: 1s, duration: 1s);";
+    try std.testing.expectEqualStrings("rect", (try evalAndSample(a, src, 0.5)).constructed.name);
+    const mid = try evalAndSample(a, src, 1.5);
+    try std.testing.expectEqualStrings("compose", mid.constructed.name);
+    const pair = mid.constructed.fields[0].value.array.elems;
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), pair[0].constructed.fields[0].value.number.value, 1e-9);
+    try std.testing.expectEqualStrings("circle", (try evalAndSample(a, src, 2.5)).constructed.name);
+    const slide = "let x = transition(rect(width: 10px), circle(radius: 5px), at: 0s, duration: 1s, kind: slide_left, distance: 100px);";
+    const s_mid = try evalAndSample(a, slide, 0.25);
+    const in_layer = s_mid.constructed.fields[0].value.array.elems[1];
+    try std.testing.expectEqualStrings("translate", in_layer.constructed.name);
+    try std.testing.expectApproxEqAbs(@as(f64, 75), in_layer.constructed.fields[1].value.number.value, 1e-9);
 }

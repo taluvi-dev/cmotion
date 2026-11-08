@@ -44,7 +44,47 @@ pub const Placed = struct {
     cp: u32,
     x: f32,
     y: f32,
+    /// Index of the glyph's character (spaces skipped), word and line,
+    /// for reveals.
+    char: u32 = 0,
+    word: u32 = 0,
+    line: u32 = 0,
 };
+
+pub const RevealBy = enum { char, word, line };
+
+/// `reveal: 0..1` over `n` units: how far unit `i` has appeared, 0..1.
+/// Units appear one after another, each fading in over one unit's share
+/// of the reveal.
+pub fn revealAmount(reveal: f32, i: u32, n: u32) f32 {
+    if (n == 0) return 1;
+    return std.math.clamp(reveal * @as(f32, @floatFromInt(n)) - @as(f32, @floatFromInt(i)), 0, 1);
+}
+
+pub fn unitOf(p: Placed, by: RevealBy) u32 {
+    return switch (by) {
+        .char => p.char,
+        .word => p.word,
+        .line => p.line,
+    };
+}
+
+/// The number of reveal units in a layout.
+pub fn unitCount(l: Layout, by: RevealBy) u32 {
+    var n: u32 = 0;
+    for (l.glyphs) |p| n = @max(n, unitOf(p, by) + 1);
+    return n;
+}
+
+/// The size at which the widest line is exactly `fit` pixels wide
+/// (layout is linear in size, kerning included).
+pub fn fitSize(arena: std.mem.Allocator, text: []const u8, opts: Options, m_at: *const fn (f32) Metrics, fit: f32) !f32 {
+    var probe = opts;
+    probe.width = null;
+    const l = try layout(arena, text, probe, m_at(probe.size));
+    if (l.width <= 0) return opts.size;
+    return opts.size * fit / l.width;
+}
 
 pub const Layout = struct {
     glyphs: []const Placed,
@@ -149,7 +189,11 @@ pub fn layout(arena: std.mem.Allocator, text: []const u8, opts: Options, m: Metr
     const step = opts.line_height * opts.size;
 
     var placed: std.ArrayListUnmanaged(Placed) = .{};
+    var char_i: u32 = 0;
+    var word_i: u32 = 0;
+    var any_word = false;
     for (lines, 0..) |line, i| {
+        var in_word = false;
         var x: f32 = switch (opts.@"align") {
             .left => 0,
             .center => (box_w - widths[i]) / 2,
@@ -157,7 +201,15 @@ pub fn layout(arena: std.mem.Allocator, text: []const u8, opts: Options, m: Metr
         };
         const y = m.ascent + @as(f32, @floatFromInt(i)) * step;
         for (line, 0..) |cp, k| {
-            try placed.append(arena, .{ .cp = cp, .x = x, .y = y });
+            const space = cp == ' ' or cp == '\t';
+            if (!space and !in_word) {
+                if (any_word) word_i += 1;
+                any_word = true;
+                in_word = true;
+            }
+            if (space) in_word = false;
+            try placed.append(arena, .{ .cp = cp, .x = x, .y = y, .char = char_i, .word = word_i, .line = @intCast(i) });
+            if (!space) char_i += 1;
             x += m.advance(cp, opts.size);
             if (opts.kerning and k + 1 < line.len) x += m.kern(cp, line[k + 1], opts.size);
         }
@@ -237,4 +289,16 @@ test "text_layout: alignment places each line in the box" {
     try std.testing.expectEqual(@as(f32, 10), c.glyphs[4].x);
     const r = try layout(arena.allocator(), "abcd\nab", .{ .size = 10, .@"align" = .right, .kerning = false }, fake);
     try std.testing.expectEqual(@as(f32, 20), r.glyphs[4].x);
+}
+
+test "text_layout: reveal units count characters, words and lines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const l = try layout(arena.allocator(), "ab cd\nef", .{ .size = 10 }, fake);
+    try std.testing.expectEqual(@as(u32, 6), unitCount(l, .char));
+    try std.testing.expectEqual(@as(u32, 3), unitCount(l, .word));
+    try std.testing.expectEqual(@as(u32, 2), unitCount(l, .line));
+    // Half revealed by character: the first three are in, the fourth not yet.
+    try std.testing.expectEqual(@as(f32, 1), revealAmount(0.5, 2, 6));
+    try std.testing.expectEqual(@as(f32, 0), revealAmount(0.5, 3, 6));
 }

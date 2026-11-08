@@ -157,6 +157,7 @@ Worker can surface the diagnostic to the client.
   time structure (`during`, `shift`, `loop`, `freeze`, `series`) and
   group `opacity`, 2D shapes (`ellipse`, `polygon`, `star`, `pie`,
   rounded `rect`, flat `path`) with `stroke` and draw-on, all extrudable,
+  text reveal (`reveal`, `by`, `rise`) and `fit`, in-clip `transition`,
   and a viewer `load(source, args)` that binds scene
   parameters through the WASM's `parse_eval_with`. Existing sources
   render pixel-identically to 0.0.13 except `vectorize()` scenes, which

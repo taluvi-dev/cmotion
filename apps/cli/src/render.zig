@@ -439,6 +439,13 @@ const TextBlock = struct {
     raw: []const u8 = "",
     opts: text_layout.Options = .{},
     fill: ?value.Value = null,
+    /// `reveal: 0..1` — how much of the text has appeared, unit by unit.
+    reveal: f32 = 1,
+    by: text_layout.RevealBy = .char,
+    /// Each unit rises this far (px, y up) into place as it appears.
+    rise: f32 = 0,
+    /// Size the text so its widest line is this wide (px).
+    fit: ?f32 = null,
 };
 
 fn readTextBlock(c: value.Constructed) TextBlock {
@@ -458,6 +465,19 @@ fn readTextBlock(c: value.Constructed) TextBlock {
             if (alignOf(f.value)) |a| tb.opts.@"align" = a;
         } else if (std.mem.eql(u8, f.name, "fill")) {
             tb.fill = f.value;
+        } else if (std.mem.eql(u8, f.name, "reveal")) {
+            if (numberAsPixels(f.value)) |r| tb.reveal = @floatCast(std.math.clamp(r, 0, 1));
+        } else if (std.mem.eql(u8, f.name, "rise")) {
+            if (numberAsPixels(f.value)) |r| tb.rise = @floatCast(r);
+        } else if (std.mem.eql(u8, f.name, "fit")) {
+            if (numberAsPixels(f.value)) |r| tb.fit = @floatCast(r);
+        } else if (std.mem.eql(u8, f.name, "by")) {
+            const name = switch (f.value) {
+                .string => |sv| stripQuotes(sv),
+                .constructed => |cv| if (cv.fields.len == 0) cv.name else "",
+                else => "",
+            };
+            if (std.meta.stringToEnum(text_layout.RevealBy, name)) |b| tb.by = b;
         }
         // `font:` selects a font in the web viewer; the native renderer
         // ships one font (font.zig) and draws every block with it.
@@ -488,18 +508,25 @@ fn paintTextBlock(c: value.Constructed, fb: *Framebuffer, off: Offset, style: St
     const a = fba.allocator();
     const text = text_layout.unescape(a, tb.raw) catch return;
     if (text.len == 0) return;
-    const l = text_layout.layout(a, text, tb.opts, font.layoutMetrics(tb.opts.size)) catch return;
+    var opts = tb.opts;
+    if (tb.fit) |fw| opts.size = text_layout.fitSize(a, text, opts, font.layoutMetrics, fw) catch opts.size;
+    const l = text_layout.layout(a, text, opts, font.layoutMetrics(opts.size)) catch return;
+    const units = text_layout.unitCount(l, tb.by);
 
     const fill = tb.fill orelse style.fill;
     const rgba: [4]u8 = if (fill) |fv| valueToRgba(fv) else .{ 255, 255, 255, 255 };
     const x0 = @as(f64, @floatFromInt(fb.width)) / 2.0 + off.x - @as(f64, l.width) / 2.0;
     const y0 = @as(f64, @floatFromInt(fb.height)) / 2.0 + off.y - @as(f64, l.height) / 2.0;
     for (l.glyphs) |p| {
-        const g = font.rasterise(p.cp, tb.opts.size) orelse continue;
+        const shown = text_layout.revealAmount(tb.reveal, text_layout.unitOf(p, tb.by), units);
+        if (shown <= 0) continue;
+        const g = font.rasterise(p.cp, opts.size) orelse continue;
         defer font.freeBitmap(g);
         const gx = x0 + @as(f64, p.x) + @as(f64, @floatFromInt(g.x_offset));
-        const gy = y0 + @as(f64, p.y) + @as(f64, @floatFromInt(g.y_offset));
-        blitCoverage(fb, g.pixels, g.width, g.height, gx, gy, rgba);
+        const gy = y0 + @as(f64, p.y) + @as(f64, @floatFromInt(g.y_offset)) + @as(f64, tb.rise * (1 - shown));
+        var faded = rgba;
+        faded[3] = @intFromFloat(@round(@as(f32, @floatFromInt(rgba[3])) * shown));
+        blitCoverage(fb, g.pixels, g.width, g.height, gx, gy, faded);
     }
 }
 
