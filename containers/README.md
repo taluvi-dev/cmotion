@@ -151,7 +151,10 @@ Worker can surface the diagnostic to the client.
   breaks, `line_height`, `align`, `width` wrapping, `fill`, flat or
   extruded), `font("url")` for `text.block` / `text.glyph`, the asset
   parameter types (`Image`, `Video`, `Audio`, `Font`) and `@ui(...)`
-  parameter hints, and a viewer `load(source, args)` that binds scene
+  parameter hints, the animation core (all Penner easings, `bezier`,
+  `steps`, springs, per-keyframe `with <easing>`, `before`/`after`
+  extrapolation, OKLab colour keyframes by default, `noise`, `random`),
+  and a viewer `load(source, args)` that binds scene
   parameters through the WASM's `parse_eval_with`. Existing sources
   render pixel-identically to 0.0.13 except `vectorize()` scenes, which
   pick up the endpoint-snapping fix (5e396b8) that landed after 0.0.13

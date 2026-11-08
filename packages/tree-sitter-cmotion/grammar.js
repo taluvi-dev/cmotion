@@ -413,7 +413,9 @@ module.exports = grammar({
     //
     // Animation
     //
-    animate_expr: $ => seq(
+    // prec.right: in `0s => animate { … } with { … }` the `with` belongs
+    // to the inner animate (its options), not to the keyframe.
+    animate_expr: $ => prec.right(seq(
       'animate',
       '{',
       $.keyframe,
@@ -421,12 +423,16 @@ module.exports = grammar({
       optional(','),
       '}',
       optional(seq('with', field('opts', $.record_expr))),
-    ),
+    )),
 
+    // `2s => 100px with easing.out_back` eases the segment that
+    // arrives at this keyframe; without it the animate's `easing:`
+    // option applies.
     keyframe: $ => seq(
       field('at',    $._expr),
       '=>',
       field('value', $._expr),
+      optional(seq('with', field('easing', $._expr))),
     ),
 
     //

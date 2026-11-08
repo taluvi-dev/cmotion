@@ -442,6 +442,7 @@ pub const Lowerer = struct {
                 try keyframes.append(self.arena, .{
                     .at = try self.lowerExprPtr(ts.childByFieldName(c, "at") orelse return error.MissingRequiredField),
                     .value = try self.lowerExprPtr(ts.childByFieldName(c, "value") orelse return error.MissingRequiredField),
+                    .easing = if (ts.childByFieldName(c, "easing")) |e| try self.lowerExprPtr(e) else null,
                 });
             }
             const opts_node = ts.childByFieldName(node, "opts");

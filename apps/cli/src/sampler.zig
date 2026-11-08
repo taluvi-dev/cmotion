@@ -20,28 +20,31 @@
 //!   - `opts.repeat == Constructed("forever", [])` wraps `t` modulo
 //!     the keyframe span. Other `repeat:` values are silently
 //!     ignored for now (treated as "no repeat").
-//!   - `opts.easing == Constructed("easing.<name>", [])` applies the
-//!     named curve to the interpolation fraction. Supported names:
-//!     `linear`, `in_cubic`, `out_cubic`, `in_out_cubic`, `in_quad`,
-//!     `out_quad`, `in_out_quad`. Unknown names fall back to linear.
+//!   - Easing (`easing.zig`): `opts.easing` is the default curve of every
+//!     segment; a keyframe's own `with <easing>` overrides it for the
+//!     segment arriving at that keyframe. Curves: `easing.linear`,
+//!     `easing.<in|out|in_out>_<quad|cubic|quart|quint|sine|expo|circ|
+//!     back|elastic|bounce>`, `easing.bezier(x1, y1, x2, y2)`,
+//!     `easing.steps(n)`, `easing.spring(stiffness:, damping:, mass:)`.
+//!     Unknown names fall back to linear (`cmo check` warns, NAM009).
+//!   - `opts.before` / `opts.after`: `hold` (default), `extend` (carry
+//!     the end segment's slope on), and for `after` also `loop` and
+//!     `ping_pong`. `repeat: forever` is `after: loop`.
+//!   - `opts.blend: oklab` blends colour keyframes in OKLab (the
+//!     evaluator sets it by default from runner 0.0.14); without it
+//!     colours step from keyframe to keyframe.
+//!   - `spring(from:, to:, at:, stiffness:, damping:, mass:)`, `noise(seed,
+//!     period, amplitude?)` and `random(seed)` resolve to numbers.
 //!   - `wave(amplitude, period)` resolves to `amplitude · sin(2π·t /
 //!     period)` — continuous trig oscillation, not keyframes. The
 //!     amplitude's unit (deg, rad, px, …) carries through to the
 //!     output number.
-//!   - Non-number keyframe values (colors, records) use floor sampling
-//!     — the value of the keyframe at or before `t` is returned.
-//!     Linear blending of colors lands when we pin down a working
-//!     space.
-//!
-//! Out of scope (will surface as no-ops or pass-throughs):
-//!   - Spring / inertial animation.
-//!   - Color-space interpolation.
-//!   - `delay`, `direction`, multi-segment timelines.
-//!   - Cubic-bezier control points (`bezier(x1, y1, x2, y2)`); the
-//!     named curves cover the common cases.
+//!   - Other non-number keyframe values (records, strings) step: the
+//!     value of the keyframe at or before `t` is returned.
 
 const std = @import("std");
 const value = @import("value.zig");
+const easing = @import("easing.zig");
 const ast = @import("ast.zig");
 
 pub const SampleError = error{OutOfMemory};
@@ -118,6 +121,12 @@ fn sampleConstructed(
         if (try tryEvalAnimate(arena, c, t)) |sampled| return sampled;
     } else if (std.mem.eql(u8, c.name, "wave")) {
         if (tryEvalWave(c, t)) |sampled| return sampled;
+    } else if (std.mem.eql(u8, c.name, "spring")) {
+        if (tryEvalSpring(c, t)) |sampled| return sampled;
+    } else if (std.mem.eql(u8, c.name, "noise")) {
+        if (tryEvalNoise(c, t)) |sampled| return sampled;
+    } else if (std.mem.eql(u8, c.name, "random")) {
+        if (tryEvalRandom(c)) |sampled| return sampled;
     } else if (std.mem.eql(u8, c.name, "bounce")) {
         if (try tryEvalBounce(arena, c, t)) |sampled| return sampled;
     } else if (std.mem.eql(u8, c.name, "on_event")) {
@@ -157,6 +166,77 @@ fn tryEvalWave(c: value.Constructed, t: f64) ?Value {
     return .{ .number = .{ .value = result, .unit = amp.unit } };
 }
 
+/// `spring(from:, to:, at:, stiffness:, damping:, mass:)` → the value a
+/// damped spring has reached at `t`: `from` until `at` (default 0s),
+/// then on towards `to`, overshooting when under-damped. Closed form,
+/// so the same at any frame rate. Defaults (100, 10, 1) are Remotion's.
+fn tryEvalSpring(c: value.Constructed, t: f64) ?Value {
+    var from: ?value.Number = null;
+    var to: ?value.Number = null;
+    var at: f64 = 0;
+    for (c.fields) |f| {
+        if (f.value != .number) continue;
+        if (std.mem.eql(u8, f.name, "from")) from = f.value.number;
+        if (std.mem.eql(u8, f.name, "to")) to = f.value.number;
+        if (std.mem.eql(u8, f.name, "at")) at = numberToSeconds(f.value.number);
+    }
+    const a = from orelse value.Number{ .value = 0, .unit = if (to) |x| x.unit else null };
+    const b = to orelse value.Number{ .value = 1, .unit = a.unit };
+    const p = easing.spring(springConfig(c), t - at);
+    return .{ .number = .{ .value = a.value + p * (b.value - a.value), .unit = a.unit orelse b.unit } };
+}
+
+/// `noise(seed, period, amplitude?)` → smooth gradient noise over time:
+/// one random hill or valley per `period`, scaled to ±`amplitude`
+/// (unit carried, default 1). The seed is a string or a number.
+fn tryEvalNoise(c: value.Constructed, t: f64) ?Value {
+    var seed_buf: [64]u8 = undefined;
+    var seed: ?[]const u8 = null;
+    var period: ?f64 = null;
+    var amp: value.Number = .{ .value = 1, .unit = null };
+    var pos: usize = 0;
+    for (c.fields) |f| {
+        const slot: usize = if (f.name.len == 0) blk: {
+            pos += 1;
+            break :blk pos - 1;
+        } else if (std.mem.eql(u8, f.name, "seed")) 0 else if (std.mem.eql(u8, f.name, "period")) 1 else if (std.mem.eql(u8, f.name, "amplitude")) 2 else continue;
+        switch (slot) {
+            0 => seed = seedBytes(f.value, &seed_buf),
+            1 => if (f.value == .number) {
+                period = numberToSeconds(f.value.number);
+            },
+            2 => if (f.value == .number) {
+                amp = f.value.number;
+            },
+            else => {},
+        }
+    }
+    const p = period orelse return null;
+    if (p == 0) return null;
+    const n = easing.noise1(seed orelse "", t / p);
+    return .{ .number = .{ .value = n * amp.value, .unit = amp.unit } };
+}
+
+/// `random(seed)` → a number in [0, 1), the same on every renderer.
+fn tryEvalRandom(c: value.Constructed) ?Value {
+    var buf: [64]u8 = undefined;
+    for (c.fields) |f| {
+        if (f.name.len != 0 and !std.mem.eql(u8, f.name, "seed")) continue;
+        const seed = seedBytes(f.value, &buf) orelse return null;
+        return .{ .number = .{ .value = easing.random(seed), .unit = null } };
+    }
+    return null;
+}
+
+/// A seed's bytes: a string's text, or a number's decimal form.
+fn seedBytes(v: Value, buf: []u8) ?[]const u8 {
+    return switch (v) {
+        .string => |s| s,
+        .number => |n| std.fmt.bufPrint(buf, "{d}", .{n.value}) catch null,
+        else => null,
+    };
+}
+
 /// Resolve an `animate(...)` Constructed to its value at `t`, or return
 /// null if the shape doesn't look like a well-formed animation (the
 /// caller falls back to verbatim recursion in that case).
@@ -177,16 +257,19 @@ fn tryEvalAnimate(
     const kfs = keyframes_arr orelse return null;
     if (kfs.elems.len == 0) return null;
 
-    // Resolve keyframes — each one is a record `{at: number, value: ...}`.
+    // Resolve keyframes — each one is a record `{at, value, easing?}`.
     const times = try arena.alloc(f64, kfs.elems.len);
     const values = try arena.alloc(Value, kfs.elems.len);
+    const eases = try arena.alloc(?easing.Easing, kfs.elems.len);
     for (kfs.elems, 0..) |elem, i| {
         if (elem != .record) return null;
         var at_v: ?Value = null;
         var val_v: ?Value = null;
+        eases[i] = null;
         for (elem.record.fields) |f| {
             if (std.mem.eql(u8, f.name, "at")) at_v = f.value;
             if (std.mem.eql(u8, f.name, "value")) val_v = f.value;
+            if (std.mem.eql(u8, f.name, "easing")) eases[i] = easingOf(f.value);
         }
         const at = at_v orelse return null;
         if (at != .number) return null;
@@ -196,7 +279,7 @@ fn tryEvalAnimate(
         values[i] = try sampleAt(arena, val_v orelse return null, t);
     }
 
-    return interpolate(times, values, t, opts_rec);
+    return try interpolate(arena, times, values, eases, t, opts_rec);
 }
 
 /// `bounce(height: <px>, period: <s>, floor: <px>)` resolves to a record
@@ -352,83 +435,119 @@ fn tryEvalFieldOf(
     };
 }
 
-fn isForever(opts: value.Record) bool {
-    for (opts.fields) |f| {
-        if (!std.mem.eql(u8, f.name, "repeat")) continue;
-        return switch (f.value) {
-            .constructed => |c| std.mem.eql(u8, c.name, "forever") and c.fields.len == 0,
-            else => false,
-        };
-    }
-    return false;
-}
+const Extrapolate = enum { hold, extend, loop, ping_pong };
 
-/// Read the `easing:` slot of an animate's opts record and return the
-/// curve name (e.g. `"easing.out_cubic"`). Null if absent or wrong shape.
-fn easingName(opts: value.Record) ?[]const u8 {
-    for (opts.fields) |f| {
-        if (!std.mem.eql(u8, f.name, "easing")) continue;
-        return switch (f.value) {
-            .constructed => |c| c.name,
-            else => null,
-        };
-    }
+fn optField(opts: ?value.Record, name: []const u8) ?Value {
+    const o = opts orelse return null;
+    for (o.fields) |f| if (std.mem.eql(u8, f.name, name)) return f.value;
     return null;
 }
 
-/// Map a linear interpolation fraction [0, 1] through a named curve.
-/// Endpoints are preserved (curve(0) = 0, curve(1) = 1) for every
-/// supported name so loops and clamps stay seamless. Unknown names
-/// fall back to linear.
+/// A bare name option (`forever`, `oklab`, `loop`, …), or null.
+fn optName(opts: ?value.Record, name: []const u8) ?[]const u8 {
+    const v = optField(opts, name) orelse return null;
+    return switch (v) {
+        .constructed => |c| if (c.fields.len == 0) c.name else null,
+        else => null,
+    };
+}
+
+fn isForever(opts: value.Record) bool {
+    const n = optName(opts, "repeat") orelse return false;
+    return std.mem.eql(u8, n, "forever");
+}
+
+fn extrapolation(opts: ?value.Record, side: []const u8) Extrapolate {
+    if (std.mem.eql(u8, side, "after")) {
+        if (opts) |o| if (isForever(o)) return .loop;
+    }
+    const n = optName(opts, side) orelse return .hold;
+    return std.meta.stringToEnum(Extrapolate, n) orelse .hold;
+}
+
+/// An easing value (`easing.out_cubic`, `easing.bezier(...)`,
+/// `easing.steps(n)`, `easing.spring(...)`) as a curve, or null for
+/// anything else (the segment is then linear).
+pub fn easingOf(v: Value) ?easing.Easing {
+    const c = switch (v) {
+        .constructed => |c| c,
+        else => return null,
+    };
+    const prefix = "easing.";
+    if (!std.mem.startsWith(u8, c.name, prefix)) return null;
+    const name = c.name[prefix.len..];
+    if (std.mem.eql(u8, name, "bezier")) {
+        var p: [4]f64 = undefined;
+        var n: usize = 0;
+        for (c.fields) |f| {
+            if (f.name.len != 0 or f.value != .number or n == 4) continue;
+            p[n] = f.value.number.value;
+            n += 1;
+        }
+        return if (n == 4) .{ .bezier = p } else null;
+    }
+    if (std.mem.eql(u8, name, "steps")) {
+        for (c.fields) |f| if (f.value == .number and f.value.number.value >= 1)
+            return .{ .steps = @intFromFloat(@floor(f.value.number.value)) };
+        return null;
+    }
+    if (std.mem.eql(u8, name, "spring")) return .{ .spring = springConfig(c) };
+    if (c.fields.len != 0) return null;
+    return easing.named(name);
+}
+
+fn springConfig(c: value.Constructed) easing.Spring {
+    var cfg: easing.Spring = .{};
+    for (c.fields) |f| {
+        if (f.value != .number) continue;
+        const x = f.value.number.value;
+        if (std.mem.eql(u8, f.name, "stiffness")) cfg.stiffness = x;
+        if (std.mem.eql(u8, f.name, "damping")) cfg.damping = x;
+        if (std.mem.eql(u8, f.name, "mass")) cfg.mass = x;
+    }
+    return cfg;
+}
+
+/// Kept for the curve tests: a `"easing.<name>"` constructor name
+/// through its curve (linear when unknown).
 fn applyEasing(name: []const u8, frac: f64) f64 {
-    // Plain `linear` and the identity short-circuit avoid a pointless
-    // multiplication when the curve is the default.
-    if (std.mem.eql(u8, name, "easing.linear")) return frac;
-    if (std.mem.eql(u8, name, "easing.in_quad")) return frac * frac;
-    if (std.mem.eql(u8, name, "easing.out_quad")) {
-        const inv = 1.0 - frac;
-        return 1.0 - inv * inv;
-    }
-    if (std.mem.eql(u8, name, "easing.in_out_quad")) {
-        if (frac < 0.5) return 2.0 * frac * frac;
-        const inv = -2.0 * frac + 2.0;
-        return 1.0 - (inv * inv) / 2.0;
-    }
-    if (std.mem.eql(u8, name, "easing.in_cubic")) return frac * frac * frac;
-    if (std.mem.eql(u8, name, "easing.out_cubic")) {
-        const inv = 1.0 - frac;
-        return 1.0 - inv * inv * inv;
-    }
-    if (std.mem.eql(u8, name, "easing.in_out_cubic")) {
-        if (frac < 0.5) return 4.0 * frac * frac * frac;
-        const inv = -2.0 * frac + 2.0;
-        return 1.0 - (inv * inv * inv) / 2.0;
-    }
-    return frac;
+    const e = easingOf(.{ .constructed = .{ .name = name, .fields = &.{} } }) orelse return frac;
+    return easing.apply(e, frac);
 }
 
 fn interpolate(
+    arena: std.mem.Allocator,
     times: []const f64,
     values: []const Value,
+    eases: []const ?easing.Easing,
     t_in: f64,
     opts: ?value.Record,
-) Value {
+) SampleError!Value {
     if (times.len == 1) return values[0];
 
     const t_min = times[0];
     const t_max = times[times.len - 1];
+    const span = t_max - t_min;
     var t = t_in;
 
-    // Wrap when the animation loops. We wrap into the half-open span
-    // [t_min, t_max) so the loop endpoint connects cleanly to its start.
-    const repeat_forever = opts != null and isForever(opts.?);
-    if (repeat_forever and t_max > t_min) {
-        const span = t_max - t_min;
-        t = t_min + @mod(t_in - t_min, span);
-    }
-
-    if (t <= t_min) return values[0];
+    // Outside the keyframes: hold, carry the slope on (extend), wrap
+    // (loop, into the half-open span so the loop closes cleanly) or
+    // bounce back and forth (ping_pong).
+    if (t > t_max and span > 0) switch (extrapolation(opts, "after")) {
+        .hold => return values[values.len - 1],
+        .extend => return extendLinear(times, values, values.len - 2, t),
+        .loop => t = t_min + @mod(t_in - t_min, span),
+        .ping_pong => {
+            const k = @mod(t_in - t_min, 2 * span);
+            t = if (k <= span) t_min + k else t_max - (k - span);
+        },
+    };
+    if (t < t_min) switch (extrapolation(opts, "before")) {
+        .extend => return extendLinear(times, values, 0, t),
+        else => return values[0],
+    };
     if (t >= t_max) return values[values.len - 1];
+    if (t <= t_min) return values[0];
 
     // Find the bracketing pair. Linear scan is fine — animations have
     // a handful of keyframes, not thousands.
@@ -438,23 +557,116 @@ fn interpolate(
     const hi_t = times[i + 1];
     if (hi_t == lo_t) return values[i];
     const linear_frac = (t - lo_t) / (hi_t - lo_t);
-    const eased = if (opts) |o|
-        if (easingName(o)) |n| applyEasing(n, linear_frac) else linear_frac
-    else
-        linear_frac;
-    return interpolatePair(values[i], values[i + 1], eased);
+    const segment_ease = eases[i + 1] orelse if (optField(opts, "easing")) |e| easingOf(e) else null;
+    const eased = if (segment_ease) |e| easing.apply(e, linear_frac) else linear_frac;
+    const blend_colors = if (optName(opts, "blend")) |b| std.mem.eql(u8, b, "oklab") else false;
+    return try interpolatePair(arena, values[i], values[i + 1], eased, blend_colors);
 }
 
-fn interpolatePair(a: Value, b: Value, frac: f64) Value {
+/// The straight line through segment `i` (numbers only), continued to `t`.
+fn extendLinear(times: []const f64, values: []const Value, i: usize, t: f64) Value {
+    const a = values[i];
+    const b = values[i + 1];
+    if (a != .number or b != .number or times[i + 1] == times[i])
+        return if (t < times[0]) values[0] else values[values.len - 1];
+    const slope = (b.number.value - a.number.value) / (times[i + 1] - times[i]);
+    return .{ .number = .{ .value = a.number.value + slope * (t - times[i]), .unit = a.number.unit } };
+}
+
+fn interpolatePair(arena: std.mem.Allocator, a: Value, b: Value, frac: f64, blend_colors: bool) SampleError!Value {
     // Numbers blend linearly, preserving the first keyframe's unit.
-    // Anything else falls back to floor sampling for now.
     if (a == .number and b == .number) {
         return .{ .number = .{
             .value = a.number.value + frac * (b.number.value - a.number.value),
             .unit = a.number.unit,
         } };
     }
+    if (blend_colors and a == .color and b == .color) {
+        if (oklabOf(a.color)) |la| if (oklabOf(b.color)) |lb| {
+            return try oklchValue(arena, .{
+                la[0] + frac * (lb[0] - la[0]),
+                la[1] + frac * (lb[1] - la[1]),
+                la[2] + frac * (lb[2] - la[2]),
+            });
+        };
+    }
+    // Anything else steps; frac can pass 1 under `back` / `elastic`.
     return if (frac < 1.0) a else b;
+}
+
+/// A colour with plain-number channels as OKLab [L, a, b], or null
+/// when a channel is not a number yet.
+fn oklabOf(c: value.Color) ?[3]f64 {
+    return switch (c) {
+        .hex => |h| blk: {
+            const rgb = hexChannels(h.digits) orelse break :blk null;
+            break :blk linearSrgbToOklab(srgbDecode(rgb[0]), srgbDecode(rgb[1]), srgbDecode(rgb[2]));
+        },
+        .srgb => |v| blk: {
+            const r = num(v.r.*) orelse break :blk null;
+            const g = num(v.g.*) orelse break :blk null;
+            const b = num(v.b.*) orelse break :blk null;
+            break :blk linearSrgbToOklab(srgbDecode(r), srgbDecode(g), srgbDecode(b));
+        },
+        .oklab => |v| .{ num(v.l.*) orelse return null, num(v.a.*) orelse return null, num(v.b.*) orelse return null },
+        .oklch => |v| blk: {
+            const l = num(v.l.*) orelse break :blk null;
+            const ch = num(v.c.*) orelse break :blk null;
+            const h = (num(v.h.*) orelse break :blk null) * std.math.pi / 180.0;
+            break :blk .{ l, ch * @cos(h), ch * @sin(h) };
+        },
+    };
+}
+
+fn num(v: Value) ?f64 {
+    return if (v == .number) v.number.value else null;
+}
+
+/// `#rgb`, `#rrggbb` (alpha ignored) → channels in 0..1.
+fn hexChannels(d: []const u8) ?[3]f64 {
+    var out: [3]f64 = undefined;
+    switch (d.len) {
+        3, 4 => for (0..3) |i| {
+            const x = std.fmt.charToDigit(d[i], 16) catch return null;
+            out[i] = @as(f64, @floatFromInt(x * 17)) / 255.0;
+        },
+        6, 8 => for (0..3) |i| {
+            const x = std.fmt.parseInt(u8, d[i * 2 .. i * 2 + 2], 16) catch return null;
+            out[i] = @as(f64, @floatFromInt(x)) / 255.0;
+        },
+        else => return null,
+    }
+    return out;
+}
+
+fn srgbDecode(x: f64) f64 {
+    return if (x <= 0.04045) x / 12.92 else std.math.pow(f64, (x + 0.055) / 1.055, 2.4);
+}
+
+// Björn Ottosson's linear sRGB → OKLab (the inverse of render.zig's
+// oklabToRgba matrices).
+fn linearSrgbToOklab(r: f64, g: f64, b: f64) [3]f64 {
+    const l = std.math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    const m = std.math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    const s = std.math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    return .{
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    };
+}
+
+/// A blended colour, written as `oklch(L, C, h°)` — the form every
+/// renderer reads.
+fn oklchValue(arena: std.mem.Allocator, lab: [3]f64) SampleError!Value {
+    const ch = @sqrt(lab[1] * lab[1] + lab[2] * lab[2]);
+    var h = std.math.atan2(lab[2], lab[1]) * 180.0 / std.math.pi;
+    if (h < 0) h += 360;
+    const channels = try arena.alloc(Value, 3);
+    channels[0] = .{ .number = .{ .value = lab[0], .unit = null } };
+    channels[1] = .{ .number = .{ .value = ch, .unit = null } };
+    channels[2] = .{ .number = .{ .value = h, .unit = .deg } };
+    return .{ .color = .{ .oklch = .{ .l = &channels[0], .c = &channels[1], .h = &channels[2] } } };
 }
 
 fn numberToSeconds(n: value.Number) f64 {
@@ -633,7 +845,7 @@ test "sampleAt: out_cubic easing reaches the endpoint faster than linear" {
 fn buildAnimateWithEasing(
     arena: std.mem.Allocator,
     keyframes: []const struct { at: f64, value: f64 },
-    easing: []const u8,
+    easing_name: []const u8,
 ) !Value {
     const kfs = try arena.alloc(Value, keyframes.len);
     for (keyframes, 0..) |kf, i| {
@@ -645,7 +857,7 @@ fn buildAnimateWithEasing(
     const opts_fs = try arena.alloc(value.Field, 1);
     opts_fs[0] = .{
         .name = "easing",
-        .value = .{ .constructed = .{ .name = easing, .fields = &.{} } },
+        .value = .{ .constructed = .{ .name = easing_name, .fields = &.{} } },
     };
     const top_fs = try arena.alloc(value.Field, 2);
     top_fs[0] = .{ .name = "keyframes", .value = .{ .array = .{ .elems = kfs } } };
@@ -794,4 +1006,70 @@ test "sampleAt: on_event(bounce.impacts, …) peaks on impact then decays" {
     // One decay constant later — peak / e.
     const after_decay = try sampleAt(a, oe, 1.2);
     try std.testing.expectApproxEqAbs(@as(f64, 0.5 / std.math.e), after_decay.number.value, 1e-9);
+}
+
+fn evalAndSample(arena: std.mem.Allocator, source: []const u8, t: f64) !Value {
+    const ts = @import("tree_sitter.zig");
+    const lower = @import("lower.zig");
+    const eval = @import("eval.zig");
+    var parsed = try ts.parse(source);
+    defer parsed.deinit();
+    var lowerer = lower.Lowerer.init(arena, source);
+    const program = try lowerer.lowerProgram(parsed.root());
+    var ev = eval.Evaluator.init(arena, arena, source, "<test>");
+    const result = try ev.evalProgram(program);
+    return sampleAt(arena, result.bindings[0].value, t);
+}
+
+test "sampleAt: a keyframe's own easing overrides the animate's" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "let x = animate { 0s => 0px, 1s => 100px with easing.in_cubic, 2s => 200px } with { easing: easing.out_cubic };";
+    // First segment (into 1s) is in_cubic: lags at its midpoint.
+    try std.testing.expect((try evalAndSample(a, src, 0.5)).number.value < 20);
+    // Second segment falls back to out_cubic: leads at its midpoint.
+    try std.testing.expect((try evalAndSample(a, src, 1.5)).number.value > 180);
+}
+
+test "sampleAt: extend, loop and ping_pong past the last keyframe" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ext = "let x = animate { 0s => 0px, 1s => 10px } with { after: extend };";
+    try std.testing.expectApproxEqAbs(@as(f64, 30), (try evalAndSample(a, ext, 3)).number.value, 1e-9);
+    const loop = "let x = animate { 0s => 0px, 1s => 10px } with { after: loop };";
+    try std.testing.expectApproxEqAbs(@as(f64, 5), (try evalAndSample(a, loop, 2.5)).number.value, 1e-9);
+    const pp = "let x = animate { 0s => 0px, 1s => 10px } with { after: ping_pong };";
+    try std.testing.expectApproxEqAbs(@as(f64, 7.5), (try evalAndSample(a, pp, 1.25)).number.value, 1e-9);
+    const hold = "let x = animate { 0s => 0px, 1s => 10px };";
+    try std.testing.expectApproxEqAbs(@as(f64, 10), (try evalAndSample(a, hold, 3)).number.value, 1e-9);
+}
+
+test "sampleAt: colours blend from runner 0.0.14, and step before it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const new = "runner \"0.0.14\";\nlet c = animate { 0s => #000000, 1s => #ffffff };";
+    const mid = try evalAndSample(a, new, 0.5);
+    try std.testing.expect(mid.color == .oklch);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), mid.color.oklch.l.number.value, 1e-3);
+    const old = "runner \"0.0.13\";\nlet c = animate { 0s => #000000, 1s => #ffffff };";
+    const stepped = try evalAndSample(a, old, 0.5);
+    try std.testing.expectEqualStrings("000000", stepped.color.hex.digits);
+}
+
+test "sampleAt: spring, noise and random resolve to numbers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const spring_src = "let x = spring(from: 0px, to: 100px, at: 1s);";
+    try std.testing.expectEqual(@as(f64, 0), (try evalAndSample(a, spring_src, 0.5)).number.value);
+    try std.testing.expect((try evalAndSample(a, spring_src, 1.3)).number.value > 100); // overshoot
+    try std.testing.expectApproxEqAbs(@as(f64, 100), (try evalAndSample(a, spring_src, 4)).number.value, 0.2);
+    const n = try evalAndSample(a, "let x = noise(\"wind\", 2s, 30deg);", 0.7);
+    try std.testing.expect(n.number.unit.? == .deg and @abs(n.number.value) <= 30);
+    const r1 = try evalAndSample(a, "let x = random(\"a\");", 0);
+    const r2 = try evalAndSample(a, "let x = random(\"a\");", 5);
+    try std.testing.expectEqual(r1.number.value, r2.number.value);
 }

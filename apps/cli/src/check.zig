@@ -43,6 +43,7 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const diag = @import("diagnostics.zig");
 const host = @import("host.zig");
+const easing = @import("easing.zig");
 
 const SymbolKind = enum {
     import,
@@ -513,6 +514,47 @@ pub const Checker = struct {
         try self.checkBlock(d.body, &body_scope);
     }
 
+    /// NAM009 (warning): an easing the sampler does not know, which
+    /// would silently fall back to linear. Only literal `easing.<name>`
+    /// and `easing.<curve>(...)` forms are checked; an easing held in a
+    /// `let` is left to the full typechecker.
+    fn checkEasing(self: *Checker, e: ast.Expr) !void {
+        const Found = struct { name: []const u8, span: ast.Span, call: bool };
+        const found: Found = switch (e) {
+            .field_access => |f| switch (f.receiver.*) {
+                .ident => |id| if (std.mem.eql(u8, id.name, "easing"))
+                    .{ .name = f.name.name, .span = f.name.span, .call = false }
+                else
+                    return,
+                else => return,
+            },
+            .method_call => |m| switch (m.receiver.*) {
+                .ident => |id| if (std.mem.eql(u8, id.name, "easing"))
+                    .{ .name = m.name.name, .span = m.name.span, .call = true }
+                else
+                    return,
+                else => return,
+            },
+            else => return,
+        };
+        const known = if (found.call)
+            std.mem.eql(u8, found.name, "bezier") or std.mem.eql(u8, found.name, "steps") or std.mem.eql(u8, found.name, "spring")
+        else
+            easing.named(found.name) != null;
+        if (known) return;
+        const loc = found.span.location(self.source);
+        try self.diagnostics.append(self.allocator, .{
+            .severity = .warning,
+            .code = "NAM009",
+            .message = try std.fmt.allocPrint(self.allocator, "unknown easing 'easing.{s}' — it would run linear", .{found.name}),
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = found.span.end - found.span.start },
+            .expected = easing.names_help,
+            .help = "pick a curve from the list, e.g. easing.out_cubic",
+            .fix_safety = .@"local-edit",
+            .repair = .{ .id = "fix-easing-name", .summary = "Use an easing the sampler knows; see `cmo explain NAM009`." },
+        });
+    }
+
     fn checkHostAnnotations(self: *Checker, p: ast.Param) !void {
         for (p.annotations) |a| {
             if (!std.mem.eql(u8, a.name.name, "ui")) {
@@ -722,7 +764,14 @@ pub const Checker = struct {
                 for (a.keyframes) |kf| {
                     try self.checkExpr(kf.at.*, scope);
                     try self.checkExpr(kf.value.*, scope);
+                    if (kf.easing) |e| {
+                        try self.checkExpr(e.*, scope);
+                        try self.checkEasing(e.*);
+                    }
                 }
+                if (a.opts) |opts| for (opts) |o| {
+                    if (std.mem.eql(u8, o.name.name, "easing")) try self.checkEasing(o.value.*);
+                };
                 if (a.opts) |opts| for (opts) |o| try self.checkExpr(o.value.*, scope);
             },
             .compose => |c| for (c.layers) |layer| try self.checkExpr(layer, scope),
@@ -1082,4 +1131,16 @@ test "check: @ui values of the wrong kind warn with TYP003" {
     defer r.arena.deinit();
     try std.testing.expectEqual(@as(usize, 2), r.diagnostics.len);
     try std.testing.expect(hasCode(r.diagnostics, "TYP003"));
+}
+
+test "check: an unknown easing name warns with NAM009" {
+    var r = try checkSource(
+        \\use std.anim.*;
+        \\let x = animate { 0s => 0px, 1s => 10px with easing.out_wobble } with { easing: easing.out_back };
+        \\let y = animate { 0s => 0px, 1s => 10px } with { easing: easing.ease_out };
+        \\let z = animate { 0s => 0px, 1s => 10px } with { easing: easing.bezier(0.2, 0, 0, 1) };
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 2), r.diagnostics.len);
+    for (r.diagnostics) |d| try std.testing.expectEqualStrings("NAM009", d.code);
 }

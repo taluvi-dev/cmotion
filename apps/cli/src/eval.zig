@@ -32,6 +32,7 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const diag = @import("diagnostics.zig");
 const value = @import("value.zig");
+const runner = @import("runner.zig");
 
 pub const Value = value.Value;
 
@@ -109,6 +110,8 @@ pub const Evaluator = struct {
     /// default, and one with neither emits EVL004 — instead of only
     /// when every parameter has a default.
     entry_args: ?*const std.StringHashMapUnmanaged(Value) = null,
+    /// The source's `runner` pin, for defaults that depend on it.
+    runner_pin: ?ast.RunnerDecl = null,
 
     pub fn init(
         arena: std.mem.Allocator,
@@ -124,6 +127,7 @@ pub const Evaluator = struct {
     }
 
     pub fn evalProgram(self: *Evaluator, program: ast.Program) EvalError!Program {
+        self.runner_pin = program.runner;
         var top = Scope{ .parent = null };
         defer top.names.deinit(self.gpa);
 
@@ -460,17 +464,30 @@ pub const Evaluator = struct {
         // — symmetric with how the renderer will see other staged calls.
         const keyframe_elems = try self.arena.alloc(Value, a.keyframes.len);
         for (a.keyframes, 0..) |kf, i| {
-            const kf_fields = try self.arena.alloc(value.Field, 2);
+            const n: usize = if (kf.easing != null) 3 else 2;
+            const kf_fields = try self.arena.alloc(value.Field, n);
             kf_fields[0] = .{ .name = "at", .value = try self.evalExpr(kf.at.*, scope) };
             kf_fields[1] = .{ .name = "value", .value = try self.evalExpr(kf.value.*, scope) };
+            if (kf.easing) |e| kf_fields[2] = .{ .name = "easing", .value = try self.evalExpr(e.*, scope) };
             keyframe_elems[i] = .{ .record = .{ .fields = kf_fields } };
         }
-        const opts_value: Value = if (a.opts) |inits| blk: {
-            const fs = try self.arena.alloc(value.Field, inits.len);
+        // From runner 0.0.14 colour keyframes blend in OKLab unless the
+        // source says otherwise; older pins keep stepping. The default
+        // is written into the tree so the sampler needs no version.
+        const default_blend = runner.atLeast(self.runner_pin, .{ 0, 0, 14 });
+        var has_blend = false;
+        if (a.opts) |inits| for (inits) |ri| {
+            if (std.mem.eql(u8, ri.name.name, "blend")) has_blend = true;
+        };
+        const add_blend = default_blend and !has_blend;
+        const opts_value: Value = if (a.opts != null or add_blend) blk: {
+            const inits = a.opts orelse &.{};
+            const fs = try self.arena.alloc(value.Field, inits.len + @intFromBool(add_blend));
             for (inits, 0..) |ri, i| fs[i] = .{
                 .name = ri.name.name,
                 .value = try self.evalExpr(ri.value.*, scope),
             };
+            if (add_blend) fs[inits.len] = .{ .name = "blend", .value = .{ .constructed = .{ .name = "oklab", .fields = &.{} } } };
             break :blk .{ .record = .{ .fields = fs } };
         } else .nil;
         const fields = try self.arena.alloc(value.Field, 2);

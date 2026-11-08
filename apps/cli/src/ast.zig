@@ -256,6 +256,8 @@ pub const RecordInit = struct {
 pub const KeyFrame = struct {
     at: *const Expr,
     value: *const Expr,
+    /// `t => v with <easing>`: the curve of the segment arriving here.
+    easing: ?*const Expr = null,
 };
 
 pub const MatchArm = struct {

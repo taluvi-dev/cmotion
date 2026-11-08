@@ -231,9 +231,12 @@ animate_expr   = "animate" ,
                  "}" ,
                  [ "with" , record_expr ] ;
 
+(* `with` after a keyframe eases the segment arriving at it; in
+   `0s => animate { … } with { … }` the `with` is the inner animate's. *)
 keyframe       = expr ,
                  "=>" ,
-                 expr ;
+                 expr ,
+                 [ "with" , expr ] ;
 
 (* -------------------------------------------------- *)
 (* Composition                                        *)

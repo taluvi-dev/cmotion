@@ -182,6 +182,26 @@ const entries = [_]Entry{
         ,
     },
     .{
+        .code = "NAM009",
+        .title = "Unknown easing",
+        .body =
+        \\An `animate` names an easing the sampler does not know, so that
+        \\segment would run linear without any error. The curves are
+        \\`easing.linear`, and `easing.` + `in_`, `out_` or `in_out_` +
+        \\quad, cubic, quart, quint, sine, expo, circ, back, elastic or
+        \\bounce — e.g. `easing.out_back`, `easing.in_out_sine`. And three
+        \\with arguments:
+        \\
+        \\  easing.bezier(0.25, 0.1, 0.25, 1)          // CSS cubic-bezier
+        \\  easing.steps(4)                            // jump at the end of each step
+        \\  easing.spring(stiffness: 120, damping: 12) // spring over the segment
+        \\
+        \\The easing goes in `with { easing: … }` for every segment, or after a
+        \\keyframe for the segment arriving there: `2s => 100px with easing.out_back`.
+        \\A warning: the source still renders.
+        ,
+    },
+    .{
         .code = "LWR000",
         .title = "Lowering failed on a clean CST",
         .body =

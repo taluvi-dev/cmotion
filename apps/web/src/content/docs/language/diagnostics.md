@@ -255,6 +255,20 @@ scene s(@ui(maxx: 10) glow: Number = 2) -> Frame { … }   // NAM008: unknown @u
 
 ---
 
+### `NAM009` — Unknown easing
+
+*Warning.* An `animate` names an easing the sampler does not know
+(`easing.ease_out`, `easing.out_wobble`), so that segment would run
+linear without any error. The curves: `easing.linear`; `easing.` +
+`in_` / `out_` / `in_out_` + quad, cubic, quart, quint, sine, expo,
+circ, back, elastic, bounce; `easing.bezier(x1, y1, x2, y2)`,
+`easing.steps(n)`, `easing.spring(stiffness:, damping:, mass:)`.
+
+- **Repair:** `fix-easing-name`.
+- **Fix safety:** `local-edit`.
+
+---
+
 ## `TYP*` — Type checker
 
 ### `TYP002` — Type mismatch on an annotated value

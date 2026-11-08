@@ -3766,6 +3766,116 @@
           }
         ]
       },
+      "easing": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "animate_expr",
+            "named": true
+          },
+          {
+            "type": "array_expr",
+            "named": true
+          },
+          {
+            "type": "binary_expr_add",
+            "named": true
+          },
+          {
+            "type": "binary_expr_and",
+            "named": true
+          },
+          {
+            "type": "binary_expr_cmp",
+            "named": true
+          },
+          {
+            "type": "binary_expr_eq",
+            "named": true
+          },
+          {
+            "type": "binary_expr_mul",
+            "named": true
+          },
+          {
+            "type": "binary_expr_or",
+            "named": true
+          },
+          {
+            "type": "binary_expr_pow",
+            "named": true
+          },
+          {
+            "type": "block",
+            "named": true
+          },
+          {
+            "type": "bool_lit",
+            "named": true
+          },
+          {
+            "type": "call_expr",
+            "named": true
+          },
+          {
+            "type": "color_lit",
+            "named": true
+          },
+          {
+            "type": "compose_expr",
+            "named": true
+          },
+          {
+            "type": "field_access",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "if_expr",
+            "named": true
+          },
+          {
+            "type": "index_expr",
+            "named": true
+          },
+          {
+            "type": "lambda",
+            "named": true
+          },
+          {
+            "type": "match_expr",
+            "named": true
+          },
+          {
+            "type": "method_call",
+            "named": true
+          },
+          {
+            "type": "number_lit",
+            "named": true
+          },
+          {
+            "type": "paren_expr",
+            "named": true
+          },
+          {
+            "type": "record_expr",
+            "named": true
+          },
+          {
+            "type": "string_lit",
+            "named": true
+          },
+          {
+            "type": "unary_expr",
+            "named": true
+          }
+        ]
+      },
       "value": {
         "multiple": false,
         "required": true,

@@ -124,6 +124,42 @@ new constructor, type or argument. (0.0.14 also freezes the
   [host API](/impl/interpreter/#embedding-the-wasm-host-api)); cmotion
   never fetches by asset id. `Video` and `Audio` parameters declare the
   slot; the viewer does not draw video or play audio from them yet.
+- **Easing** — every segment of an `animate` can take a curve: the
+  `easing:` option sets the default, and `t => v with <easing>` sets the
+  curve of the segment arriving at that keyframe:
+
+  ```cm
+  let x = animate {
+    0s   => -400px,
+    0.6s => 0px    with easing.out_back,
+    2.4s => 0px,
+    3s   => 400px  with easing.in_cubic,
+  } with { easing: easing.in_out_sine };
+  ```
+
+  Curves: `easing.linear`, and `easing.` + `in_` / `out_` / `in_out_` +
+  `quad`, `cubic`, `quart`, `quint`, `sine`, `expo`, `circ`, `back`,
+  `elastic`, `bounce` (the standard Penner set, as in CSS and
+  Remotion's `Easing`). With arguments: `easing.bezier(x1, y1, x2, y2)`
+  (CSS `cubic-bezier`), `easing.steps(n)`, `easing.spring(stiffness:,
+  damping:, mass:)`. `cmo check` warns on an unknown name (`NAM009`),
+  which would otherwise run linear.
+- **Beyond the keyframes** — `with { before: hold | extend, after: hold
+  | extend | loop | ping_pong }`. `hold` is the default; `extend`
+  carries the end segment's slope on; `repeat: forever` is still
+  `after: loop`.
+- **Colour keyframes blend** in OKLab (`with { blend: oklab }`, the
+  default from runner 0.0.14; `blend: step` keeps the old jump). Sources
+  pinned to an earlier runner keep stepping.
+- **`spring(from:, to:, at:, stiffness:, damping:, mass:)`** — a value
+  that springs from `from` to `to` starting at `at`, overshooting when
+  under-damped. Defaults 100 / 10 / 1, as Remotion's `spring()`.
+  Evaluated in closed form, so it looks the same at any frame rate.
+- **`noise(seed, period, amplitude?)`** — smooth random wobble over
+  time, one hill or valley per `period`, ±`amplitude` with its unit:
+  `rotate(z: noise("wind", 1.5s, 4deg))`.
+- **`random(seed)`** — a number in [0, 1) that is the same for the same
+  seed on every renderer: `random("star-7") * 360deg`.
 - **`@ui(min:, max:, step:, label:)`** on a scene parameter — hints for a
   host's props panel. No effect on evaluation. `cmo check` warns on an
   unknown annotation or key (`NAM008`) and on a value of the wrong kind

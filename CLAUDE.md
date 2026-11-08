@@ -39,7 +39,7 @@ that aren't always obvious from the source.
 - From `apps/cli/`:
   - `zig build` — debug build at `zig-out/bin/cmotion` (also builds the
     WASM artifact the editor/parity tests use)
-  - `zig build test --summary all` — unit tests (125 at last count)
+  - `zig build test --summary all` — unit tests (138 at last count)
   - `zig build test-interp` — drives `cmotion-render.wasm` from Node,
     including the host API (`scene_params`, `parse_eval_with`,
     `diagnostics`)
@@ -91,6 +91,14 @@ owns the Pages project. Pushing to `main` does **not** publish.
 - `render.zig` / `render3d.zig` / `mesh.zig` / `font.zig` — the native
   renderer: 2D raster, 3D projection/lighting, mesh extrusion
   (glyphs + paths), and glyph outlines.
+- `easing.zig` — the easing curves, springs, `random` and `noise`, in
+  plain math. PSL ships the same curve set (`ease_<name>`); keep them
+  in step.
+- `runner.zig` — the `runner` pin compared with a version. A change
+  that would move an existing source's pixels is opt-in by version: the
+  evaluator writes the new default into the value tree (e.g.
+  `blend: oklab` on `animate` from 0.0.14), never the sampler or a
+  renderer reading the version.
 - `text_layout.zig` — `text.block` layout (escapes, greedy wrap,
   kerning, alignment), shared by the native painter and extruder. The
   web viewer's `layoutBlock` is a TypeScript port; change both together.
