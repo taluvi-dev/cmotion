@@ -77,7 +77,7 @@ function withBytes<T>(exp: CmExports, text: string, fn: (ptr: number, len: numbe
 
 // Every JSON-writing export returns 0 when the buffer is too small, so
 // grow it and retry.
-function readJson(exp: CmExports, call: (out: number, cap: number) => number): any {
+function readJson(exp: CmExports, call: (out: number, cap: number) => number): JsonNode {
   for (let cap = 4096; cap <= 4 * 1024 * 1024; cap *= 4) {
     const p = exp.cm_alloc(cap);
     const n = call(p, cap);
@@ -408,7 +408,7 @@ function layoutBlock(font: opentype.Font, text: string, o0: BlockOptions) {
     const probe = layoutBlock(font, text, { ...o, fit: null, width: null });
     if (probe.width > 0) o = { ...o, fit: null, size: (o.size * o0.fit!) / probe.width };
   }
-  const hhea = (font as any).tables.hhea;
+  const hhea = font.tables.hhea;
   const scale = o.size / (hhea.ascender - hhea.descender);
   const ascent = hhea.ascender * scale;
   const descent = hhea.descender * scale;
@@ -472,7 +472,7 @@ function placedShapes(l: ReturnType<typeof layoutBlock>, only?: (p: PlacedGlyph)
   for (const p of l.placed) {
     if (only && !only(p)) continue;
     const path = p.glyph.getPath(p.x - l.width / 2, p.y - l.height / 2, l.emSize);
-    for (const cmd of path.commands as any[]) {
+    for (const cmd of path.commands) {
       switch (cmd.type) {
         case "M": sp.moveTo(cmd.x, -cmd.y); break;
         case "L": sp.lineTo(cmd.x, -cmd.y); break;
@@ -506,7 +506,10 @@ function shapeSpecOf(node: JsonNode): Record<string, unknown> | null {
   if (node.name === "path") {
     const pts = f.points?.kind === "array" ? f.points : positionalArgs(node).find((a: JsonNode) => a?.kind === "array");
     // vec2 is y up (as in extruded paths); shape2d is y down.
-    spec.points = arrayElems(pts).map(vec2Of).filter(Boolean).map((p: any) => [p.x, -p.y]);
+    spec.points = arrayElems(pts)
+      .map(vec2Of)
+      .filter((p): p is { x: number; y: number } => p !== null)
+      .map((p) => [p.x, -p.y]);
     if (f.closed?.kind === "bool") spec.closed = f.closed.value;
   }
   return spec;
@@ -563,10 +566,11 @@ function buildOpacity(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   if (k <= 0) return null;
   const inner = buildLayer(args.find((a: JsonNode) => a?.kind === "constructed"), ctx);
   if (!inner || k >= 1) return inner;
-  inner.traverse((o: any) => {
-    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+  inner.traverse((o: THREE.Object3D) => {
+    const mat = (o as THREE.Mesh).material;
+    const mats = Array.isArray(mat) ? mat : mat ? [mat] : [];
     for (const m of mats) {
-      if (m.uniforms) continue; // raymarched shaders carry no opacity
+      if ((m as THREE.ShaderMaterial).uniforms) continue; // raymarched shaders carry no opacity
       m.transparent = true;
       m.opacity = (m.opacity ?? 1) * k;
     }
@@ -894,7 +898,7 @@ function buildExtrude(node: JsonNode, ctx: BuildCtx): THREE.Mesh | null {
   if (sizeField && sizeField.kind === "number") {
     // 1 em of shape → world: px × (unitsPerEm / (ascender−descender)) × pxToWorld.
     // The hhea metric matches stb_truetype's ScaleForPixelHeight basis.
-    const hhea = (glyphFont as any).tables.hhea;
+    const hhea = glyphFont.tables.hhea;
     const emFactor = glyphFont.unitsPerEm / (hhea.ascender - hhea.descender);
     const scale = sizeField.value * emFactor * pxToWorld;
     const depth = depthPx * pxToWorld;
