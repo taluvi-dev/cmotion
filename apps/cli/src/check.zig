@@ -805,11 +805,7 @@ pub const Checker = struct {
     /// typechecker's job.
     fn checkStdlibCall(self: *Checker, c: ast.Call) !void {
         const name = (try calleeName(self.allocator, c.callee.*)) orelse return;
-        if (std.mem.eql(u8, name, "extrude")) {
-            try self.checkExtrude(c);
-        } else if (std.mem.eql(u8, name, "path")) {
-            try self.checkPath(c);
-        }
+        if (std.mem.eql(u8, name, "extrude")) try self.checkExtrude(c);
     }
 
     fn firstPositional(c: ast.Call) ?ast.Arg {
@@ -826,7 +822,11 @@ pub const Checker = struct {
         const inner = arg.value.*;
         if (inner != .call) return; // a bound shape — can't reason syntactically
         const shape = (try calleeName(self.allocator, inner.call.callee.*)) orelse return;
-        if (std.mem.eql(u8, shape, "text.glyph") or std.mem.eql(u8, shape, "text.block") or std.mem.eql(u8, shape, "path")) return;
+        // A path is only held to "closed, 3+ points" when it is extruded:
+        // on its own, an open path is a line to stroke.
+        if (std.mem.eql(u8, shape, "path")) return self.checkPath(inner.call);
+        const extrudable = [_][]const u8{ "text.glyph", "text.block", "path", "ellipse", "circle", "polygon", "star", "pie", "rect" };
+        for (extrudable) |name| if (std.mem.eql(u8, shape, name)) return;
 
         const span = inner.span();
         const loc = span.location(self.source);
@@ -834,7 +834,7 @@ pub const Checker = struct {
             .code = "NAM007",
             .message = try std.fmt.allocPrint(self.allocator, "no 3D shape translator for '{s}' inside extrude(...)", .{shape}),
             .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = span.end - span.start },
-            .expected = "text.glyph(...), text.block(...) or path(...)",
+            .expected = "text.glyph, text.block, path, or a 2D shape (ellipse, circle, polygon, star, pie, rect)",
             .actual = try std.fmt.allocPrint(self.allocator, "extrude received '{s}'", .{shape}),
             .help = "extrude a font outline with text.glyph(...) or an explicit polygon with path(points: [...])",
             .fix_safety = .@"requires-human-review",
@@ -1060,7 +1060,7 @@ test "check: extrude of a non-extrudable shape flags NAM007" {
     var r = try checkSource(
         \\use std.shapes.*;
         \\use std.mesh3d.*;
-        \\let bad = extrude(circle(radius: 40px), depth: 20px);
+        \\let bad = extrude(sphere(radius: 40px), depth: 20px);
     );
     defer r.arena.deinit();
     try std.testing.expect(hasCode(r.diagnostics, "NAM007"));
@@ -1080,10 +1080,19 @@ test "check: an explicitly open path flags LWR001" {
     var r = try checkSource(
         \\use std.shapes.*;
         \\use std.mesh3d.*;
-        \\let open = path(points: [vec2(0, 0), vec2(40, 0), vec2(20, 40)], closed: false);
+        \\let open = extrude(path(points: [vec2(0, 0), vec2(40, 0), vec2(20, 40)], closed: false), depth: 10px);
     );
     defer r.arena.deinit();
     try std.testing.expect(hasCode(r.diagnostics, "LWR001"));
+}
+
+test "check: an open path on its own is a line, not an error" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\let line = stroke(path(points: [vec2(0, 0), vec2(40, 0)], closed: false), width: 4px);
+    );
+    defer r.arena.deinit();
+    try std.testing.expect(!hasCode(r.diagnostics, "LWR001"));
 }
 
 test "conformance: the shipped path-extrude example checks clean" {

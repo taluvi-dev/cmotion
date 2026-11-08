@@ -34,7 +34,11 @@ interface CmExports {
   release(handle: number): void;
   scene_params(src: number, len: number, out: number, cap: number): number;
   diagnostics(out: number, cap: number): number;
+  shape_rings(spec: number, len: number, out: number, cap: number): number;
 }
+
+// The booted WASM, for builders that ask it for geometry (shape_rings).
+let wasm: CmExports | null = null;
 
 async function loadWasm(): Promise<CmExports> {
   const stub = () => 0;
@@ -447,6 +451,76 @@ function blockShapes(font: opentype.Font, text: string, o: BlockOptions): THREE.
   return sp.toShapes(false);
 }
 
+// ---- 2D shapes (shape2d.zig through the WASM) ---------------------
+//
+// ellipse / circle / polygon / star / pie / rounded rect / path, and
+// stroke(shape, width:, color:, draw:) around one. The WASM returns the
+// outline rings (pixels, y down, centred) — the same polygons the native
+// renderer fills — and this turns them into THREE shapes.
+
+const SHAPE_KINDS = new Set(["ellipse", "circle", "polygon", "star", "pie", "rect", "path"]);
+
+function shapeSpecOf(node: JsonNode): Record<string, unknown> | null {
+  if (!node || node.kind !== "constructed" || !SHAPE_KINDS.has(node.name)) return null;
+  const f = namedFields(node);
+  const spec: Record<string, unknown> = { kind: node.name };
+  for (const k of ["width", "height", "radius", "inner_radius", "angle", "start"]) {
+    if (f[k]?.kind === "number") spec[k] = f[k].value;
+  }
+  const n = f.sides ?? f.points;
+  if (n?.kind === "number") spec.sides = Math.max(0, Math.floor(n.value));
+  if (node.name === "rect") spec.corner = numberOf(f.radius, 0);
+  if (node.name === "path") {
+    const pts = f.points?.kind === "array" ? f.points : positionalArgs(node).find((a: JsonNode) => a?.kind === "array");
+    // vec2 is y up (as in extruded paths); shape2d is y down.
+    spec.points = arrayElems(pts).map(vec2Of).filter(Boolean).map((p: any) => [p.x, -p.y]);
+    if (f.closed?.kind === "bool") spec.closed = f.closed.value;
+  }
+  return spec;
+}
+
+function shapeRings(spec: Record<string, unknown>): { fill: number[][][]; stroke: number[][][] } | null {
+  if (!wasm) return null;
+  const exp = wasm;
+  return withBytes(exp, JSON.stringify(spec), (p, n) => readJson(exp, (o, c) => exp.shape_rings(p, n, o, c)));
+}
+
+// Rings (px, y down) → THREE shapes (y up), one per ring.
+function ringShapes(rings: number[][][]): THREE.Shape[] {
+  return rings.map((ring) => new THREE.Shape(ring.map(([x, y]) => new THREE.Vector2(x, -y))));
+}
+
+function buildShape2d(node: JsonNode): THREE.Object3D | null {
+  let shapeNode = node;
+  const spec0 = node.name === "stroke" ? null : shapeSpecOf(node);
+  let spec = spec0;
+  let strokeColor: JsonNode = null;
+  let fillWanted = true;
+  if (node.name === "stroke") {
+    shapeNode = positionalArgs(node).find((a: JsonNode) => a?.kind === "constructed");
+    spec = shapeSpecOf(shapeNode);
+    if (!spec) return null;
+    const f = namedFields(node);
+    spec.stroke_width = numberOf(f.width, 2);
+    spec.draw = f.draw?.kind === "number" ? f.draw.value : 1;
+    strokeColor = f.color;
+    fillWanted = !!namedFields(shapeNode).fill;
+  }
+  if (!spec) return null;
+  const rings = shapeRings(spec);
+  if (!rings) return null;
+  const group = new THREE.Group();
+  const add = (rs: number[][][], color: JsonNode) => {
+    if (rs.length === 0) return;
+    const geom = new THREE.ShapeGeometry(ringShapes(rs), 1);
+    geom.scale(pxToWorld, pxToWorld, 1);
+    group.add(new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ color: color ? toThreeColor(color) : 0xffffff })));
+  };
+  if (fillWanted) add(rings.fill, namedFields(shapeNode).fill);
+  add(rings.stroke, strokeColor);
+  return group;
+}
+
 // opacity(k, layer): the sampler's output for a layer that is fading or
 // outside its `during` window (and the user-facing form). k = 0 builds
 // nothing; otherwise every material under the layer is faded by k.
@@ -706,6 +780,23 @@ function buildExtrude(node: JsonNode, ctx: BuildCtx): THREE.Mesh | null {
   const inner = args[0];
   if (inner && inner.kind === "constructed" && inner.name === "path") {
     return buildExtrudePath(inner, numberOf(f.depth, 16));
+  }
+  const innerSpec = shapeSpecOf(inner);
+  if (innerSpec && !(inner.name === "path")) {
+    const rings = shapeRings(innerSpec);
+    if (!rings || rings.fill.length === 0) return null;
+    const depthPx = numberOf(f.depth, 16);
+    const bevelPx = f.bevel?.kind === "number" ? f.bevel.value : Math.max(depthPx * 0.1, 1.5);
+    const geom = new THREE.ExtrudeGeometry(ringShapes(rings.fill), {
+      depth: depthPx,
+      bevelEnabled: bevelPx > 0,
+      bevelThickness: bevelPx,
+      bevelSize: bevelPx,
+      bevelSegments: numberOf(f.bevel_segments, 4),
+      curveSegments: 8,
+    });
+    geom.scale(pxToWorld, pxToWorld, pxToWorld);
+    return new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color: 0xffffff }));
   }
   if (inner && inner.kind === "constructed" && inner.name === "text.block") {
     const font = fontFor(inner, ctx);
@@ -1583,9 +1674,16 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       return group;
     }
     case "rect":
-      return buildRect(node);
+      return namedFields(node).radius ? buildShape2d(node) : buildRect(node);
     case "text.block":
       return buildTextBlock(node, ctx);
+    case "ellipse":
+    case "polygon":
+    case "star":
+    case "pie":
+    case "path":
+    case "stroke":
+      return buildShape2d(node);
     case "opacity":
       return buildOpacity(node, ctx);
     case "circle":
@@ -1706,6 +1804,7 @@ export interface ViewerHandle {
 
 export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
   const [exp, font] = await Promise.all([loadWasm(), loadFont()]);
+  wasm = exp;
   const interpVersion = getVersion(exp);
   let handle = 0;
   let currentRoot: THREE.Object3D | null = null;

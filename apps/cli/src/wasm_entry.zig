@@ -30,6 +30,7 @@ const value = @import("value.zig");
 const render = @import("render.zig");
 const diag = @import("diagnostics.zig");
 const host = @import("host.zig");
+const shape2d = @import("shape2d.zig");
 const sampler_mod = @import("sampler.zig");
 
 const gpa = std.heap.wasm_allocator;
@@ -128,6 +129,25 @@ export fn scene_params(src_ptr: [*]const u8, src_len: usize, out_ptr: [*]u8, out
     const source = a.dupe(u8, src_ptr[0..src_len]) catch return 0;
     var aw = std.Io.Writer.Allocating.init(a);
     host.writeSceneParams(&aw.writer, a, source, source_path) catch return 0;
+    return copyOut(aw.written(), out_ptr, out_cap);
+}
+
+// -------- 2D shapes --------
+
+/// Outline rings of a 2D shape for the viewer, from a `shape2d.Spec` as
+/// JSON (`{"kind":"star","radius":100,"sides":5,"stroke_width":4,…}`):
+/// `{"fill": [[[x, y], …]], "stroke": [...]}`, pixels, y down, centred.
+/// The native renderer fills the same rings, so both draw one polygon.
+/// Returns bytes written, 0 when the buffer is too small or the spec is
+/// not valid.
+export fn shape_rings(spec_ptr: [*]const u8, spec_len: usize, out_ptr: [*]u8, out_cap: usize) usize {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const spec = std.json.parseFromSliceLeaky(shape2d.Spec, a, spec_ptr[0..spec_len], .{ .ignore_unknown_fields = true }) catch return 0;
+    const r = shape2d.rings(a, spec) catch return 0;
+    var aw = std.Io.Writer.Allocating.init(a);
+    shape2d.writeJson(&aw.writer, r) catch return 0;
     return copyOut(aw.written(), out_ptr, out_cap);
 }
 

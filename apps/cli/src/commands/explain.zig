@@ -149,19 +149,20 @@ const entries = [_]Entry{
         .title = "No 3D shape translator inside extrude(...)",
         .body =
         \\`extrude(<shape>, depth: ...)` builds a solid from a 2D
-        \\outline, but only two outline sources have a 3D translator
-        \\today:
+        \\outline. The outlines it can extrude:
         \\
-        \\  - `text.glyph("C", ...)` — a font glyph outline, and
-        \\  - `path(points: [vec2(x, y), ...])` — an explicit polygon.
+        \\  - `text.glyph("C", ...)` and `text.block("…", ...)` — text,
+        \\  - `path(points: [vec2(x, y), ...])` — an explicit polygon,
+        \\  - the 2D shapes `rect`, `circle`, `ellipse`, `polygon`,
+        \\    `star`, `pie` (runner 0.0.14).
         \\
-        \\Any other shape (`rect`, `circle`, ...) passed directly to
+        \\Anything else (`sphere`, `image`, ...) passed directly to
         \\extrude renders to nothing. The check is syntactic: it only
         \\fires when the argument is a *direct* call to a non-extrudable
         \\shape, not when the shape arrives through a `let` binding (that
         \\needs the full typechecker).
         \\
-        \\Repair: extrude a `text.glyph(...)` or a `path(...)`.
+        \\Repair: extrude text, a `path(...)` or a 2D shape.
         ,
     },
     .{

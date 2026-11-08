@@ -174,6 +174,19 @@ new constructor, type or argument. (0.0.14 also freezes the
 - **`opacity(k, layer)`** — fades any layer, as a group (overlapping
   parts don't show through each other); `k` can be animated. A layer
   outside its `during` window, or fading, renders through it.
+- **2D shapes** — `ellipse(width:, height:)`, `polygon(sides:, radius:)`,
+  `star(points:, radius:, inner_radius:)`, `pie(radius:, angle:, start:)`
+  (degrees clockwise from 12 o'clock), `rect(…, radius:)` with rounded
+  corners, and `path(points: [vec2(x, y), …], closed:)` drawn flat. All
+  take `fill:`, and all extrude: `extrude(star(points: 5, radius:
+  120px), depth: 30px)`.
+- **`stroke(shape, width:, color:, draw:)`** — an outline with round joins
+  and caps; on an open `path` it is a line. `draw: 0..1` draws it on
+  (Remotion's `evolvePath`): `stroke(circle(radius: 120px), width: 8px,
+  draw: animate { 0s => 0, 2s => 1 })`. A stroked shape is filled only
+  if it has its own `fill:`.
+- **y is up** in every renderer: `translate(y: 100px)` and `vec2(0, 100)`
+  point up. (The native renderer drew 2D layers y-down before 0.0.14.)
 - **`@ui(min:, max:, step:, label:)`** on a scene parameter — hints for a
   host's props panel. No effect on evaluation. `cmo check` warns on an
   unknown annotation or key (`NAM008`) and on a value of the wrong kind

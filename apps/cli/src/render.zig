@@ -63,6 +63,7 @@ const builtin = @import("builtin");
 const value = @import("value.zig");
 const mesh_mod = @import("mesh.zig");
 const text_layout = @import("text_layout.zig");
+const shape2d = @import("shape2d.zig");
 
 /// True for the native build only. The 3D rasteriser needs libm
 /// (sqrt, sin, cos, tan, …) which the freestanding WASM target
@@ -146,8 +147,10 @@ fn paintValue(v: value.Value, fb: *Framebuffer, off: Offset, style: Style) void 
         .constructed => |c| {
             if (std.mem.eql(u8, c.name, "compose")) {
                 paintCompose(c, fb, off, style);
-            } else if (std.mem.eql(u8, c.name, "rect")) {
+            } else if (std.mem.eql(u8, c.name, "rect") and !hasField(c, "radius")) {
                 paintRect(c, fb, off, style);
+            } else if (shapeSpec(c) != null or std.mem.eql(u8, c.name, "path") or std.mem.eql(u8, c.name, "stroke")) {
+                paintShape(c, fb, off, style);
             } else if (std.mem.eql(u8, c.name, "translate")) {
                 paintTranslate(c, fb, off, style);
             } else if (std.mem.eql(u8, c.name, "text.glyph")) {
@@ -217,6 +220,193 @@ fn paintTextGlyph(c: value.Constructed, fb: *Framebuffer, off: Offset, style: St
     } else {
         paintTextGlyphBlocks(text, size_px, fb, off, rgba);
     }
+}
+
+fn hasField(c: value.Constructed, name: []const u8) bool {
+    for (c.fields) |f| if (std.mem.eql(u8, f.name, name)) return true;
+    return false;
+}
+
+fn fieldOf(c: value.Constructed, name: []const u8) ?value.Value {
+    for (c.fields) |f| if (std.mem.eql(u8, f.name, name)) return f.value;
+    return null;
+}
+
+fn fieldNum(c: value.Constructed, name: []const u8) ?f64 {
+    const v = fieldOf(c, name) orelse return null;
+    return if (v == .number) v.number.value else null;
+}
+
+/// The `shape2d.Spec` of a 2D shape node, or null when `c` is not one.
+/// A `rect` is only a shape2d with `radius:`; a plain rect keeps its
+/// own painter. `path` reads `points: [vec2(x, y), …]` and `closed:`.
+fn shapeSpec(c: value.Constructed) ?shape2d.Spec {
+    const kind = std.meta.stringToEnum(shape2d.Kind, c.name) orelse return null;
+    var spec: shape2d.Spec = .{ .kind = kind };
+    spec.width = fieldNum(c, "width") orelse 0;
+    spec.height = fieldNum(c, "height") orelse 0;
+    spec.radius = fieldNum(c, "radius") orelse 0;
+    spec.inner_radius = fieldNum(c, "inner_radius") orelse 0;
+    spec.angle = fieldNum(c, "angle") orelse 360;
+    spec.start = fieldNum(c, "start") orelse 0;
+    if (fieldNum(c, "sides") orelse fieldNum(c, "points")) |n| spec.sides = @intFromFloat(@max(0, @floor(n)));
+    if (kind == .rect) {
+        spec.corner = spec.radius;
+        if (!hasField(c, "radius")) return null;
+    }
+    if (kind == .path) return null; // needs points: see shapeSpecAlloc
+    return spec;
+}
+
+/// `shapeSpec`, plus `path`'s points (which need an allocator).
+fn shapeSpecAlloc(a: std.mem.Allocator, c: value.Constructed) ?shape2d.Spec {
+    if (shapeSpec(c)) |s| return s;
+    if (!std.mem.eql(u8, c.name, "path")) return null;
+    var pts_val: ?value.Value = null;
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "points") or (f.name.len == 0 and f.value == .array)) pts_val = f.value;
+    }
+    const arr = pts_val orelse return null;
+    if (arr != .array) return null;
+    var pts: std.ArrayListUnmanaged([2]f64) = .{};
+    for (arr.array.elems) |e| {
+        const p = valueAsOffset(e) orelse continue;
+        // vec2 is y up; shape2d is y down.
+        pts.append(a, .{ p.x, -p.y }) catch return null;
+    }
+    var spec: shape2d.Spec = .{ .kind = .path, .points = pts.items };
+    if (fieldOf(c, "closed")) |cl| if (cl == .@"bool") {
+        spec.closed = cl.@"bool";
+    };
+    return spec;
+}
+
+/// A 2D shape, or `stroke(shape, width:, color:, draw:)` around one:
+/// its fill (`fill:` or the inherited material fill; none for an open
+/// path or a stroke-only shape) and its stroke, both through shape2d.
+fn paintShape(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) void {
+    var scratch: [512 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    const a = fba.allocator();
+
+    var shape = c;
+    var stroke_color: ?value.Value = null;
+    var spec: shape2d.Spec = undefined;
+    var fill_wanted = true;
+    if (std.mem.eql(u8, c.name, "stroke")) {
+        var inner: ?value.Value = null;
+        for (c.fields) |f| if (f.name.len == 0 and f.value == .constructed) {
+            inner = f.value;
+        };
+        const in = inner orelse return;
+        shape = in.constructed;
+        spec = shapeSpecAlloc(a, shape) orelse return;
+        spec.stroke_width = fieldNum(c, "width") orelse 2;
+        spec.draw = fieldNum(c, "draw") orelse 1;
+        stroke_color = fieldOf(c, "color");
+        // A stroke wraps an outline: the shape fills only if it says so.
+        fill_wanted = hasField(shape, "fill");
+    } else {
+        spec = shapeSpecAlloc(a, shape) orelse return;
+    }
+    const r = shape2d.rings(a, spec) catch return;
+    const cx = @as(f64, @floatFromInt(fb.width)) / 2.0 + off.x;
+    const cy = @as(f64, @floatFromInt(fb.height)) / 2.0 + off.y;
+    if (fill_wanted) {
+        const fill = fieldOf(shape, "fill") orelse style.fill;
+        const rgba: [4]u8 = if (fill) |fv| valueToRgba(fv) else .{ 255, 255, 255, 255 };
+        fillRings(fb, r.fill, cx, cy, rgba);
+    }
+    if (r.stroke.len > 0) {
+        const sc = stroke_color orelse style.fill;
+        const rgba: [4]u8 = if (sc) |v| valueToRgba(v) else .{ 255, 255, 255, 255 };
+        fillRings(fb, r.stroke, cx, cy, rgba);
+    }
+}
+
+/// Fill closed rings (pixels, y down, around (cx, cy)) under the
+/// non-zero rule, anti-aliased with 4 sub-scanlines per row and exact
+/// horizontal coverage at span ends.
+fn fillRings(fb: *Framebuffer, rings: []const shape2d.Ring, cx: f64, cy: f64, rgba: [4]u8) void {
+    if (rings.len == 0) return;
+    var min_y: f64 = std.math.inf(f64);
+    var max_y: f64 = -std.math.inf(f64);
+    for (rings) |ring| for (ring) |p| {
+        min_y = @min(min_y, p.y + cy);
+        max_y = @max(max_y, p.y + cy);
+    };
+    const h: f64 = @floatFromInt(fb.height);
+    const w: f64 = @floatFromInt(fb.width);
+    const y0: usize = @intFromFloat(std.math.clamp(@floor(min_y), 0, h));
+    const y1: usize = @intFromFloat(std.math.clamp(@ceil(max_y), 0, h));
+    const sub: usize = 4;
+    const sub_f: f64 = 4;
+    var cov_buf: [8192]f32 = undefined;
+    if (fb.width > cov_buf.len) return;
+    const cov = cov_buf[0..fb.width];
+    var row = y0;
+    while (row < y1) : (row += 1) {
+        @memset(cov, 0);
+        for (0..sub) |s| {
+            const sy = @as(f64, @floatFromInt(row)) + (@as(f64, @floatFromInt(s)) + 0.5) / sub_f - cy;
+            // Crossings with winding direction.
+            var xs: [512]struct { x: f64, dir: i32 } = undefined;
+            var n: usize = 0;
+            for (rings) |ring| for (ring, 0..) |p, i| {
+                const q = ring[(i + 1) % ring.len];
+                if ((p.y <= sy) == (q.y <= sy)) continue;
+                if (n == xs.len) break;
+                const t = (sy - p.y) / (q.y - p.y);
+                xs[n] = .{ .x = p.x + t * (q.x - p.x) + cx, .dir = if (q.y > p.y) 1 else -1 };
+                n += 1;
+            };
+            std.mem.sort(@TypeOf(xs[0]), xs[0..n], {}, struct {
+                fn lt(_: void, l: @TypeOf(xs[0]), r: @TypeOf(xs[0])) bool {
+                    return l.x < r.x;
+                }
+            }.lt);
+            var wind: i32 = 0;
+            var span_start: f64 = 0;
+            for (0..n) |i| {
+                const was_in = wind != 0;
+                wind += xs[i].dir;
+                const is_in = wind != 0;
+                if (!was_in and is_in) span_start = xs[i].x;
+                if (was_in and !is_in) addSpan(cov, std.math.clamp(span_start, 0, w), std.math.clamp(xs[i].x, 0, w), 1.0 / @as(f32, @floatCast(sub_f)));
+            }
+        }
+        for (cov, 0..) |c, x| {
+            if (c <= 0) continue;
+            blendPixel(fb, x, row, rgba, @min(c, 1));
+        }
+    }
+}
+
+fn addSpan(cov: []f32, a: f64, b: f64, weight: f32) void {
+    if (b <= a) return;
+    const ia: usize = @intFromFloat(@floor(a));
+    const ib: usize = @intFromFloat(@floor(b));
+    if (ia == ib) {
+        if (ia < cov.len) cov[ia] += @as(f32, @floatCast(b - a)) * weight;
+        return;
+    }
+    if (ia < cov.len) cov[ia] += @as(f32, @floatCast(@as(f64, @floatFromInt(ia + 1)) - a)) * weight;
+    var x = ia + 1;
+    while (x < ib and x < cov.len) : (x += 1) cov[x] += weight;
+    if (ib < cov.len) cov[ib] += @as(f32, @floatCast(b - @as(f64, @floatFromInt(ib)))) * weight;
+}
+
+/// Source-over one pixel with `rgba` at coverage `k`.
+fn blendPixel(fb: *Framebuffer, x: usize, y: usize, rgba: [4]u8, k: f32) void {
+    const i = (y * fb.width + x) * 4;
+    const alpha = @as(f32, @floatFromInt(rgba[3])) / 255.0 * k;
+    for (0..3) |ch| {
+        const dst: f32 = @floatFromInt(fb.pixels[i + ch]);
+        const src: f32 = @floatFromInt(rgba[ch]);
+        fb.pixels[i + ch] = @intFromFloat(@round(dst + (src - dst) * alpha));
+    }
+    const da: f32 = @floatFromInt(fb.pixels[i + 3]);
+    fb.pixels[i + 3] = @intFromFloat(@round(@min(255, da + (255 - da) * alpha)));
 }
 
 /// `opacity(k, layer)` — group opacity: the layer is painted at full
@@ -491,7 +681,7 @@ fn paintRect(c: value.Constructed, fb: *Framebuffer, off: Offset, style: Style) 
     // canvas centre, shifted by the accumulated translate and the
     // rect's own `at:` offset.
     const cx = @as(f64, @floatFromInt(fb.width)) / 2.0 + off.x + at.x;
-    const cy = @as(f64, @floatFromInt(fb.height)) / 2.0 + off.y + at.y;
+    const cy = @as(f64, @floatFromInt(fb.height)) / 2.0 + off.y - at.y; // y up
     fillRect(fb, cx - w / 2.0, cy - h / 2.0, w, h, rgba);
 }
 
@@ -513,7 +703,9 @@ fn paintTranslate(c: value.Constructed, fb: *Framebuffer, off: Offset, style: St
             child = f.value;
         }
     }
-    if (child) |ch| paintValue(ch, fb, off.plus(.{ .x = dx, .y = dy }), style);
+    // cmotion's y is up (the viewer, the 3D scenes and every example
+    // agree); the framebuffer's rows run down.
+    if (child) |ch| paintValue(ch, fb, off.plus(.{ .x = dx, .y = -dy }), style);
 }
 
 /// Flat fallback for 3D constructors the renderer doesn't model
@@ -928,6 +1120,18 @@ fn meshFromShape(
         const text = stripQuotes(text_raw);
         if (text.len == 0) return null;
         return try mesh_mod.extrudeText(arena, text, size_px, depth, bevel, bevel_segments, curve_segments);
+    }
+    if (shapeSpecAlloc(arena, c)) |spec| {
+        const r = try shape2d.rings(arena, spec);
+        if (r.fill.len == 0) return null;
+        // shape2d is y down; the mesh is y up.
+        const contours = try arena.alloc([]const mesh_mod.Vec2, r.fill.len);
+        for (r.fill, 0..) |ring, i| {
+            const pts = try arena.alloc(mesh_mod.Vec2, ring.len);
+            for (ring, 0..) |p, j| pts[j] = .{ .x = @floatCast(p.x), .y = @floatCast(-p.y) };
+            contours[i] = pts;
+        }
+        return try mesh_mod.extrudeContoursBeveled(arena, contours, depth, bevel, bevel_segments);
     }
     if (std.mem.eql(u8, c.name, "text.block")) {
         const tb = readTextBlock(c);
@@ -1743,8 +1947,8 @@ test "renderTree: rect honours `at: vec2(x, y)` to shift its centre" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    // 4×4 rect on a 16×16 canvas, shifted (+4, +4) from centre →
-    // centre lands at (12, 12), so the rect spans rows 10-13 cols 10-13.
+    // 4×4 rect on a 16×16 canvas, shifted (+4, +4) from centre, y up →
+    // centre lands at column 12, row 4: rows 2-5, cols 10-13.
     const vec_fields = try a.alloc(value.Field, 2);
     vec_fields[0] = .{ .name = "", .value = .{ .number = .{ .value = 4, .unit = null } } };
     vec_fields[1] = .{ .name = "", .value = .{ .number = .{ .value = 4, .unit = null } } };
@@ -1758,8 +1962,8 @@ test "renderTree: rect honours `at: vec2(x, y)` to shift its centre" {
     const tree: value.Value = .{ .constructed = .{ .name = "rect", .fields = rect_fields } };
 
     const fb = try renderTree(a, tree, 16, 16);
-    // Inside the shifted rect.
-    const inside = (11 * 16 + 11) * 4;
+    // Inside the shifted rect (row 3, column 11).
+    const inside = (3 * 16 + 11) * 4;
     try std.testing.expectEqual(@as(u8, 0), fb.pixels[inside + 0]);
     try std.testing.expectEqual(@as(u8, 255), fb.pixels[inside + 1]);
     // Canvas centre (8, 8) is now outside the rect.
@@ -1772,8 +1976,8 @@ test "renderTree: translate(shape, x:, y:) shifts the wrapped shape" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    // A centered 4×4 rect wrapped in translate(x: -4, y: -4) lands at
-    // canvas-centre minus 4 → centre at (4, 4), spans rows 2-5 cols 2-5.
+    // A centred 4×4 rect wrapped in translate(x: -4, y: -4) moves left and
+    // down (y up) → centre at column 4, row 12: rows 10-13, cols 2-5.
     const rect_fields = try a.alloc(value.Field, 3);
     rect_fields[0] = .{ .name = "width", .value = .{ .number = .{ .value = 4, .unit = .px } } };
     rect_fields[1] = .{ .name = "height", .value = .{ .number = .{ .value = 4, .unit = .px } } };
@@ -1787,7 +1991,7 @@ test "renderTree: translate(shape, x:, y:) shifts the wrapped shape" {
     const tree: value.Value = .{ .constructed = .{ .name = "translate", .fields = tr_fields } };
 
     const fb = try renderTree(a, tree, 16, 16);
-    const inside = (3 * 16 + 3) * 4;
+    const inside = (11 * 16 + 3) * 4;
     try std.testing.expectEqual(@as(u8, 0), fb.pixels[inside + 0]);
     try std.testing.expectEqual(@as(u8, 0), fb.pixels[inside + 1]);
     try std.testing.expectEqual(@as(u8, 255), fb.pixels[inside + 2]);
@@ -2207,4 +2411,33 @@ test "renderTree: opacity(k, layer) blends the layer by k, 0 hides it" {
             try std.testing.expect(fb.pixels[centre] > 100 and fb.pixels[centre] < 160);
         }
     }
+}
+
+test "renderTree: a star, a rounded rect and a drawn-on stroke paint" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const star_fields = try a.alloc(value.Field, 3);
+    star_fields[0] = .{ .name = "radius", .value = .{ .number = .{ .value = 40, .unit = .px } } };
+    star_fields[1] = .{ .name = "points", .value = .{ .number = .{ .value = 5, .unit = null } } };
+    star_fields[2] = .{ .name = "fill", .value = .{ .color = .{ .hex = .{ .digits = "ffffff" } } } };
+    const star: value.Value = .{ .constructed = .{ .name = "star", .fields = star_fields } };
+    const fb = try renderTree(a, star, 100, 100);
+    // The centre is inside, a corner of the canvas is not.
+    try std.testing.expect(fb.pixels[(50 * 100 + 50) * 4] > 200);
+    try std.testing.expectEqual(@as(u8, 0), fb.pixels[3]);
+
+    // stroke(circle, width: 4px, draw: 0.5): the top half of the ring
+    // (clockwise from 12 o'clock to 6) — the right side is drawn, the
+    // left is not, and the inside stays empty.
+    const circle_fields = try a.alloc(value.Field, 1);
+    circle_fields[0] = .{ .name = "radius", .value = .{ .number = .{ .value = 40, .unit = .px } } };
+    const sfields = try a.alloc(value.Field, 3);
+    sfields[0] = .{ .name = "", .value = .{ .constructed = .{ .name = "circle", .fields = circle_fields } } };
+    sfields[1] = .{ .name = "width", .value = .{ .number = .{ .value = 4, .unit = .px } } };
+    sfields[2] = .{ .name = "draw", .value = .{ .number = .{ .value = 0.5, .unit = null } } };
+    const fb2 = try renderTree(a, .{ .constructed = .{ .name = "stroke", .fields = sfields } }, 100, 100);
+    try std.testing.expect(fb2.pixels[(50 * 100 + 90) * 4 + 3] > 200); // right
+    try std.testing.expectEqual(@as(u8, 0), fb2.pixels[(50 * 100 + 10) * 4 + 3]); // left
+    try std.testing.expectEqual(@as(u8, 0), fb2.pixels[(50 * 100 + 50) * 4 + 3]); // inside
 }
