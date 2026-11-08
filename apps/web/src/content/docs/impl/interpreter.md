@@ -17,6 +17,35 @@ Once the [grammar](/language/grammar/) and [type system](/language/types/) are l
 
 `cmo eval` / `cmo render` walk the AST through `eval` → a time-sampler → a renderer. The renderer side has two interim backends — a native software rasteriser and a Three.js/WebGL viewer fed the interpreter's JSON value tree — so the same source renders in the CLI, the in-browser editor, and the hosted API. These stand in for the canonical CanvasKit/WGSL backends (roadmap 6–7) while the interpreter itself is the conformance oracle.
 
+## Embedding: the WASM host API
+
+`cmotion-render.wasm` is how a host (the editor, the hosted API, an app such as Plinken) runs the interpreter. Strings go in through `cm_alloc` / `cm_free`. Every export that writes JSON returns the number of bytes written, or `0` when the output buffer is too small, so the host grows the buffer and retries.
+
+| Export | Does |
+|---|---|
+| `get_version(out, cap)` | The WASM ABI version (`0.2.0`). |
+| `parse_eval(src, len)` → handle | Parse, lower and evaluate; sample the first top-level binding. `0` on failure. |
+| `parse_eval_with(src, len, args, args_len)` → handle | Like `parse_eval`, with the **entry scene's** arguments as a JSON object by parameter name. The entry scene is the first `scene` declaration, and it is what gets sampled. The source is also checked as `cmo check` does. |
+| `sample_at(handle, t_ns, out, cap)` | The value tree at `t` nanoseconds, as JSON. |
+| `release(handle)` | Free a handle. |
+| `scene_params(src, len, out, cap)` | The entry scene's parameters, without running its body: the diagnostic envelope plus `scene` and `params`. |
+| `diagnostics(out, cap)` | The diagnostic envelope (`{ schemaVersion, ok, diagnostics }`) of the last `parse_eval` / `parse_eval_with`, so a host can say why a handle is `0`. |
+
+A scene's parameters are its props. `scene_params` describes each one:
+
+```json
+{ "name": "duration", "type": "Duration", "prop": "number", "unit": "s",
+  "required": false,
+  "default": { "source": "6s", "value": { "kind": "number", "value": 6, "unit": "s" } },
+  "doc": "How long the title runs." }
+```
+
+- `prop` is the kind of JSON value that sets it (`number`, `int`, `bool`, `string`, `color`), or `null` when arguments cannot set the type yet.
+- `unit` is the unit that number is in. Hosts pass times in seconds, angles in degrees, lengths in pixels and colours as `"#rrggbb"`.
+- `doc` is the `//` comment block directly above the parameter.
+
+`parse_eval_with(src, "{}")` renders exactly what `parse_eval(src)` renders. An argument that names no parameter, or has the wrong kind of value, fails with [`EVL005`](/language/diagnostics/#evl005--scene-argument-does-not-match-the-entry-scene), which names the parameter. A required parameter left out fails with `EVL004`.
+
 ## Testing
 
 A vitest/Zig conformance suite runs the WASM interpreter and compares against the native build; rendering is checked with golden-image diffs. As the WASM-codegen backend lands, its output will be compared against this interpreter headlessly in CI.

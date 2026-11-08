@@ -75,6 +75,23 @@ pub fn hasError(node: Node) bool {
     return c.ts_node_has_error(node);
 }
 
+/// The first `ERROR` or missing node in document order, or null when
+/// the subtree parsed cleanly. `hasError` on the root says *that* the
+/// parse failed; this says *where*, so a diagnostic can point at the
+/// offending token instead of line 1.
+pub fn firstError(node: Node) ?Node {
+    if (!hasError(node)) return null;
+    if (isMissing(node) or std.mem.eql(u8, kind(node), "ERROR")) return node;
+    const n = childCount(node);
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        if (firstError(child(node, i))) |e| return e;
+    }
+    // has_error is set but no child carries it: the node itself is the
+    // closest location we have.
+    return node;
+}
+
 pub const Point = struct { row: u32, column: u32 };
 
 pub fn startPoint(node: Node) Point {

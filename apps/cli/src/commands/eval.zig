@@ -120,7 +120,7 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
     const root = parsed.root();
     const has_error = ts.hasError(root);
     if (has_error) {
-        const start = ts.startPoint(root);
+        const start = ts.startPoint(ts.firstError(root) orelse root);
         try diags.append(ctx.allocator, .{
             .code = "PAR100",
             .message = "syntax error in source",

@@ -40,6 +40,7 @@ how much trust to extend to the repair:
 | `NAM*` | Name resolution | implemented |
 | `TYP*` | Type checker | partial (TYP002 only) |
 | `UNT*` | Unit checker | partial (UNT001, UNT002) |
+| `EVL*` | Reference interpreter | partial (scene arguments: EVL004, EVL005) |
 | `TIM*` | Timeline (negative duration, out-of-range keyframe) | reserved |
 | `ANM*` | Animate / keyframe rules | reserved |
 | `COL*` | Color space | reserved |
@@ -338,6 +339,44 @@ Canonical units used in the suggestion:
 
 - **Repair:** `add-required-unit`.
 - **Fix safety:** `local-edit`.
+
+---
+
+## `EVL*` — Reference interpreter
+
+### `EVL004` — Missing required argument
+
+A call, or the entry scene evaluated with `parse_eval_with`, left out
+a parameter that has no default.
+
+```cm
+scene title(label: String) -> Frame { … }
+// parse_eval_with(src, "{}")  → EVL004: missing required argument 'label'
+```
+
+- **Repair:** `supply-argument`.
+- **Fix safety:** `requires-human-review`.
+
+### `EVL005` — Scene argument does not match the entry scene
+
+A host passed arguments for the entry scene (the first `scene`
+declaration) through `parse_eval_with`, and one could not be bound.
+The message names the parameter: it does not exist (`expected` lists
+the ones that do), its value has the wrong kind, or its type cannot be
+set from arguments yet. Hosts pass times in seconds, angles in
+degrees, lengths in pixels and colours as `"#rrggbb"`:
+
+```cm
+scene card(fill: Color = #ff3399, size: Pixels = 96px) -> Frame { … }
+// {"fill": "#00ff00", "size": 40}  → OK
+// {"size": "big"}                  → EVL005: parameter 'size' expects Pixels as a number in pixels, got a string
+// {"colour": "#000"}               → EVL005: scene 'card' has no parameter 'colour'
+```
+
+See [the host API](/impl/interpreter/#embedding-the-wasm-host-api).
+
+- **Repair:** `fix-scene-argument`.
+- **Fix safety:** `requires-human-review`.
 
 ---
 

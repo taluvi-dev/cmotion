@@ -48,6 +48,11 @@ pub const Binding = struct {
 /// don't evaluate yet, but their presence doesn't break the pass.
 pub const Program = struct {
     bindings: []const Binding,
+    /// Index into `bindings` of the entry scene — the first `scene`
+    /// declaration in the source — or null when the source has none or
+    /// it could not be invoked (a required parameter with no value).
+    /// Hosts that bind scene arguments sample this binding.
+    entry: ?usize = null,
 
     pub fn writeJson(self: Program, w: anytype) !void {
         try w.writeAll("{\"bindings\":[");
@@ -98,6 +103,12 @@ pub const Evaluator = struct {
     source: []const u8,
     path: []const u8,
     diagnostics: std.ArrayListUnmanaged(diag.Diagnostic) = .{},
+    /// Arguments for the entry scene, by parameter name, supplied by a
+    /// host (`parse_eval_with`). When set, the entry scene is invoked
+    /// with them — a parameter without an argument falls back to its
+    /// default, and one with neither emits EVL004 — instead of only
+    /// when every parameter has a default.
+    entry_args: ?*const std.StringHashMapUnmanaged(Value) = null,
 
     pub fn init(
         arena: std.mem.Allocator,
@@ -119,6 +130,9 @@ pub const Evaluator = struct {
         var bindings: std.ArrayListUnmanaged(Binding) = .{};
         defer bindings.deinit(self.gpa);
 
+        var entry: ?usize = null;
+        var seen_scene = false;
+
         for (program.decls) |decl| switch (decl) {
             .let => |d| {
                 const v = try self.evalExpr(d.value.*, &top);
@@ -130,13 +144,26 @@ pub const Evaluator = struct {
                 });
             },
             .scene, .component, .filter => |cl| {
+                const is_entry = decl == .scene and !seen_scene;
+                if (decl == .scene) seen_scene = true;
+                if (is_entry and self.entry_args != null) {
+                    const v = (try self.invokeEntry(cl, &top, self.entry_args.?)) orelse continue;
+                    try top.names.put(self.gpa, cl.name.name, v);
+                    entry = bindings.items.len;
+                    try bindings.append(self.gpa, .{
+                        .name = cl.name.name,
+                        .value = v,
+                        .span = cl.span,
+                    });
+                    continue;
+                }
                 // Invoke the body when every parameter has a default —
                 // that's the only safe way to drive it from the top
                 // level without a user-supplied argument set. Components
-                // with required params get skipped silently for now;
-                // a future `cmo eval --scene name --args k=v` flag will
-                // let the caller supply them.
+                // with required params get skipped silently; a host
+                // supplies the entry scene's arguments via `entry_args`.
                 if (!allParamsHaveDefaults(cl.params)) continue;
+                if (is_entry) entry = bindings.items.len;
                 const v = try self.invokeComponent(cl, &top);
                 try top.names.put(self.gpa, cl.name.name, v);
                 try bindings.append(self.gpa, .{
@@ -159,7 +186,33 @@ pub const Evaluator = struct {
 
         const owned = try self.arena.alloc(Binding, bindings.items.len);
         @memcpy(owned, bindings.items);
-        return .{ .bindings = owned };
+        return .{ .bindings = owned, .entry = entry };
+    }
+
+    /// Evaluate the default of every parameter of `scene` without
+    /// running its body, for a host listing the scene's parameters.
+    /// Top-level lets and exports are evaluated first so a default can
+    /// refer to them. Defaults are evaluated in the top-level scope, as
+    /// `invokeComponent` does, so the listed value is the one a render
+    /// uses. A parameter with no default yields null.
+    pub fn evalDefaults(
+        self: *Evaluator,
+        program: ast.Program,
+        scene: ast.ComponentLike,
+    ) EvalError![]const ?Value {
+        var top = Scope{ .parent = null };
+        defer top.names.deinit(self.gpa);
+        for (program.decls) |decl| switch (decl) {
+            .let => |d| try top.names.put(self.gpa, d.name.name, try self.evalExpr(d.value.*, &top)),
+            .@"export" => |e| try top.names.put(self.gpa, e.name.name, try self.evalExpr(e.value.*, &top)),
+            else => {},
+        };
+
+        const out = try self.arena.alloc(?Value, scene.params.len);
+        for (scene.params, 0..) |p, i| {
+            out[i] = if (p.default) |default| try self.evalExpr(default.*, &top) else null;
+        }
+        return out;
     }
 
     pub fn takeDiagnostics(self: *Evaluator) ![]const diag.Diagnostic {
@@ -580,6 +633,36 @@ pub const Evaluator = struct {
             try params_scope.names.put(self.gpa, p.name.name, v);
         }
         return self.evalBlock(decl.body, &params_scope);
+    }
+
+    /// Invoke the entry scene with host-supplied arguments. Each
+    /// parameter takes its argument, else its default (evaluated in the
+    /// top-level scope, exactly as `invokeComponent` does, so empty
+    /// arguments render what `parse_eval` renders), else emits EVL004 —
+    /// and then the scene is not invoked at all (null), since its body
+    /// would run with an unbound name.
+    fn invokeEntry(
+        self: *Evaluator,
+        decl: ast.ComponentLike,
+        parent: *Scope,
+        args: *const std.StringHashMapUnmanaged(Value),
+    ) EvalError!?Value {
+        var params_scope = Scope{ .parent = parent };
+        defer params_scope.names.deinit(self.gpa);
+        var missing = false;
+        for (decl.params) |p| {
+            if (args.get(p.name.name)) |v| {
+                try params_scope.names.put(self.gpa, p.name.name, v);
+            } else if (p.default) |default| {
+                const v = try self.evalExpr(default.*, parent);
+                try params_scope.names.put(self.gpa, p.name.name, v);
+            } else {
+                try self.missingArg(p.span, p.name.name);
+                missing = true;
+            }
+        }
+        if (missing) return null;
+        return try self.evalBlock(decl.body, &params_scope);
     }
 
     fn evalBlock(self: *Evaluator, block: ast.Block, parent: *Scope) EvalError!Value {

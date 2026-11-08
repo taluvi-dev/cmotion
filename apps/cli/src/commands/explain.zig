@@ -425,6 +425,30 @@ const entries = [_]Entry{
         ,
     },
     .{
+        .code = "EVL005",
+        .title = "Scene argument does not match the entry scene",
+        .body =
+        \\A host evaluated the source with arguments for its entry scene
+        \\(the first `scene` declaration) — the WASM `parse_eval_with`
+        \\export — and one of them could not be bound. The message names
+        \\the parameter. The causes:
+        \\
+        \\  - the scene has no parameter by that name (`expected` lists
+        \\    the parameters it has);
+        \\  - the value has the wrong kind for the parameter's type. Hosts
+        \\    pass times in seconds, angles in degrees, lengths in pixels
+        \\    and colours as "#rrggbb" strings, e.g.
+        \\    `{ "duration": 6, "fill": "#ff3399" }`;
+        \\  - the type is one arguments cannot set yet (a record, a
+        \\    tuple, a function, `Animation<T>`);
+        \\  - the arguments are not a JSON object.
+        \\
+        \\Repair: rename the argument to a declared parameter, or pass a
+        \\value of its type. `scene_params` lists each parameter with the
+        \\kind of value (`prop`) and the unit it takes.
+        ,
+    },
+    .{
         .code = "EVL003",
         .title = "Unresolved identifier at eval time",
         .body =
@@ -515,6 +539,7 @@ test "every emitted diagnostic code has an explain entry" {
         @embedFile("../main.zig"),
         @embedFile("../tree_sitter.zig"),
         @embedFile("../eval.zig"),
+        @embedFile("../host.zig"),
         @embedFile("../render.zig"),
         @embedFile("check.zig"),
         @embedFile("explain.zig"),

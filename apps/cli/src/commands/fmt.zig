@@ -116,7 +116,7 @@ pub fn run(ctx: Context, args: []const []const u8) !u8 {
 
     const root = parsed.root();
     if (ts.hasError(root)) {
-        const start = ts.startPoint(root);
+        const start = ts.startPoint(ts.firstError(root) orelse root);
         try ctx.emitError(.{
             .code = "PAR100",
             .message = "syntax error in source",

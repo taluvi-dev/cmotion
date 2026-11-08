@@ -4,11 +4,21 @@
 //! swappable consumer of the JSON value-tree this module produces.
 //!
 //! The canonical flow:
-//!   1. host calls `parse_eval(source_ptr, source_len)` → opaque
-//!      handle (Session*).
+//!   1. host calls `parse_eval(source_ptr, source_len)` — or
+//!      `parse_eval_with(…, args_ptr, args_len)` to bind the entry
+//!      scene's parameters — → opaque handle (Session*), 0 on failure.
 //!   2. host repeatedly calls `sample_at(handle, t_ns, out_ptr,
 //!      out_cap)` → number of JSON bytes written into `out_ptr`.
 //!   3. host calls `release(handle)` when done.
+//!
+//! Alongside: `scene_params` lists the entry scene's parameters (the
+//! clip's props) without evaluating, and `diagnostics` returns the
+//! diagnostic envelope of the last `parse_eval` / `parse_eval_with`,
+//! so a host can say *why* a handle is 0. The logic lives in
+//! `host.zig`, unit-tested natively; this file is only the ABI.
+//!
+//! Every function that writes JSON returns the bytes written, or 0 when
+//! `out_cap` is too small — the host retries with a bigger buffer.
 //!
 //! Compiled to `wasm32-wasi` (see `build.zig`'s `addWasmStep`). The
 //! wasi target gets us libc shims that tree-sitter's C runtime
@@ -18,10 +28,8 @@
 const std = @import("std");
 const value = @import("value.zig");
 const render = @import("render.zig");
-const ts = @import("tree_sitter.zig");
-const ast = @import("ast.zig");
-const lower_mod = @import("lower.zig");
-const eval_mod = @import("eval.zig");
+const diag = @import("diagnostics.zig");
+const host = @import("host.zig");
 const sampler_mod = @import("sampler.zig");
 
 const gpa = std.heap.wasm_allocator;
@@ -29,8 +37,11 @@ const gpa = std.heap.wasm_allocator;
 /// Pinned semantic version of the cmotion DSL + WASM ABI exposed
 /// here. Bundles ship this verbatim so a saved `.cm` + interpreter
 /// version produces a reproducible render. Bump on any breaking
-/// ABI / language change.
-const cmotion_version: []const u8 = "0.1.0";
+/// ABI / language change; additions bump the minor version.
+const cmotion_version: []const u8 = "0.2.0";
+
+/// Path diagnostics name; a host has no file.
+const source_path = "<source>";
 
 // -------- host-allocated buffers --------
 //
@@ -60,67 +71,127 @@ export fn main() c_int {
 /// Write the cmotion DSL version string into `out_ptr`. Returns
 /// the number of bytes written, 0 if the buffer is too small.
 export fn get_version(out_ptr: [*]u8, out_cap: usize) usize {
-    if (out_cap < cmotion_version.len) return 0;
-    @memcpy(out_ptr[0..cmotion_version.len], cmotion_version);
-    return cmotion_version.len;
+    return copyOut(cmotion_version, out_ptr, out_cap);
+}
+
+fn copyOut(bytes: []const u8, out_ptr: [*]u8, out_cap: usize) usize {
+    if (out_cap < bytes.len) return 0;
+    @memcpy(out_ptr[0..bytes.len], bytes);
+    return bytes.len;
+}
+
+// -------- diagnostics of the last evaluation --------
+
+/// The envelope (`{ schemaVersion, ok, diagnostics }`) of the last
+/// `parse_eval` / `parse_eval_with`, owned by `gpa`. The host is single-
+/// threaded, so one slot is enough.
+var last_report: []u8 = &.{};
+
+fn setReport(items: []const diag.Diagnostic) void {
+    clearReport();
+    var aw = std.Io.Writer.Allocating.init(gpa);
+    diag.writeJson(&aw.writer, .{
+        .ok = !host.anyError(items),
+        .diagnostics = items,
+    }) catch {
+        aw.deinit();
+        return;
+    };
+    last_report = aw.toOwnedSlice() catch {
+        aw.deinit();
+        return;
+    };
+}
+
+fn clearReport() void {
+    if (last_report.len != 0) gpa.free(last_report);
+    last_report = &.{};
+}
+
+/// Write the diagnostic envelope of the last `parse_eval` /
+/// `parse_eval_with` into `out_ptr`. Returns bytes written, 0 when the
+/// buffer is too small or nothing has been evaluated yet.
+export fn diagnostics(out_ptr: [*]u8, out_cap: usize) usize {
+    return copyOut(last_report, out_ptr, out_cap);
+}
+
+// -------- scene parameters --------
+
+/// List the entry scene's parameters (`host.writeSceneParams`): the
+/// diagnostic envelope plus `scene` and `params`. Nothing is evaluated
+/// beyond the parameters' defaults. Returns bytes written, 0 when the
+/// buffer is too small.
+export fn scene_params(src_ptr: [*]const u8, src_len: usize, out_ptr: [*]u8, out_cap: usize) usize {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const source = a.dupe(u8, src_ptr[0..src_len]) catch return 0;
+    var aw = std.Io.Writer.Allocating.init(a);
+    host.writeSceneParams(&aw.writer, a, source, source_path) catch return 0;
+    return copyOut(aw.written(), out_ptr, out_cap);
 }
 
 // -------- interpreter session --------
 
-/// Owns the parsed tree + lowered AST + evaluated value tree for
-/// one `.cm` source. Sampling at a given `t` happens against
-/// `scene_value` without re-parsing or re-evaluating.
+/// Owns the lowered AST + evaluated value tree for one `.cm` source.
+/// Sampling at a given `t` happens against `scene_value` without
+/// re-parsing or re-evaluating.
 const Session = struct {
     arena: *std.heap.ArenaAllocator,
-    parsed: ts.Parsed,
     scene_value: value.Value,
 };
 
-/// Parse + lower + eval a `.cm` source. Returns an opaque handle
-/// (the pointer-as-integer is the handle from the host's POV) or
-/// 0 if anything fails. Diagnostics are dropped silently in v0 —
-/// surfacing them is a follow-up.
+/// Parse + lower + eval a `.cm` source and sample its first top-level
+/// binding. Returns an opaque handle (the pointer-as-integer is the
+/// handle from the host's POV) or 0 if anything fails; `diagnostics`
+/// then says why.
 export fn parse_eval(src_ptr: [*]const u8, src_len: usize) usize {
-    const session = gpa.create(Session) catch return 0;
-    errdefer gpa.destroy(session);
+    return openSession(src_ptr[0..src_len], null);
+}
 
+/// Like `parse_eval`, with the entry scene's arguments as a JSON object
+/// by parameter name (`{}` for none): times in seconds, angles in
+/// degrees, lengths in pixels, colours as `"#rrggbb"`. The source is
+/// also checked as `cmo check` does, the entry scene (the first
+/// `scene`) is what gets sampled, and a wrong argument fails with an
+/// EVL005 diagnostic naming it.
+export fn parse_eval_with(
+    src_ptr: [*]const u8,
+    src_len: usize,
+    args_ptr: [*]const u8,
+    args_len: usize,
+) usize {
+    return openSession(src_ptr[0..src_len], args_ptr[0..args_len]);
+}
+
+fn openSession(src: []const u8, args: ?[]const u8) usize {
+    clearReport();
     const arena_ptr = gpa.create(std.heap.ArenaAllocator) catch return 0;
     arena_ptr.* = std.heap.ArenaAllocator.init(gpa);
-    errdefer {
-        arena_ptr.deinit();
-        gpa.destroy(arena_ptr);
-    }
-
-    session.arena = arena_ptr;
     const a = arena_ptr.allocator();
 
-    // Copy the source into the session's arena — the AST keeps
-    // zero-copy slices into the source buffer, so it must outlive
-    // the lowered program.
-    const source = a.dupe(u8, src_ptr[0..src_len]) catch return 0;
+    const scene_value: ?value.Value = blk: {
+        // Copy the inputs into the session's arena — the AST keeps
+        // zero-copy slices into the source buffer, so it must outlive
+        // the lowered program.
+        const source = a.dupe(u8, src) catch break :blk null;
+        const args_copy: ?[]const u8 = if (args) |x| (a.dupe(u8, x) catch break :blk null) else null;
+        const built = host.build(a, source, source_path, args_copy) catch break :blk null;
+        setReport(built.diagnostics);
+        break :blk built.value;
+    };
 
-    session.parsed = ts.parse(source) catch return 0;
-    errdefer session.parsed.deinit();
-
-    const root = session.parsed.root();
-    if (ts.hasError(root)) return 0;
-
-    var lowerer = lower_mod.Lowerer.init(a, source);
-    const program = lowerer.lowerProgram(root) catch return 0;
-
-    var evaluator = eval_mod.Evaluator.init(a, gpa, source, "<wasm>");
-    defer evaluator.deinit();
-    const eval_result = evaluator.evalProgram(program) catch return 0;
-
-    var has_error = false;
-    for (evaluator.diagnostics.items) |d| {
-        if (d.severity == .@"error") has_error = true;
-    }
-    if (has_error) return 0;
-    if (eval_result.bindings.len == 0) return 0;
-
-    session.scene_value = eval_result.bindings[0].value;
-
+    const v = scene_value orelse {
+        arena_ptr.deinit();
+        gpa.destroy(arena_ptr);
+        return 0;
+    };
+    const session = gpa.create(Session) catch {
+        arena_ptr.deinit();
+        gpa.destroy(arena_ptr);
+        return 0;
+    };
+    session.* = .{ .arena = arena_ptr, .scene_value = v };
     return @intFromPtr(session);
 }
 
@@ -148,7 +219,6 @@ export fn sample_at(handle: usize, t_ns: u64, out_ptr: [*]u8, out_cap: usize) us
 export fn release(handle: usize) void {
     if (handle == 0) return;
     const session: *Session = @ptrFromInt(handle);
-    session.parsed.deinit();
     session.arena.deinit();
     gpa.destroy(session.arena);
     gpa.destroy(session);

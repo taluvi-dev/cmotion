@@ -39,7 +39,10 @@ that aren't always obvious from the source.
 - From `apps/cli/`:
   - `zig build` — debug build at `zig-out/bin/cmotion` (also builds the
     WASM artifact the editor/parity tests use)
-  - `zig build test --summary all` — unit tests (104 at last count)
+  - `zig build test --summary all` — unit tests (113 at last count)
+  - `zig build test-interp` — drives `cmotion-render.wasm` from Node,
+    including the host API (`scene_params`, `parse_eval_with`,
+    `diagnostics`)
   - `zig build -Doptimize=ReleaseFast` — release build
 - From the repo root, `pnpm install` covers `apps/web` and the
   tree-sitter package; `pnpm dev` runs the web app.
@@ -90,8 +93,15 @@ owns the Pages project. Pushing to `main` does **not** publish.
   (glyphs + paths), and glyph outlines.
 - `value.zig` — the `Value` union + its JSON encoding (the contract the
   web Three.js viewer consumes).
-- `wasm_entry.zig` — the `parse_eval` / `sample_at` WASM exports the
-  browser editor + render container call.
+- `host.zig` — the host API, natively unit-tested: the entry scene
+  (first `scene`), its parameters as props (`writeSceneParams`), and
+  evaluation with host-supplied arguments (`build`, EVL005 for a bad
+  one).
+- `wasm_entry.zig` — the WASM ABI over `host.zig`: `parse_eval`,
+  `parse_eval_with`, `sample_at`, `release`, `scene_params`,
+  `diagnostics`. The ABI version (`cmotion_version`) bumps minor on an
+  addition. `parse_eval` must keep sampling exactly what it always has;
+  new behaviour goes behind a new export.
 - `fmt.zig` — formatter engine (v0). Walks `program.decls`, rewrites
   top-level `use` and `let`, slices source verbatim for everything else.
 - `diagnostics.zig` — the diagnostic envelope. **Stable contract** — see
