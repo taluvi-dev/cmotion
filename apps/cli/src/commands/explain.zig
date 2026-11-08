@@ -502,6 +502,27 @@ const entries = [_]Entry{
         ,
     },
     .{
+        .code = "EVL006",
+        .title = "Loop bounds a `for` cannot use",
+        .body =
+        \\`for i in from..to { … }` runs its body once per whole number from
+        \\`from` up to, not including, `to`. The bounds are evaluated once,
+        \\before the clip plays, so they must be plain whole numbers without
+        \\a unit: literals, top-level `let`s, scene parameters, arithmetic on
+        \\them. An `animate`, a `spring` or anything else that changes over
+        \\time cannot be a bound; vary what the body does with time instead.
+        \\A loop may run at most 10000 times, so a typo cannot hang a render.
+        \\
+        \\  compose [
+        \\    for i in 0..12 {
+        \\      star(points: 5, radius: 20px).translate(x: (i - 6) * 90px)
+        \\    },
+        \\  ]
+        \\
+        \\Repair: make the bounds whole numbers without units, or split the loop.
+        ,
+    },
+    .{
         .code = "EVL003",
         .title = "Unresolved identifier at eval time",
         .body =

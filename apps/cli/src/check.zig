@@ -775,6 +775,14 @@ pub const Checker = struct {
                 if (a.opts) |opts| for (opts) |o| try self.checkExpr(o.value.*, scope);
             },
             .compose => |c| for (c.layers) |layer| try self.checkExpr(layer, scope),
+            .for_ => |f| {
+                try self.checkExpr(f.from.*, scope);
+                try self.checkExpr(f.to.*, scope);
+                var loop_scope: Scope = .{ .parent = scope, .has_wildcard_import = scope.has_wildcard_import };
+                defer loop_scope.symbols.deinit(self.allocator);
+                try loop_scope.symbols.put(self.allocator, f.var_name.name, .{ .name = f.var_name.name, .span = f.var_name.span, .kind = .let });
+                try self.checkBlock(f.body, &loop_scope);
+            },
             .record => |r| for (r.inits) |ri| try self.checkExpr(ri.value.*, scope),
             .array => |a| for (a.elems) |elem| try self.checkExpr(elem, scope),
             .block => |b| try self.checkBlock(b, scope),
@@ -1152,4 +1160,14 @@ test "check: an unknown easing name warns with NAM009" {
     defer r.arena.deinit();
     try std.testing.expectEqual(@as(usize, 2), r.diagnostics.len);
     for (r.diagnostics) |d| try std.testing.expectEqualStrings("NAM009", d.code);
+}
+
+test "check: a for loop's variable is in scope in its body only" {
+    var r = try checkSource(
+        \\let xs = for i in 0..3 { i * 2 };
+        \\let y = i;
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
+    try std.testing.expectEqualStrings("NAM003", r.diagnostics[0].code);
 }

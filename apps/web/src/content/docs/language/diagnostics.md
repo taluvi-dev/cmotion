@@ -40,7 +40,7 @@ how much trust to extend to the repair:
 | `NAM*` | Name resolution | implemented |
 | `TYP*` | Type checker | partial (TYP002, TYP003) |
 | `UNT*` | Unit checker | partial (UNT001, UNT002) |
-| `EVL*` | Reference interpreter | partial (scene arguments: EVL004, EVL005) |
+| `EVL*` | Reference interpreter | partial (EVL004, EVL005, EVL006) |
 | `TIM*` | Timeline (negative duration, out-of-range keyframe) | reserved |
 | `ANM*` | Animate / keyframe rules | reserved |
 | `COL*` | Color space | reserved |
@@ -419,6 +419,16 @@ scene card(fill: Color = #ff3399, size: Pixels = 96px) -> Frame { … }
 See [the host API](/impl/interpreter/#embedding-the-wasm-host-api).
 
 - **Repair:** `fix-scene-argument`.
+- **Fix safety:** `requires-human-review`.
+
+### `EVL006` — Loop bounds a `for` cannot use
+
+`for i in from..to { … }` needs bounds that are whole numbers without a
+unit, known before the clip plays (literals, `let`s, parameters,
+arithmetic on them), and at most 10000 iterations. An animation or a
+time cannot be a bound; vary what the body does with time instead.
+
+- **Repair:** `fix-loop-bounds`.
 - **Fix safety:** `requires-human-review`.
 
 ---

@@ -470,6 +470,16 @@ pub const Lowerer = struct {
             } };
         }
 
+        if (std.mem.eql(u8, k, "for_expr")) {
+            return .{ .for_ = .{
+                .span = self.spanOf(node),
+                .var_name = self.identOf(ts.childByFieldName(node, "var") orelse return error.MissingRequiredField),
+                .from = try self.lowerExprPtr(ts.childByFieldName(node, "from") orelse return error.MissingRequiredField),
+                .to = try self.lowerExprPtr(ts.childByFieldName(node, "to") orelse return error.MissingRequiredField),
+                .body = try self.lowerBlock(ts.childByFieldName(node, "body") orelse return error.MissingRequiredField),
+            } };
+        }
+
         if (std.mem.eql(u8, k, "record_expr")) {
             return .{ .record = .{
                 .span = self.spanOf(node),

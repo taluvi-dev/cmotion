@@ -254,6 +254,10 @@ keyframe       = expr ,
 (* Composition                                        *)
 (* -------------------------------------------------- *)
 
+(* One value per Int in [from, to), as an array; the bounds are
+   evaluated once and must be whole numbers. *)
+for_expr       = "for" , ident , "in" , expr , ".." , expr , block ;
+
 compose_expr   = "compose" ,
                  "[" ,
                  [ expr , { "," , expr } ] ,

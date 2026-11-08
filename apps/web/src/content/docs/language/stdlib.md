@@ -165,6 +165,24 @@ new constructor, type or argument. (0.0.14 also freezes the
   `rotate(z: noise("wind", 1.5s, 4deg))`.
 - **`random(seed)`** — a number in [0, 1) that is the same for the same
   seed on every renderer: `random("star-7") * 360deg`.
+- **`for` loops** — `for i in 0..n { … }` gives one value per whole
+  number from 0 up to, not including, `n`, as an array; loops nest. In
+  `compose`, arrays (and arrays of arrays) are spliced into the layer
+  list, so a row or a grid is a loop:
+
+  ```cm
+  compose [
+    rect(width: 1280px, height: 720px, fill: #111827),
+    for i in 0..12 {
+      star(points: 5, radius: 30px).translate(x: (i - 5.5) * 95px)
+        .during(i * 0.1s, 5s, fade_in: 0.3s)     // a staggered entrance
+    },
+    for row in 0..3 { for col in 0..4 { … } },   // a grid
+  ]
+  ```
+
+  Bounds are whole numbers without units, known before the clip plays,
+  and a loop runs at most 10000 times (`EVL006` otherwise).
 - **Time structure on any layer** — Remotion's `<Sequence>`, `<Series>`,
   `<Loop>` and `<Freeze>`. Each runs the layer on its own clock, called
   as a function or chained:

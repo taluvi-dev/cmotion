@@ -351,6 +351,16 @@ pub const Compose = struct {
     layers: []const Expr,
 };
 
+/// `for var in from..to { body }` — the body once per Int in
+/// [from, to), as an array.
+pub const ForExpr = struct {
+    span: Span,
+    var_name: Ident,
+    from: *const Expr,
+    to: *const Expr,
+    body: Block,
+};
+
 pub const RecordExpr = struct {
     span: Span,
     inits: []const RecordInit,
@@ -376,6 +386,7 @@ pub const Expr = union(enum) {
     lambda: Lambda,
     animate: Animate,
     compose: Compose,
+    for_: ForExpr,
     record: RecordExpr,
     array: ArrayExpr,
     block: Block,

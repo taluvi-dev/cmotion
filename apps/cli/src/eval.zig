@@ -245,6 +245,7 @@ pub const Evaluator = struct {
             .method_call => |mc| try self.evalMethodCall(mc, scope),
             .animate => |a| try self.evalAnimate(a, scope),
             .compose => |c| try self.evalCompose(c, scope),
+            .for_ => |f| try self.evalFor(f, scope),
             .lambda => |l| try self.evalLambda(l, scope),
         };
     }
@@ -497,11 +498,62 @@ pub const Evaluator = struct {
     }
 
     fn evalCompose(self: *Evaluator, c: ast.Compose, scope: *Scope) EvalError!Value {
-        const elems = try self.arena.alloc(Value, c.layers.len);
-        for (c.layers, 0..) |layer, i| elems[i] = try self.evalExpr(layer, scope);
+        // Arrays among the layers (a `for`, nested `for`s, an array
+        // `let`) are spliced in, so `compose [bg, for i in 0..3 { … }]`
+        // is a flat list of layers for every renderer.
+        var elems: std.ArrayListUnmanaged(Value) = .{};
+        for (c.layers) |layer| try appendFlat(self.arena, &elems, try self.evalExpr(layer, scope));
         const fields = try self.arena.alloc(value.Field, 1);
-        fields[0] = .{ .name = "layers", .value = .{ .array = .{ .elems = elems } } };
+        fields[0] = .{ .name = "layers", .value = .{ .array = .{ .elems = elems.items } } };
         return .{ .constructed = .{ .name = "compose", .fields = fields } };
+    }
+
+    /// Most iterations a `for` may run: a typo like `0..1e9` is a
+    /// diagnostic, not a hung editor.
+    pub const max_loop = 10_000;
+
+    fn evalFor(self: *Evaluator, f: ast.ForExpr, scope: *Scope) EvalError!Value {
+        const from = try self.loopBound(f.from.*, scope) orelse return .nil;
+        const to = try self.loopBound(f.to.*, scope) orelse return .nil;
+        const n: usize = if (to > from) @intCast(to - from) else 0;
+        if (n > max_loop) {
+            try self.loopError(f.span, try std.fmt.allocPrint(self.arena, "a `for` may run at most {d} times; this one runs {d}", .{ max_loop, n }));
+            return .nil;
+        }
+        const elems = try self.arena.alloc(Value, n);
+        for (0..n) |k| {
+            var iter = Scope{ .parent = scope };
+            defer iter.names.deinit(self.gpa);
+            const i: i64 = from + @as(i64, @intCast(k));
+            try iter.names.put(self.gpa, f.var_name.name, .{ .number = .{ .value = @floatFromInt(i), .unit = null } });
+            elems[k] = try self.evalBlock(f.body, &iter);
+        }
+        return .{ .array = .{ .elems = elems } };
+    }
+
+    /// A loop bound: a plain whole number known before the clip plays.
+    fn loopBound(self: *Evaluator, e: ast.Expr, scope: *Scope) EvalError!?i64 {
+        const v = try self.evalExpr(e, scope);
+        if (v == .number and v.number.unit == null and @floor(v.number.value) == v.number.value and @abs(v.number.value) <= 1e9) {
+            return @intFromFloat(v.number.value);
+        }
+        try self.loopError(e.span(), "a `for` bound must be a whole number without a unit, known before the clip plays (not an animation or a parameter's time)");
+        return null;
+    }
+
+    fn loopError(self: *Evaluator, span: ast.Span, msg: []const u8) EvalError!void {
+        const loc = span.location(self.source);
+        try self.diagnostics.append(self.gpa, .{
+            .code = "EVL006",
+            .message = msg,
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = span.end - span.start },
+            .expected = "for i in 0..12 { … }",
+            .fix_safety = .@"requires-human-review",
+            .repair = .{
+                .id = "fix-loop-bounds",
+                .summary = "Use whole-number bounds without units, at most 10000 iterations apart.",
+            },
+        });
     }
 
     fn evalArray(self: *Evaluator, a: ast.ArrayExpr, scope: *Scope) EvalError!Value {
@@ -1044,6 +1096,13 @@ pub const Evaluator = struct {
 //
 // Helpers (pure)
 //
+
+fn appendFlat(arena: std.mem.Allocator, out: *std.ArrayListUnmanaged(Value), v: Value) EvalError!void {
+    switch (v) {
+        .array => |a| for (a.elems) |e| try appendFlat(arena, out, e),
+        else => try out.append(arena, v),
+    }
+}
 
 pub fn parseNumber(n: ast.NumberLit) value.Number {
     // The lexer guarantees `n.text` is a well-formed numeric literal
@@ -1646,4 +1705,18 @@ test "eval: match with ident pattern binds the subject" {
 
     try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
     try std.testing.expectEqual(@as(f64, 8), r.program.bindings[0].value.number.value);
+}
+
+test "eval: a for bound that is not a whole number, or too many iterations, is EVL006" {
+    for ([_][]const u8{
+        "let a = for i in 0..2.5 { i };",
+        "let b = for i in 0..3s { i };",
+        "let c = for i in 0..100000 { i };",
+    }) |src| {
+        var r = try evalSource(src);
+        defer r.arena.deinit();
+        defer std.testing.allocator.free(r.diagnostics);
+        try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
+        try std.testing.expectEqualStrings("EVL006", r.diagnostics[0].code);
+    }
 }

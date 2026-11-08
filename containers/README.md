@@ -158,6 +158,7 @@ Worker can surface the diagnostic to the client.
   group `opacity`, 2D shapes (`ellipse`, `polygon`, `star`, `pie`,
   rounded `rect`, flat `path`) with `stroke` and draw-on, all extrudable,
   text reveal (`reveal`, `by`, `rise`) and `fit`, in-clip `transition`,
+  `for` loops (nesting, spliced into `compose`),
   and a viewer `load(source, args)` that binds scene
   parameters through the WASM's `parse_eval_with`. Existing sources
   render pixel-identically to 0.0.13 except `vectorize()` scenes, which

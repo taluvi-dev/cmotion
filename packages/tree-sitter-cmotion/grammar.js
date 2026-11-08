@@ -351,6 +351,7 @@ module.exports = grammar({
       $.match_expr,
       $.animate_expr,
       $.compose_expr,
+      $.for_expr,
       $.record_expr,
       $.array_expr,
       $.block,
@@ -358,6 +359,19 @@ module.exports = grammar({
     ),
 
     paren_expr: $ => seq('(', $._expr, ')'),
+
+    // `for i in 0..n { … }` — one value per Int in [from, to), as an
+    // array. The bounds are evaluated once, before the clip plays, so
+    // they cannot depend on time.
+    for_expr: $ => seq(
+      'for',
+      field('var', $.identifier),
+      'in',
+      field('from', $._expr),
+      '..',
+      field('to', $._expr),
+      field('body', $.block),
+    ),
 
     //
     // Lambda

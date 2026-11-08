@@ -1335,3 +1335,24 @@ test "sampleAt: transition fades or slides from one layer to the next" {
     try std.testing.expectEqualStrings("translate", in_layer.constructed.name);
     try std.testing.expectApproxEqAbs(@as(f64, 75), in_layer.constructed.fields[1].value.number.value, 1e-9);
 }
+
+test "eval: for loops make arrays, nest, and splice into compose" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const xs = try evalAndSample(a, "let xs = for i in 0..4 { i * 10px };", 0);
+    try std.testing.expectEqual(@as(usize, 4), xs.array.elems.len);
+    try std.testing.expectEqual(@as(f64, 30), xs.array.elems[3].number.value);
+    try std.testing.expectEqual(ast_unit_px, xs.array.elems[3].number.unit.?);
+    const grid = try evalAndSample(a, "let g = compose [rect(width: 1px), for r in 0..2 { for c in 0..3 { rect(width: (r * 3 + c) * 1px) } }];", 0);
+    const layers = grid.constructed.fields[0].value.array.elems;
+    try std.testing.expectEqual(@as(usize, 7), layers.len);
+    try std.testing.expectEqual(@as(f64, 5), layers[6].constructed.fields[0].value.number.value);
+    // A staggered entrance: each layer's window starts later.
+    const stag = try evalAndSample(a, "let s = compose [for i in 0..3 { during(i * 1s, 10s, rect(width: 1px)) }];", 1.5);
+    const sl = stag.constructed.fields[0].value.array.elems;
+    try std.testing.expectEqualStrings("rect", sl[1].constructed.name);
+    try std.testing.expectEqualStrings("opacity", sl[2].constructed.name);
+}
+
+const ast_unit_px = @import("ast.zig").Unit.px;
