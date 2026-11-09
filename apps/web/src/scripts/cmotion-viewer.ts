@@ -502,10 +502,15 @@ function buildVideoLayer(node: JsonNode): THREE.Object3D | null {
   return pictureMesh(entry.tex, entry.width, entry.height, f);
 }
 
-/** Frames from an HTML <video>, one element per movie, seeks in order. Not frame-exact. */
+/**
+ * Frames from an HTML <video>, one element per movie, seeks in order. Not
+ * frame-exact, and the server must answer range requests. The built-in
+ * provider; exported so a host's provider can fall back to it for plain
+ * URLs.
+ */
 const videoElements = new Map<string, { el: HTMLVideoElement; ready: Promise<void>; queue: Promise<unknown> }>();
 
-function elementVideoFrames(src: string, time: number, opts: { loop: boolean }): Promise<VideoFrameImage> {
+export function elementVideoFrames(src: string, time: number, opts: { loop: boolean }): Promise<VideoFrameImage> {
   let v = videoElements.get(src);
   if (!v) {
     const el = document.createElement("video");
