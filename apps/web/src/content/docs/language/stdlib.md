@@ -127,8 +127,9 @@ new constructor, type or argument. (0.0.14 also freezes the
   Its value is the matching constructor, so `fill: logo` works wherever
   `fill: image("…")` does. A host passes the URL (see the
   [host API](/impl/interpreter/#embedding-the-wasm-host-api)); cmotion
-  never fetches by asset id. `Video` and `Audio` parameters declare the
-  slot; the viewer does not draw video or play audio from them yet.
+  never fetches by asset id. A `Video` parameter draws with
+  `video(clip, width: …)` (below); `Audio` declares the slot, and nothing
+  plays it yet (a scene makes no sound).
 - **Easing** — every segment of an `animate` can take a curve: the
   `easing:` option sets the default, and `t => v with <easing>` sets the
   curve of the segment arriving at that keyframe:
@@ -225,6 +226,25 @@ new constructor, type or argument. (0.0.14 also freezes the
   `image(…)` as the first `compose` layer is still the background. Web
   viewer only (the native renderer draws no pictures); the viewer waits
   for every picture before a render or bake.
+- **Video as a layer** — `video(src, width:, height:, fit:, radius:,
+  start:, speed:, loop:)` is a picture layer whose picture is the movie's
+  frame at `start + t · speed`, where `t` is the layer's own time: `during`
+  starts the movie when the layer appears, `freeze` holds a frame, `loop`
+  repeats a stretch. Past its end the movie holds its last frame, or with
+  `loop: true` starts over. Sized, cropped and stacked like `image`:
+
+  ```cm
+  video(clip, width: output.width, height: output.height)   // full frame, cover
+    .during(2s, 8s, fade_in: 0.5s)                           // plays from its start at 2 s
+  ```
+
+  Web viewer only. The viewer decodes nothing itself: a host supplies
+  frames with `setVideoFrameProvider((src, time, { loop }) => …)` on the
+  viewer handle (Plinken streams them frame-exactly from a space's
+  assets); without one it seeks an HTML `<video>`, which needs a server
+  that answers range requests and is not frame-exact. A render or bake
+  waits for every frame. A scene makes no sound — a movie's audio stays
+  with the host.
 - **`output`** — the frame the host renders: `output.width` / `.height`
   (px), `.aspect`, `.fps`, `.duration` (s) and `.safe.top` / `.right` /
   `.bottom` / `.left` (px, the margins a platform's UI covers). Lay out

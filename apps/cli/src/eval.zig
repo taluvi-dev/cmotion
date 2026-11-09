@@ -257,6 +257,20 @@ pub const Evaluator = struct {
         return out;
     }
 
+    /// A `video(…)` plays on its layer's clock: from runner 0.0.14 the
+    /// evaluator adds `media_clock`, which the sampler turns into the
+    /// layer's local time in seconds — so `during`, `shift`, `loop` and
+    /// `freeze` start, delay, repeat and hold the movie like any layer. A
+    /// renderer reads it to pick the frame. (Older pins never drew video,
+    /// and keep their tree as it was.)
+    fn withMediaClock(self: *Evaluator, name: []const u8, fields: []const value.Field) ![]const value.Field {
+        if (!std.mem.eql(u8, name, "video") or !runner.atLeast(self.runner_pin, .{ 0, 0, 14 })) return fields;
+        const out = try self.arena.alloc(value.Field, fields.len + 1);
+        @memcpy(out[0..fields.len], fields);
+        out[fields.len] = .{ .name = "media_clock", .value = .{ .constructed = .{ .name = "media_clock", .fields = &.{} } } };
+        return out;
+    }
+
     /// `output` — the frame the host renders: from runner 0.0.14 (an older
     /// pin never had the name, so a source using it as its own word keeps
     /// what it had). A top-level `let output` still shadows it.
@@ -344,7 +358,7 @@ pub const Evaluator = struct {
     fn evalCall(self: *Evaluator, c: ast.Call, scope: *Scope) EvalError!Value {
         if (try self.constructorName(c.callee.*, scope)) |name| {
             const fields = try self.evalArgs(c.args, scope, null);
-            return .{ .constructed = .{ .name = name, .fields = fields } };
+            return .{ .constructed = .{ .name = name, .fields = try self.withMediaClock(name, fields) } };
         }
         const callee = try self.evalExpr(c.callee.*, scope);
         switch (callee) {
@@ -446,7 +460,7 @@ pub const Evaluator = struct {
         }
         const receiver = try self.evalExpr(mc.receiver.*, scope);
         const fields = try self.evalArgs(mc.args, scope, receiver);
-        return .{ .constructed = .{ .name = mc.name.name, .fields = fields } };
+        return .{ .constructed = .{ .name = mc.name.name, .fields = try self.withMediaClock(mc.name.name, fields) } };
     }
 
     /// Evaluate a call's argument list into a flat `Field` slice. Positional

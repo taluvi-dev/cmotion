@@ -307,11 +307,20 @@ function isImageLayer(node: JsonNode): boolean {
 function buildImageLayer(node: JsonNode): THREE.Object3D | null {
   const path = imagePath(node);
   if (!path) return null;
-  const f = namedFields(node);
-  const wantW = f.width !== undefined ? numberOf(f.width) : null;
-  const wantH = f.height !== undefined ? numberOf(f.height) : null;
   const img = loadedImage(path);
   if (!img) return null;
+  return pictureMesh(img.tex, img.width, img.height, namedFields(node));
+}
+
+/**
+ * A picture-like layer (an image, or a video's current frame) of natural
+ * size `natW` × `natH`, sized per `width:` / `height:` / `fit:` /
+ * `radius:` in `f`.
+ */
+function pictureMesh(tex: THREE.Texture, natW: number, natH: number, f: Record<string, JsonNode>): THREE.Object3D | null {
+  const wantW = f.width !== undefined ? numberOf(f.width) : null;
+  const wantH = f.height !== undefined ? numberOf(f.height) : null;
+  const img = { width: natW, height: natH };
   const aspect = img.width / img.height;
   const boxW = wantW ?? (wantH ?? img.height) * aspect;
   const boxH = wantH ?? (wantW ?? img.width) / aspect;
@@ -361,10 +370,177 @@ function buildImageLayer(node: JsonNode): THREE.Object3D | null {
     uv[i * 2 + 1] = v0 + (pos.getY(i) / H + 0.5) * (v1 - v0);
   }
   geom.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
-  const mat = new THREE.MeshBasicMaterial({ map: img.tex, transparent: true, toneMapped: false });
+  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, toneMapped: false });
   const mesh = new THREE.Mesh(geom, mat);
   mesh.userData.imageLayer = true;
   return mesh;
+}
+
+// ---- Video layers -------------------------------------------------
+//
+// video(src, width:, height:, fit:, radius:, start:, speed:, loop:) is a
+// picture layer whose picture is a movie's frame at
+//   start + media_clock · speed
+// where `media_clock` (written by the evaluator, resolved by the sampler)
+// is the layer's own time — so `during`, `freeze` and `loop` start, hold
+// and repeat the movie. Past its end the movie holds its last frame, or
+// with `loop: true` starts over.
+//
+// The viewer decodes nothing itself: a host supplies frames through
+// `setVideoFrameProvider` (Plinken streams them frame-exactly from the
+// space's assets). The built-in provider seeks an HTML <video> — fine for
+// a preview, not frame-exact. A frame being fetched counts in `pending`,
+// so a render or bake waits for it; meanwhile a preview shows the last
+// frame it had.
+
+/** One frame of a movie: anything a 2D canvas draws, or RGBA pixels. */
+export interface VideoFrameImage {
+  image: CanvasImageSource | ImageData;
+  width: number;
+  height: number;
+}
+
+/** The frame of `src` shown at `time` seconds (`loop`: wrap at the end, else hold the last frame). */
+export type VideoFrameProvider = (src: string, time: number, opts: { loop: boolean }) => Promise<VideoFrameImage>;
+
+/** A fetched frame, drawn once into its own canvas texture. */
+interface VideoEntry {
+  src: string;
+  time: number;
+  width: number;
+  height: number;
+  canvas: HTMLCanvasElement;
+  tex: THREE.CanvasTexture;
+}
+
+/** Frames by `src|time|loop`, least recently used first. Several layers
+ *  may show one movie at different times, so frames are kept per time. */
+const videoFrames = new Map<string, VideoEntry>();
+const VIDEO_FRAMES_KEPT = 8;
+const videoPending = new Set<string>();
+/** Movies whose frames failed: not asked again (a retry loop would spin). */
+const videoFailed = new Set<string>();
+let videoProvider: VideoFrameProvider | null = null;
+
+function videoPath(node: JsonNode): string | null {
+  if (!node || node.kind !== "constructed" || node.name !== "video") return null;
+  const raw = positionalArgs(node)[0];
+  // `video(clip, …)` where `clip: Video` is a parameter: its value is `video("url")`
+  if (raw?.kind === "constructed" && raw.name === "video") return videoPath(raw);
+  if (!raw || raw.kind !== "string") return null;
+  return String(raw.raw).replace(/^"|"$/g, "") || null;
+}
+
+function isVideoLayer(node: JsonNode): boolean {
+  if (!node || node.kind !== "constructed" || node.name !== "video") return false;
+  const f = namedFields(node);
+  return f.width !== undefined || f.height !== undefined;
+}
+
+function secondsOf(v: JsonNode, fallback: number): number {
+  if (!v || v.kind !== "number") return fallback;
+  const u = v.unit;
+  return u === "ms" ? v.value / 1000 : u === "us" ? v.value / 1e6 : u === "ns" ? v.value / 1e9 : v.value;
+}
+
+function keepVideoFrame(key: string, src: string, time: number, frame: VideoFrameImage) {
+  const canvas = document.createElement("canvas");
+  canvas.width = frame.width;
+  canvas.height = frame.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const { image } = frame;
+  if (typeof ImageData !== "undefined" && image instanceof ImageData) ctx.putImageData(image, 0, 0);
+  else ctx.drawImage(image as CanvasImageSource, 0, 0, frame.width, frame.height);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  videoFrames.set(key, { src, time, width: frame.width, height: frame.height, canvas, tex });
+  for (const [k, e] of videoFrames) {
+    if (videoFrames.size <= VIDEO_FRAMES_KEPT) break;
+    if (k === key) continue;
+    videoFrames.delete(k);
+    e.tex.dispose();
+  }
+}
+
+function requestVideoFrame(src: string, time: number, loop: boolean, key: string) {
+  if (videoPending.has(key) || videoFrames.has(key) || videoFailed.has(src)) return;
+  videoPending.add(key);
+  (videoProvider ?? elementVideoFrames)(src, time, { loop })
+    .then((frame) => keepVideoFrame(key, src, time, frame))
+    .catch((e) => {
+      console.warn(`[cmotion-viewer] video ${src} at ${time.toFixed(3)}s failed; not drawing it`, e);
+      videoFailed.add(src);
+    })
+    .finally(() => {
+      videoPending.delete(key);
+      requestFrame?.();
+    });
+}
+
+function buildVideoLayer(node: JsonNode): THREE.Object3D | null {
+  const src = videoPath(node);
+  if (!src) return null;
+  const f = namedFields(node);
+  const loop = f.loop?.kind === "bool" && f.loop.value === true;
+  const speed = numberOf(f.speed, 1);
+  const time = Math.max(0, secondsOf(f.start, 0) + secondsOf(f.media_clock, 0) * speed);
+  const key = `${src}|${time.toFixed(6)}|${loop ? 1 : 0}`;
+  let entry = videoFrames.get(key);
+  if (entry) {
+    videoFrames.delete(key); // most recently used
+    videoFrames.set(key, entry);
+  } else {
+    requestVideoFrame(src, time, loop, key);
+    // a preview shows the nearest frame it has while this one loads; a
+    // render or bake waits for `pending` and so gets the exact frame
+    for (const e of videoFrames.values()) {
+      if (e.src === src && (!entry || Math.abs(e.time - time) < Math.abs(entry.time - time))) entry = e;
+    }
+  }
+  if (!entry) return null;
+  return pictureMesh(entry.tex, entry.width, entry.height, f);
+}
+
+/** Frames from an HTML <video>, one element per movie, seeks in order. Not frame-exact. */
+const videoElements = new Map<string, { el: HTMLVideoElement; ready: Promise<void>; queue: Promise<unknown> }>();
+
+function elementVideoFrames(src: string, time: number, opts: { loop: boolean }): Promise<VideoFrameImage> {
+  let v = videoElements.get(src);
+  if (!v) {
+    const el = document.createElement("video");
+    el.muted = true;
+    el.playsInline = true;
+    el.preload = "auto";
+    el.crossOrigin = "anonymous";
+    el.src = src;
+    const ready = new Promise<void>((resolve, reject) => {
+      el.addEventListener("loadeddata", () => resolve(), { once: true });
+      el.addEventListener("error", () => reject(new Error(`could not load ${src}`)), { once: true });
+    });
+    v = { el, ready, queue: Promise.resolve() };
+    videoElements.set(src, v);
+  }
+  const { el, ready } = v;
+  const run = v.queue.then(async () => {
+    await ready;
+    const d = el.duration;
+    const t = Number.isFinite(d) && d > 0 ? (opts.loop ? time % d : Math.min(time, Math.max(0, d - 0.001))) : time;
+    if (Math.abs(el.currentTime - t) > 1e-4 || el.readyState < 2) {
+      await new Promise<void>((resolve) => {
+        el.addEventListener("seeked", () => resolve(), { once: true });
+        el.currentTime = t;
+      });
+    }
+    // copy now: the element moves on with the next seek
+    const c = document.createElement("canvas");
+    c.width = el.videoWidth;
+    c.height = el.videoHeight;
+    c.getContext("2d")?.drawImage(el, 0, 0);
+    return { image: c, width: c.width, height: c.height };
+  });
+  v.queue = run.catch(() => undefined);
+  return run;
 }
 
 /**
@@ -1903,6 +2079,10 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
     // `fill` slot or as the first layer of `compose` (background) — see
     // buildMaterial and buildCompose. Reaching them via buildLayer means
     // they were placed somewhere the viewer can't render them yet.
+    case "video":
+      if (isVideoLayer(node)) return buildVideoLayer(node);
+      console.warn(`[cmotion-viewer] "video" draws as a layer with width: or height:`);
+      return null;
     case "image":
       if (isImageLayer(node)) return buildImageLayer(node);
       console.warn(`[cmotion-viewer] "image" without width: or height: only renders as a material fill or compose background`);
@@ -1971,6 +2151,7 @@ export interface ViewerHandle {
   durationSeconds: number;
   /** Deferred assets still loading (vectorize traces, fonts). */
   pending: number;
+  setVideoFrameProvider(provider: VideoFrameProvider | null): void;
   sceneParams(source: string): CmSceneParams;
   versions: { cmotion: string; three: string };
   captureFrame(): Promise<Blob | null>;
@@ -2153,7 +2334,18 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
     versions: { cmotion: interpVersion, three: THREE.REVISION },
     // Count of deferred assets still resolving (e.g. vectorize() traces).
     // The headless render driver waits for this to hit 0 before screenshotting.
-    get pending() { return vectorizePending.size + fontPending.size + texturePending.size; },
+    get pending() { return vectorizePending.size + fontPending.size + texturePending.size + videoPending.size; },
+    /**
+     * Where video frames come from (`null`: the built-in HTML <video>
+     * seek, not frame-exact). Frames already shown are fetched again.
+     */
+    setVideoFrameProvider(provider: VideoFrameProvider | null) {
+      videoProvider = provider;
+      videoFailed.clear();
+      for (const e of videoFrames.values()) e.tex.dispose();
+      videoFrames.clear();
+      requestFrame?.();
+    },
     // The entry scene's parameters (the clip's props) and the
     // diagnostics of the source, without evaluating its body.
     sceneParams(source: string): CmSceneParams { return sceneParams(exp, source); },

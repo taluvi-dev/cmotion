@@ -137,7 +137,7 @@ pub const functions = [_]Fn{
     .{ .name = "fit", .spec = "@2" },
     .{ .name = "as_texture", .spec = "@1 projection:equirectangular" },
     .{ .name = "font", .spec = "@1" },
-    .{ .name = "video", .spec = "@1" },
+    .{ .name = "video", .spec = "@1 width:px height:px fit:cover|contain|fill radius:px start:s speed:num loop:bool" },
     .{ .name = "audio", .spec = "@1" },
     .{ .name = "size", .spec = "@2" },
     // 3D

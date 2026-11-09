@@ -142,6 +142,9 @@ fn sampleConstructed(
         if (try tryEvalOnEvent(arena, c, t)) |sampled| return sampled;
     } else if (std.mem.eql(u8, c.name, "field_of")) {
         if (try tryEvalFieldOf(arena, c, t)) |sampled| return sampled;
+    } else if (std.mem.eql(u8, c.name, "media_clock")) {
+        // a video's clock (eval.zig `withMediaClock`): the local time here
+        return .{ .number = .{ .value = t, .unit = .s } };
     }
     const fields = try arena.alloc(value.Field, c.fields.len);
     for (c.fields, 0..) |f, i| fields[i] = .{
@@ -1356,3 +1359,28 @@ test "eval: for loops make arrays, nest, and splice into compose" {
 }
 
 const ast_unit_px = @import("ast.zig").Unit.px;
+
+test "sampleAt: a video plays on its layer's clock, through during, freeze and loop" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const clockOf = struct {
+        fn of(v: Value) f64 {
+            for (v.constructed.fields) |f| if (std.mem.eql(u8, f.name, "media_clock")) return f.value.number.value;
+            return -1;
+        }
+    }.of;
+    // plain: the scene's time
+    const plain = try evalAndSample(a, "runner \"0.0.14\";\nlet x = video(\"/a.mp4\", width: 100px);", 2.5);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.5), clockOf(plain), 1e-9);
+    // during starts it at its window; freeze holds a frame; loop repeats
+    const late = try evalAndSample(a, "runner \"0.0.14\";\nlet x = during(1s, 9s, video(\"/a.mp4\", width: 100px));", 3);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), clockOf(late), 1e-9);
+    const held = try evalAndSample(a, "runner \"0.0.14\";\nlet x = freeze(0.5s, video(\"/a.mp4\", width: 100px));", 4);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), clockOf(held), 1e-9);
+    const looped = try evalAndSample(a, "runner \"0.0.14\";\nlet x = loop(2s, video(\"/a.mp4\", width: 100px));", 5);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), clockOf(looped), 1e-9);
+    // an older pin keeps its tree: no clock
+    const old = try evalAndSample(a, "runner \"0.0.13\";\nlet x = video(\"/a.mp4\");", 1);
+    try std.testing.expectEqual(@as(f64, -1), clockOf(old));
+}
