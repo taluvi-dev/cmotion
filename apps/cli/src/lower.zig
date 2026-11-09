@@ -462,7 +462,13 @@ pub const Lowerer = struct {
             const n = ts.namedChildCount(node);
             var i: u32 = 0;
             while (i < n) : (i += 1) {
-                try layers.append(self.arena, try self.lowerExpr(ts.namedChild(node, i)));
+                const c = ts.namedChild(node, i);
+                // Comments between layers are named children too (see the
+                // array loop below): skip them, or a commented layer list
+                // fails to lower (LWR000).
+                const ck = ts.kind(c);
+                if (std.mem.eql(u8, ck, "line_comment") or std.mem.eql(u8, ck, "block_comment")) continue;
+                try layers.append(self.arena, try self.lowerExpr(c));
             }
             return .{ .compose = .{
                 .span = self.spanOf(node),

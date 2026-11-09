@@ -1619,6 +1619,22 @@ test "check: an argument's choice is not a name anywhere else" {
     try std.testing.expectEqualStrings("NAM003", r.diagnostics[0].code);
 }
 
+test "check: comments between compose layers lower and check clean" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\scene t() -> Frame {
+        \\  compose [
+        \\    circle(radius: 4px),
+        \\    // a note between two layers
+        \\    /* and a block one */
+        \\    circle(radius: 2px),
+        \\  ]
+        \\}
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+}
+
 test "check: a method call does not reach a local binding" {
     var r = try checkSource(
         \\use std.shapes.*;
