@@ -245,6 +245,29 @@ new constructor, type or argument. (0.0.14 also freezes the
   that answers range requests and is not frame-exact. A render or bake
   waits for every frame. A scene makes no sound — a movie's audio stays
   with the host.
+- **`camera2d(world, x:, y:, zoom:, rotate:)`** — a 2D camera over
+  `world` (a layer, a `compose`, or a list of layers): the world's point
+  (x, y) is at the centre of the picture, magnified `zoom` times, with the
+  camera turned by `rotate` (the picture turns the other way). Animate the
+  arguments for camera moves — zoom to a diagram node, pan to the next, a
+  slow push on a product. Layers outside the camera (titles, captions, a
+  logo) stay put:
+
+  ```cm
+  let x = animate { 1s => 0px, 2s => -210px with easing.in_out_cubic };
+  let zoom = animate { 1s => 1, 2s => output.width / 900px with easing.in_out_cubic };
+  compose [
+    rect(width: output.width, height: output.height, fill: #0e1520),
+    camera2d(diagram, x: x, y: 0px, zoom: zoom),
+    text.block(title).translate(y: output.height / 2 - output.safe.top - 60px),
+  ]
+  ```
+
+  Web viewer only.
+- **Ratios are plain numbers** — a length over a length, a time over a
+  time (any unit of the family) is a plain number: `output.width / 900px`
+  is a zoom factor, `1s / 500ms` is 2. (Before 0.0.14 the left unit was
+  kept.)
 - **`output`** — the frame the host renders: `output.width` / `.height`
   (px), `.aspect`, `.fps`, `.duration` (s) and `.safe.top` / `.right` /
   `.bottom` / `.left` (px, the margins a platform's UI covers). Lay out

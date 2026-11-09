@@ -559,7 +559,11 @@ function stackInOrder(obj: THREE.Object3D, order: number) {
   obj.traverse((o) => {
     const mesh = o as THREE.Mesh;
     if (!mesh.isMesh) return;
-    mesh.renderOrder = order;
+    // a layer of a nested compose (a camera's world) keeps its order within
+    // this slot: order + inner / 1000 (renderOrder is a float)
+    const inner = typeof mesh.userData.stackOrder === "number" ? mesh.userData.stackOrder : 0;
+    mesh.userData.stackOrder = order + inner / 1000;
+    mesh.renderOrder = mesh.userData.stackOrder;
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     for (const m of mats) if (m && !(m as THREE.ShaderMaterial).uniforms) m.transparent = true;
   });
@@ -1097,6 +1101,39 @@ function buildTranslate(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
   inner.position.y += scale(f.y);
   inner.position.z += scale(f.z);
   return inner;
+}
+
+// camera2d(world, x:, y:, zoom:, rotate:) — a 2D camera over `world` (a
+// layer, a compose, or a list of layers): the point (x, y) of the world
+// is at the centre of the picture, magnified `zoom` times and turned by
+// `rotate` (degrees when written bare, like the native renderer's rotate).
+// Every argument may be animated, so a camera move is keyframes. Layers
+// outside the camera stay where they are — titles, captions, a logo.
+function buildCamera2d(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
+  const args = positionalArgs(node);
+  const f = namedFields(node);
+  const worldNode = args.find((a: JsonNode) => a?.kind === "constructed" || a?.kind === "array");
+  let world: THREE.Object3D | null;
+  if (worldNode?.kind === "array") {
+    const g = new THREE.Group();
+    addLayers(g, arrayElems(worldNode), ctx, false);
+    world = g;
+  } else {
+    world = buildLayer(worldNode, ctx);
+  }
+  if (!world) return null;
+  const zoom = Math.max(1e-3, numberOf(f.zoom, 1));
+  const r = f.rotate;
+  const turn = !r || r.kind !== "number" ? 0 : r.unit === "rad" ? r.value : r.unit === "turn" ? r.value * 2 * Math.PI : (r.value * Math.PI) / 180;
+  // world → centred on (x, y) → turned → magnified
+  const centred = new THREE.Group();
+  centred.add(world);
+  centred.position.set(-numberOf(f.x, 0) * pxToWorld, -numberOf(f.y, 0) * pxToWorld, 0);
+  const cam = new THREE.Group();
+  cam.add(centred);
+  cam.rotation.z = -turn;
+  cam.scale.set(zoom, zoom, 1);
+  return cam;
 }
 
 // Read a single vec2(x, y) node into {x, y} (px, frame space). Accepts
@@ -2078,6 +2115,8 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       return buildTranslate(node, ctx);
     case "pivot":
       return buildPivot(node, ctx);
+    case "camera2d":
+      return buildCamera2d(node, ctx);
     case "squash":
       return buildSquash(node, ctx);
     // `image`, `fit`, `as_texture` only render as part of a material's

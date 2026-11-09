@@ -161,6 +161,7 @@ pub const functions = [_]Fn{
     .{ .name = "rotate", .spec = "@1 x:deg y:deg z:deg" },
     .{ .name = "scale", .spec = "@2 x:num y:num z:num" },
     .{ .name = "pivot", .spec = "@2" },
+    .{ .name = "camera2d", .spec = "@1 x:px y:px zoom:num rotate:deg" },
     .{ .name = "squash", .spec = "@2 factor:num" },
     .{ .name = "opacity", .spec = "@2" },
     // time (the sampler resolves these, whatever the renderer)

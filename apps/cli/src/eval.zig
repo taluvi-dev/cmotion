@@ -95,6 +95,33 @@ const Scope = struct {
     }
 };
 
+/// A unit's family, for "same kind of quantity" (a ratio of two is a plain number).
+fn unitFamily(u: ast.Unit) u8 {
+    return switch (u) {
+        .s, .ms, .us, .ns => 1,
+        .deg, .rad, .turn => 2,
+        .px => 3,
+        .percent => 4,
+        .hz, .khz => 5,
+        .bpm => 6,
+        .bars => 7,
+        .beats => 8,
+    };
+}
+
+/// A unit in its family's base unit (s, deg, hz, …).
+fn unitScale(u: ast.Unit) f64 {
+    return switch (u) {
+        .ms => 1e-3,
+        .us => 1e-6,
+        .ns => 1e-9,
+        .rad => 180.0 / std.math.pi,
+        .turn => 360,
+        .khz => 1000,
+        else => 1,
+    };
+}
+
 /// The frame a host renders a scene into, as `output` in the source:
 /// `output.width` / `.height` (px), `.aspect` (width / height), `.fps`,
 /// `.duration` (s) and `.safe.top` / `.right` / `.bottom` / `.left` (px,
@@ -910,6 +937,16 @@ pub const Evaluator = struct {
             .mul, .div, .pow => ln.unit orelse rn.unit,
             else => unreachable,
         };
+        // From runner 0.0.14 a length over a length (a time over a time, …)
+        // is a plain ratio — `output.width / 600px` is 3.2, `1s / 500ms` is
+        // 2 — instead of keeping the left unit. Older pins keep it, since a
+        // renderer reads a bare number differently from a `px` one.
+        if (b.op == .div and ln.unit != null and rn.unit != null and
+            unitFamily(ln.unit.?) == unitFamily(rn.unit.?) and runner.atLeast(self.runner_pin, .{ 0, 0, 14 }))
+        {
+            const den = rn.value * unitScale(rn.unit.?);
+            return .{ .number = .{ .value = if (den == 0) 0 else ln.value * unitScale(ln.unit.?) / den, .unit = null } };
+        }
         const v: f64 = switch (b.op) {
             .add => ln.value + rn.value,
             .sub => ln.value - rn.value,
@@ -1778,5 +1815,24 @@ test "eval: a for bound that is not a whole number, or too many iterations, is E
         defer std.testing.allocator.free(r.diagnostics);
         try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
         try std.testing.expectEqualStrings("EVL006", r.diagnostics[0].code);
+    }
+}
+
+test "eval: a ratio of two lengths (or times) is a plain number from runner 0.0.14" {
+    const cases = [_]struct { src: []const u8, value: f64, unit: ?ast.Unit }{
+        .{ .src = "runner \"0.0.14\";\nlet z = 1920px / 600px;", .value = 3.2, .unit = null },
+        .{ .src = "runner \"0.0.14\";\nlet t = 1s / 500ms;", .value = 2, .unit = null },
+        // a length over a number stays a length
+        .{ .src = "runner \"0.0.14\";\nlet h = 1920px / 2;", .value = 960, .unit = .px },
+        // an older pin keeps the left unit
+        .{ .src = "runner \"0.0.13\";\nlet z = 1920px / 600px;", .value = 3.2, .unit = .px },
+    };
+    for (cases) |c| {
+        var r = try evalSource(c.src);
+        defer r.arena.deinit();
+        defer std.testing.allocator.free(r.diagnostics);
+        const n = r.program.bindings[0].value.number;
+        try std.testing.expectApproxEqAbs(c.value, n.value, 1e-9);
+        try std.testing.expectEqual(c.unit, n.unit);
     }
 }
