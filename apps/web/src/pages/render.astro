@@ -12,6 +12,10 @@
 //   window.__viewer.seek(t)       seek to time t (seconds)
 //   window.__viewer.durationSeconds
 //   window.__viewer.versions      { cmotion, three }
+//   window.__viewer.pending       assets (fonts, pictures, video frames)
+//                                 still loading; wait for 0 before a capture
+//   window.__viewer.setVideoFrameProvider(fn)   where video(…) frames come
+//                                 from: (src, time, { loop }) => Promise<frame>
 //
 // The job's source + params are passed in via a `window.__job`
 // global that Playwright sets through `page.addInitScript(...)`
@@ -47,7 +51,7 @@
     <canvas id="stage"></canvas>
 
     <script>
-      import { boot, svgToGlb, imageToCenterlineSvg } from "../scripts/cmotion-viewer.ts";
+      import { boot, svgToGlb, imageToCenterlineSvg, type VideoFrameProvider } from "../scripts/cmotion-viewer.ts";
 
       declare global {
         interface Window {
@@ -61,6 +65,7 @@
             durationSeconds: number;
             pending: number;
             versions: { cmotion: string; three: string };
+            setVideoFrameProvider: (provider: VideoFrameProvider | null) => void;
           };
           // SVG → .glb export (base64), used by the container's mesh job.
           __svgToGlbB64?: (svg: string, depth: number, size: number, round: number) => Promise<string>;
@@ -119,6 +124,7 @@
             durationSeconds: view.durationSeconds,
             get pending() { return view.pending; },
             versions: view.versions,
+            setVideoFrameProvider: (provider) => view.setVideoFrameProvider(provider),
           };
           // Re-seek to 0 so the first screenshot is deterministic
           // regardless of whatever frame `load` happened to leave on
