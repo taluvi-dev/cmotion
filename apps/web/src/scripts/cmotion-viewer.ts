@@ -40,11 +40,19 @@ interface CmExports {
 // The booted WASM, for builders that ask it for geometry (shape_rings).
 let wasm: CmExports | null = null;
 
-async function loadWasm(): Promise<CmExports> {
+/** Where `boot()` fetches the interpreter and the default font from; a host serving them elsewhere passes its own. */
+export interface BootOptions {
+  wasmUrl?: string;
+  fontUrl?: string;
+}
+const DEFAULT_WASM_URL = "/cmotion-render.wasm";
+const DEFAULT_FONT_URL = "/DMSans-Bold.ttf";
+
+async function loadWasm(url: string): Promise<CmExports> {
   const stub = () => 0;
   const wasi = new Proxy({}, { get: () => stub });
-  const resp = await fetch("/cmotion-render.wasm");
-  if (!resp.ok) throw new Error(`could not fetch /cmotion-render.wasm: ${resp.status}`);
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`could not fetch ${url}: ${resp.status}`);
   const { instance } = await WebAssembly.instantiateStreaming(resp, {
     wasi_snapshot_preview1: wasi,
   });
@@ -627,9 +635,9 @@ function imagePath(node: JsonNode): string | null {
 let fontPromise: Promise<opentype.Font> | null = null;
 
 // opentype.js v2 removed `load()`; the supported path is fetch → parse(buffer).
-function loadFont(): Promise<opentype.Font> {
+function loadFont(url: string): Promise<opentype.Font> {
   if (!fontPromise) {
-    fontPromise = fetch("/DMSans-Bold.ttf")
+    fontPromise = fetch(url)
       .then((r) => {
         if (!r.ok) throw new Error(`font fetch failed: ${r.status}`);
         return r.arrayBuffer();
@@ -2241,10 +2249,16 @@ export interface ViewerHandle {
     onProgress?: (t: number) => void;
   }): Promise<{ blob: Blob; ext: string; mime: string }>;
   destroy(): void;
+  /**
+   * The frame at `t` as pixels, rendered in the same tick as the readback
+   * (a bake reads frames exactly; `captureClip`'s recorder is realtime and
+   * may drop them). `size` resamples to a host's output resolution.
+   */
+  snapshot(t: number, size?: { width: number; height: number }): Promise<ImageBitmap>;
 }
 
-export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
-  const [exp, font] = await Promise.all([loadWasm(), loadFont()]);
+export async function boot(canvas: HTMLCanvasElement, options: BootOptions = {}): Promise<ViewerHandle> {
+  const [exp, font] = await Promise.all([loadWasm(options.wasmUrl ?? DEFAULT_WASM_URL), loadFont(options.fontUrl ?? DEFAULT_FONT_URL)]);
   wasm = exp;
   const interpVersion = getVersion(exp);
   let handle = 0;
@@ -2420,6 +2434,14 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
       for (const e of videoFrames.values()) e.tex.dispose();
       videoFrames.clear();
       requestFrame?.();
+    },
+    snapshot(t: number, size?: { width: number; height: number }) {
+      // Even with preserveDrawingBuffer the WebGL back buffer can be
+      // undefined between paints: redraw right before reading it out.
+      applyFrame(t);
+      return size
+        ? createImageBitmap(canvas, { resizeWidth: size.width, resizeHeight: size.height, resizeQuality: "high" })
+        : createImageBitmap(canvas);
     },
     // The entry scene's parameters (the clip's props) and the
     // diagnostics of the source, without evaluating its body.
