@@ -778,7 +778,7 @@ function layoutBlock(font: opentype.Font, text: string, o0: BlockOptions) {
         tail += adv(g);
       }
       if (w <= o.width) continue;
-      if (lastBreak > start) {
+      if (lastBreak !== null && lastBreak > start) {
         lines.push(run.slice(start, lastBreak));
         start = lastBreak + 1;
         lastBreak = null;
