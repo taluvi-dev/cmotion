@@ -54,6 +54,7 @@ const diag = @import("diagnostics.zig");
 const host = @import("host.zig");
 const easing = @import("easing.zig");
 const stdlib = @import("stdlib.zig");
+const shape2d = @import("shape2d.zig");
 
 const SymbolKind = enum {
     import,
@@ -1020,8 +1021,10 @@ pub const Checker = struct {
         // A path is only held to "closed, 3+ points" when it is extruded:
         // on its own, an open path is a line to stroke.
         if (std.mem.eql(u8, shape, "path")) return self.checkPath(inner.call);
-        const extrudable = [_][]const u8{ "text.glyph", "text.block", "path", "ellipse", "circle", "polygon", "star", "pie", "rect" };
-        for (extrudable) |name| if (std.mem.eql(u8, shape, name)) return;
+        // What render.zig's meshFromShape takes: the text shapes, and
+        // every 2D shape kind (derived, so a new kind extrudes here too).
+        for ([_][]const u8{ "text.glyph", "text.block" }) |name| if (std.mem.eql(u8, shape, name)) return;
+        if (std.meta.stringToEnum(shape2d.Kind, shape) != null) return;
 
         const span = inner.span();
         const loc = span.location(self.source);
@@ -1114,7 +1117,10 @@ pub const Checker = struct {
     fn checkIdent(self: *Checker, id: ast.Ident, scope: *const Scope) !void {
         if (scope.lookup(id.name) != null) return;
         if (scope.has_wildcard_import) return;
-        if (stdlib.function(id.name) != null or stdlib.isNamespace(id.name) or stdlib.isValue(id.name)) return;
+        // An argument's choices (`fill`, `word`, …) are accepted where
+        // checkArgExprs sees them as that argument's value, not as a
+        // name anywhere: `rect(width: fill)` is a misspelt variable.
+        if (stdlib.function(id.name) != null or stdlib.isNamespace(id.name) or stdlib.isBareValue(id.name)) return;
 
         // Forward-reference within a block? Pre-scan populated
         // `future_names` on block scopes; a hit upgrades NAM003 to NAM004
@@ -1617,6 +1623,20 @@ test "check: choices may be strings where the renderer takes them" {
     defer r.arena.deinit();
     try std.testing.expectEqual(@as(usize, 2), r.diagnostics.len);
     for (r.diagnostics) |d| try std.testing.expectEqualStrings("TYP004", d.code);
+}
+
+test "check: an argument's choice is not a name anywhere else" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\let a = rect(width: fill, height: 4px);
+        \\let b = image("/a.png", width: 100px, fit: fill);
+        \\let c = animate { 0s => 0px, 1s => 4px } with { repeat: forever };
+    );
+    defer r.arena.deinit();
+    // `fill` as a width is an unknown name; as `fit:` it is that
+    // argument's choice; `forever` is a bare value of the language.
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
+    try std.testing.expectEqualStrings("NAM003", r.diagnostics[0].code);
 }
 
 test "check: a method call does not reach a local binding" {

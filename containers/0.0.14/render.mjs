@@ -12,6 +12,10 @@
 //   SOURCE        Required. The `.cm` source as a string.
 //   KIND          'frame' (default) | 'video'. v0 supports 'frame'.
 //   PARAMS_JSON   Optional JSON: { at?, width?, height?, fps?, duration? }.
+//   ARGS_JSON     Optional JSON: the entry scene's arguments by name
+//                 (its parameters' props). The frame — width, height,
+//                 fps, duration from PARAMS_JSON — is passed as `$output`
+//                 so a source laid out against `output` renders at it.
 //   ASSETS_JSON   Optional JSON: { "/earth.png": "asset_<uuid>", ... }.
 //                 (Not wired in v0 — gallery-only.)
 //   OUT_DIR       Output directory (default '/out').
@@ -67,8 +71,14 @@ function readEnv() {
     try { params = JSON.parse(process.env.PARAMS_JSON); }
     catch (e) { fail("ENV004", `PARAMS_JSON: ${e.message}`); }
   }
+  let args = {};
+  if (process.env.ARGS_JSON) {
+    try { args = JSON.parse(process.env.ARGS_JSON); }
+    catch (e) { fail("ENV005", `ARGS_JSON: ${e.message}`); }
+    if (!args || typeof args !== "object" || Array.isArray(args)) fail("ENV005", "ARGS_JSON must be an object of name → value");
+  }
   const outDir = process.env.OUT_DIR ?? "/out";
-  return { jobId, source, kind, params, outDir };
+  return { jobId, source, kind, params, args, outDir };
 }
 
 // Minimal static file server for the viewer bundle. Listens on a
@@ -180,9 +190,16 @@ async function bootViewer(env) {
     page.on("console", (msg) => {
       if (msg.type() === "error") process.stderr.write(`[viewer] ${msg.text()}\n`);
     });
-    await page.addInitScript((source) => {
-      window.__job = { source };
-    }, env.source);
+    // The scene's arguments and the frame it renders into: the viewer
+    // then evaluates through parse_eval_with (checked, with `output`
+    // set), as the editor and a host do — not the argument-less
+    // parse_eval, which would ignore both.
+    const fps = env.params.fps ?? (env.kind === "gif" ? 20 : 30);
+    const duration = env.params.duration ?? 5;
+    const args = { ...env.args, $output: { width, height, fps, duration } };
+    await page.addInitScript((job) => {
+      window.__job = job;
+    }, { source: env.source, args });
     await page.goto(`${base}/render/`);
     await page.waitForFunction(
       () => window.__viewerReady === true || window.__viewerError != null,

@@ -133,11 +133,11 @@ pub const functions = [_]Fn{
     .{ .name = "text.glyph", .spec = "@1 size:px font:any curve_segments:int" },
     .{ .name = "text.block", .spec = "@1 size:px line_height:num width:px kerning:bool align:left|center|right|str fill:color reveal:num by:char|word|line|str rise:px fit:px font:any curve_segments:int" },
     // assets
-    .{ .name = "image", .spec = "@1 width:px height:px fit:cover|contain|fill radius:px" },
+    .{ .name = "image", .spec = "@1 width:px height:px fit:cover|contain|fill|str radius:px" },
     .{ .name = "fit", .spec = "@2" },
-    .{ .name = "as_texture", .spec = "@1 projection:equirectangular" },
+    .{ .name = "as_texture", .spec = "@1 projection:equirectangular|str" },
     .{ .name = "font", .spec = "@1" },
-    .{ .name = "video", .spec = "@1 width:px height:px fit:cover|contain|fill radius:px start:s speed:num loop:bool" },
+    .{ .name = "video", .spec = "@1 width:px height:px fit:cover|contain|fill|str radius:px start:s speed:num loop:bool" },
     .{ .name = "audio", .spec = "@1" },
     .{ .name = "size", .spec = "@2" },
     // 3D
@@ -209,8 +209,17 @@ pub fn isNamespace(name: []const u8) bool {
 
 /// A bare name that is a value: a listed value, or a choice of any
 /// argument (`center`, `word`, `fade`, …).
-pub fn isValue(name: []const u8) bool {
+/// A bare value the language knows on its own (`forever`, `loop`, …),
+/// usable in any expression — unlike an argument's choices (`fill`,
+/// `char`, …), which only mean something as that argument's value
+/// (check.zig's argument walk accepts them there).
+pub fn isBareValue(name: []const u8) bool {
     for (values) |v| if (std.mem.eql(u8, v, name)) return true;
+    return false;
+}
+
+pub fn isValue(name: []const u8) bool {
+    if (isBareValue(name)) return true;
     for (functions) |f| {
         var it = std.mem.tokenizeScalar(u8, f.spec, ' ');
         while (it.next()) |tok| {

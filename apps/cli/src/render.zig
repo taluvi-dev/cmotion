@@ -238,8 +238,10 @@ fn fieldNum(c: value.Constructed, name: []const u8) ?f64 {
 }
 
 /// The `shape2d.Spec` of a 2D shape node, or null when `c` is not one.
-/// A `rect` is only a shape2d with `radius:`; a plain rect keeps its
-/// own painter. `path` reads `points: [vec2(x, y), …]` and `closed:`.
+/// A plain rect's fill keeps its own painter (the dispatch in `paint`
+/// checks that first); as a shape2d — stroked or extruded — it is a
+/// rect with square corners. `path` reads `points: [vec2(x, y), …]`
+/// and `closed:`.
 fn shapeSpec(c: value.Constructed) ?shape2d.Spec {
     const kind = std.meta.stringToEnum(shape2d.Kind, c.name) orelse return null;
     var spec: shape2d.Spec = .{ .kind = kind };
@@ -249,11 +251,10 @@ fn shapeSpec(c: value.Constructed) ?shape2d.Spec {
     spec.inner_radius = fieldNum(c, "inner_radius") orelse 0;
     spec.angle = fieldNum(c, "angle") orelse 360;
     spec.start = fieldNum(c, "start") orelse 0;
-    if (fieldNum(c, "sides") orelse fieldNum(c, "points")) |n| spec.sides = @intFromFloat(@max(0, @floor(n)));
-    if (kind == .rect) {
-        spec.corner = spec.radius;
-        if (!hasField(c, "radius")) return null;
-    }
+    // Bounded before the cast (a huge count would trap, then fill the
+    // outline buffer); 1024 sides is already a circle.
+    if (fieldNum(c, "sides") orelse fieldNum(c, "points")) |n| spec.sides = @intFromFloat(@min(@max(0, @floor(n)), 1024));
+    if (kind == .rect) spec.corner = spec.radius;
     if (kind == .path) return null; // needs points: see shapeSpecAlloc
     return spec;
 }
@@ -2467,4 +2468,16 @@ test "renderTree: a star, a rounded rect and a drawn-on stroke paint" {
     try std.testing.expect(fb2.pixels[(50 * 100 + 90) * 4 + 3] > 200); // right
     try std.testing.expectEqual(@as(u8, 0), fb2.pixels[(50 * 100 + 10) * 4 + 3]); // left
     try std.testing.expectEqual(@as(u8, 0), fb2.pixels[(50 * 100 + 50) * 4 + 3]); // inside
+
+    // stroke(rect(width, height)) — a plain rect, no radius: — is a
+    // shape2d when stroked: its edge paints, its inside stays empty.
+    const rect_fields = try a.alloc(value.Field, 2);
+    rect_fields[0] = .{ .name = "width", .value = .{ .number = .{ .value = 60, .unit = .px } } };
+    rect_fields[1] = .{ .name = "height", .value = .{ .number = .{ .value = 40, .unit = .px } } };
+    const rfields = try a.alloc(value.Field, 2);
+    rfields[0] = .{ .name = "", .value = .{ .constructed = .{ .name = "rect", .fields = rect_fields } } };
+    rfields[1] = .{ .name = "width", .value = .{ .number = .{ .value = 4, .unit = .px } } };
+    const fb3 = try renderTree(a, .{ .constructed = .{ .name = "stroke", .fields = rfields } }, 100, 100);
+    try std.testing.expect(fb3.pixels[(50 * 100 + 20) * 4 + 3] > 200); // left edge at x=20
+    try std.testing.expectEqual(@as(u8, 0), fb3.pixels[(50 * 100 + 50) * 4 + 3]); // inside
 }

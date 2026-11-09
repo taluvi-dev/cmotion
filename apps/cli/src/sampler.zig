@@ -695,8 +695,10 @@ pub fn easingOf(v: Value) ?easing.Easing {
         return if (n == 4) .{ .bezier = p } else null;
     }
     if (std.mem.eql(u8, name, "steps")) {
+        // Bounded before the cast: a huge step count is a mistake, not
+        // a reason to trap (u32 overflow panics natively, traps in WASM).
         for (c.fields) |f| if (f.value == .number and f.value.number.value >= 1)
-            return .{ .steps = @intFromFloat(@floor(f.value.number.value)) };
+            return .{ .steps = @intFromFloat(@min(@floor(f.value.number.value), 1_000_000)) };
         return null;
     }
     if (std.mem.eql(u8, name, "spring")) return .{ .spring = springConfig(c) };
@@ -750,6 +752,10 @@ fn interpolate(
             t = if (k <= span) t_min + k else t_max - (k - span);
         },
     };
+    // `repeat: forever` always wrapped the whole time line, before the
+    // first keyframe too (a loop that starts at 1s is mid-cycle at 0.5s):
+    // kept as it was, so pinned sources keep their first cycle.
+    if (t < t_min and span > 0 and opts != null and isForever(opts.?)) t = t_min + @mod(t_in - t_min, span);
     if (t < t_min) switch (extrapolation(opts, "before")) {
         .extend => return extendLinear(times, values, 0, t),
         else => return values[0],
@@ -997,6 +1003,16 @@ test "sampleAt: repeat: forever wraps modulo the span" {
     // t=6 wraps to 2 → halfway → 180deg.
     const wrapped = try sampleAt(a, anim, 6.0);
     try std.testing.expectApproxEqAbs(@as(f64, 180), wrapped.number.value, 1e-9);
+    // Before the first keyframe too: t=-2 wraps to 2 (the loop runs on
+    // the whole time line, as it always did).
+    const early = try sampleAt(a, anim, -2.0);
+    try std.testing.expectApproxEqAbs(@as(f64, 180), early.number.value, 1e-9);
+}
+
+test "easingOf: a huge steps() count is bounded, not a trap" {
+    var fields = [_]value.Field{.{ .name = "", .value = .{ .number = .{ .value = 1e12, .unit = null } } }};
+    const e = easingOf(.{ .constructed = .{ .name = "easing.steps", .fields = &fields } }) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 1_000_000), e.steps);
 }
 
 test "sampleAt: passes plain values through unchanged" {
