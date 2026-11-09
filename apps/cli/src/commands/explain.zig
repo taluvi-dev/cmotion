@@ -90,18 +90,24 @@ const entries = [_]Entry{
         .code = "NAM003",
         .title = "Unknown identifier",
         .body =
-        \\A name was referenced that resolves to nothing in the current
-        \\scope chain (local lets, parameters, top-level declarations,
-        \\imported names). The check is suppressed when any `use foo.*`
-        \\wildcard import is present, since we don't yet know what names
-        \\that brings into scope — once module manifests land, NAM003
-        \\will fire through wildcards too.
+        \\A name was referenced that resolves to nothing: not a local
+        \\`let`, a parameter, a loop variable, a top-level declaration or
+        \\an imported name, and not in the stdlib (its functions such as
+        \\`circle` or `text.block`, and the bare values its arguments take
+        \\such as `center` or `word`). The evaluator would stage the name
+        \\as a call no renderer draws, so a misspelt function renders as
+        \\nothing; the message names the closest known name when there is
+        \\one (`circl` -> `circle`).
+        \\
+        \\`use std.….*` imports stdlib names, which the checker knows. A
+        \\wildcard import from anywhere else still turns this check off,
+        \\since nothing says what names it brings.
         \\
         \\The repair is one of:
+        \\  - fix a typo (the suggested name)
         \\  - add a `let name = ...;` before the use site
         \\  - bring the name into scope with `use mod.name;` or
         \\    `use mod as alias;`
-        \\  - fix a typo
         ,
     },
     .{
@@ -203,6 +209,49 @@ const entries = [_]Entry{
         ,
     },
     .{
+        .code = "NAM010",
+        .title = "Argument nothing reads",
+        .body =
+        \\A stdlib call has a named argument the function does not take,
+        \\e.g. `circle(radius: 40px, colour: #fff)` (circle takes `fill`).
+        \\Nothing reads it, so its value has no effect; the message names
+        \\the closest argument the function does take and lists them all.
+        \\A warning: the source still renders, without that value.
+        \\
+        \\Repair: rename the argument to one the function reads.
+        ,
+    },
+    .{
+        .code = "NAM011",
+        .title = "A binding hides a stdlib namespace",
+        .body =
+        \\A parameter or `let` has the name of a stdlib namespace, and a
+        \\dotted call uses that name: in `scene title(text: String = "Hi")`,
+        \\`text.block(text)` no longer means the stdlib's `text.block` — it
+        \\calls a method `block` on the string, which nothing draws. An
+        \\error, because the layer would silently disappear.
+        \\
+        \\Repair: rename the binding (`label: String`), and pass it on:
+        \\`text.block(label)`.
+        ,
+    },
+    .{
+        .code = "NAM012",
+        .title = "Positional argument nothing reads",
+        .body =
+        \\A stdlib call passes more positional arguments than the function
+        \\reads, so the extra ones have no effect. `wave(10deg, 4s)` reads
+        \\nothing positionally (write `wave(amplitude: 10deg, period: 4s)`),
+        \\`rotate(30deg)` reads only its layer (write `.rotate(z: 30deg)`),
+        \\`extrude(shape, 30px)` ignores the depth (write `depth: 30px`). A
+        \\method call's receiver counts as the first positional argument:
+        \\`layer.f(a)` is `f(layer, a)`. A warning: the source renders,
+        \\without that value.
+        \\
+        \\Repair: pass the value by name.
+        ,
+    },
+    .{
         .code = "LWR000",
         .title = "Lowering failed on a clean CST",
         .body =
@@ -266,6 +315,23 @@ const entries = [_]Entry{
         ,
     },
     .{
+        .code = "TYP004",
+        .title = "Argument value of the wrong kind",
+        .body =
+        \\A stdlib call passes a literal of the wrong kind for an argument
+        \\(`fill: 3`, `radius: "big"`, `kerning: 1`), or a bare name that
+        \\is not one of the argument's choices (`align: middle`, where
+        \\`align` takes left, center or right). A renderer would ignore
+        \\the value or read it wrongly. The message says what the argument
+        \\takes and, for a choice, the closest one.
+        \\
+        \\Only literals and bare names are checked; a value built from a
+        \\binding or an expression is left to the full type checker.
+        \\
+        \\Repair: pass a value of the kind the argument takes.
+        ,
+    },
+    .{
         .code = "UNT001",
         .title = "Unit category mismatch",
         .body =
@@ -289,6 +355,11 @@ const entries = [_]Entry{
         \\
         \\If the literal has NO unit at all (`let x: Duration = 42`),
         \\see UNT002 (missing required unit) instead.
+        \\
+        \\The same check applies to the named arguments of stdlib calls:
+        \\`circle(radius: 2s)` passes a Time where `radius` takes a Length,
+        \\and `scale(x: 2px)` passes a Length where `x` takes a plain
+        \\number. A renderer would read the number in the wrong unit.
         ,
     },
     .{
@@ -314,6 +385,19 @@ const entries = [_]Entry{
         \\
         \\Silent for `Number` / `Int` / `Float` annotations, which
         \\actually require an unmarked literal.
+        ,
+    },
+    .{
+        .code = "UNT003",
+        .title = "Argument without its unit",
+        .body =
+        \\A stdlib call passes a bare number where the argument takes a
+        \\unit: `circle(radius: 40)`, `during(0.5, 3)`. Renderers read it
+        \\in the base unit of the argument's family (px, s, deg), so it
+        \\works, but the reader has to know that, and it is easy to mean
+        \\another unit (`at: 300` is 300 s, not 300 ms). A warning.
+        \\
+        \\Repair: write the unit the renderer assumes (`40px`, `0.5s`).
         ,
     },
     .{

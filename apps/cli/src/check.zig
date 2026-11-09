@@ -2,9 +2,18 @@
 //!
 //! Scope of this pass:
 //!   - NAM003: unknown identifier. Walks every expression and flags any
-//!     `ident` whose name isn't in scope. Suppressed when any
-//!     `use path.*` wildcard import is in effect, since we don't have
-//!     module manifests yet.
+//!     `ident` whose name isn't in scope or in the stdlib manifest
+//!     (`stdlib.zig`), with the closest known name. `use std.….*` is
+//!     covered by the manifest; a wildcard import from anywhere else
+//!     still suppresses it. Also a misspelt method or `text.` name, and
+//!     `x.f()` where `f` is a local (a method reaches only the stdlib).
+//!   - Stdlib calls, against the manifest: NAM010 (warning) for a named
+//!     argument nothing reads, NAM012 (warning) for a positional one,
+//!     NAM011 for `text.block(…)` where a binding named `text` hides the
+//!     namespace, TYP004 for a literal of the wrong kind or a bare name
+//!     that isn't one of the argument's choices, UNT001 for a unit from
+//!     the wrong family, UNT003 (warning) for a missing unit. Literals
+//!     and bare names only; anything needing inference is skipped.
 //!   - NAM004: forward reference to a block-local `let` that's declared
 //!     later in the same block (`let a = b; let b = 1;`). We pre-scan
 //!     each block so an unresolved ident can be upgraded from NAM003
@@ -44,6 +53,7 @@ const ast = @import("ast.zig");
 const diag = @import("diagnostics.zig");
 const host = @import("host.zig");
 const easing = @import("easing.zig");
+const stdlib = @import("stdlib.zig");
 
 const SymbolKind = enum {
     import,
@@ -109,6 +119,37 @@ fn literalCategory(lit: ast.Literal) Category {
         .string => .string,
         .@"bool" => .@"bool",
         .color => .color,
+    };
+}
+
+fn kindDescription(allocator: std.mem.Allocator, a: stdlib.Arg) ![]const u8 {
+    return switch (a.kind) {
+        .px => "a Length (px)",
+        .s => "a Time (s, ms)",
+        .deg => "an Angle (deg, rad, turn)",
+        .num => "a number",
+        .int => "a whole number",
+        .bool => "true or false",
+        .color => "a color",
+        .string => "a string",
+        .any => "any value",
+        .choice => blk: {
+            var buf: [16][]const u8 = undefined;
+            const joined = try std.mem.join(allocator, ", ", a.names(&buf));
+            break :blk try std.fmt.allocPrint(allocator, "one of {s}", .{joined});
+        },
+    };
+}
+
+fn symbolKindName(k: SymbolKind) []const u8 {
+    return switch (k) {
+        .import => "import",
+        .let => "let",
+        .component => "component",
+        .scene => "scene",
+        .filter => "filter",
+        .@"export" => "export",
+        .param => "parameter",
     };
 }
 
@@ -252,7 +293,11 @@ pub const Checker = struct {
         switch (decl) {
             .import => |imp| {
                 if (imp.path.glob) {
-                    scope.has_wildcard_import = true;
+                    // `use std.shapes.*` brings stdlib names, which the
+                    // manifest knows; only a wildcard from elsewhere leaves
+                    // names we can't account for.
+                    const from_std = imp.path.segments.len > 0 and std.mem.eql(u8, imp.path.segments[0].name, "std");
+                    if (!from_std) scope.has_wildcard_import = true;
                     return;
                 }
                 const local_name = if (imp.alias) |a|
@@ -731,16 +776,40 @@ pub const Checker = struct {
             .unary => |u| try self.checkExpr(u.operand.*, scope),
             .call => |c| {
                 try self.checkExpr(c.callee.*, scope);
-                for (c.args) |a| try self.checkExpr(a.value.*, scope);
-                try self.checkStdlibCall(c);
+                const name = try calleeName(self.allocator, c.callee.*);
+                try self.checkArgExprs(if (name) |n| stdlib.function(n) else null, c.args, scope);
+                try self.checkStdlibCall(c, scope);
             },
             .method_call => |m| {
+                const dotted = if (namespaceRoot(m.receiver.*, scope)) |ns| try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ ns, m.name.name }) else m.name.name;
+                try self.checkArgExprs(stdlib.function(dotted), m.args, scope);
+                if (namespaceRoot(m.receiver.*, scope)) |ns| {
+                    // `easing.bezier(…)`, `text.block(…)`: a dotted stdlib name
+                    if (std.mem.eql(u8, ns, "easing")) return self.checkEasing(expr);
+                    const name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ ns, m.name.name });
+                    const f = stdlib.function(name) orelse return self.unknownName(name, m.name.span, scope);
+                    return self.checkArgs(f, m.args, 0, m.span, scope);
+                }
                 try self.checkExpr(m.receiver.*, scope);
-                // .name is the method name; resolution against the type is
-                // the typechecker's job once it exists. Skip.
-                for (m.args) |a| try self.checkExpr(a.value.*, scope);
+                // `layer.translate(…)` is `translate(layer, …)`: a method
+                // call only ever reaches the stdlib, never a local `let`
+                if (scope.has_wildcard_import) return;
+                const f = stdlib.function(m.name.name) orelse {
+                    if (try self.shadowedNamespace(m, scope)) return;
+                    if (scope.lookup(m.name.name)) |sym| return self.methodOnBinding(m, sym);
+                    return self.unknownName(m.name.name, m.name.span, scope);
+                };
+                try self.checkArgs(f, m.args, 1, m.span, scope);
             },
-            .field_access => |f| try self.checkExpr(f.receiver.*, scope),
+            .field_access => |f| {
+                if (namespaceRoot(f.receiver.*, scope)) |ns| {
+                    if (std.mem.eql(u8, ns, "easing")) return self.checkEasing(expr);
+                    const name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ ns, f.name.name });
+                    if (stdlib.function(name) == null) try self.unknownName(name, f.name.span, scope);
+                    return;
+                }
+                try self.checkExpr(f.receiver.*, scope);
+            },
             .index => |i| {
                 try self.checkExpr(i.receiver.*, scope);
                 try self.checkExpr(i.index.*, scope);
@@ -764,14 +833,8 @@ pub const Checker = struct {
                 for (a.keyframes) |kf| {
                     try self.checkExpr(kf.at.*, scope);
                     try self.checkExpr(kf.value.*, scope);
-                    if (kf.easing) |e| {
-                        try self.checkExpr(e.*, scope);
-                        try self.checkEasing(e.*);
-                    }
+                    if (kf.easing) |e| try self.checkExpr(e.*, scope);
                 }
-                if (a.opts) |opts| for (opts) |o| {
-                    if (std.mem.eql(u8, o.name.name, "easing")) try self.checkEasing(o.value.*);
-                };
                 if (a.opts) |opts| for (opts) |o| try self.checkExpr(o.value.*, scope);
             },
             .compose => |c| for (c.layers) |layer| try self.checkExpr(layer, scope),
@@ -811,9 +874,133 @@ pub const Checker = struct {
     /// obvious shapes (a direct call argument, a literal option), never
     /// values that arrive through a binding — those are the full
     /// typechecker's job.
-    fn checkStdlibCall(self: *Checker, c: ast.Call) !void {
+    fn checkStdlibCall(self: *Checker, c: ast.Call, scope: *const Scope) !void {
         const name = (try calleeName(self.allocator, c.callee.*)) orelse return;
         if (std.mem.eql(u8, name, "extrude")) try self.checkExtrude(c);
+        // a component or let of the same name shadows the stdlib
+        if (c.callee.* == .ident and (scope.lookup(name) != null or scope.has_wildcard_import)) return;
+        if (c.callee.* == .field_access and namespaceRoot(c.callee.field_access.receiver.*, scope) == null) return;
+        const f = stdlib.function(name) orelse return; // unknown: NAM003 from the callee
+        try self.checkArgs(f, c.args, 0, c.span, scope);
+    }
+
+    /// NAM011: `text.block(…)` where `text` is a binding (a parameter
+    /// or `let` named like the namespace), so the call is a method
+    /// `block` on that value, which nothing draws.
+    fn shadowedNamespace(self: *Checker, m: ast.MethodCall, scope: *const Scope) !bool {
+        if (m.receiver.* != .ident) return false;
+        const ns = m.receiver.ident.name;
+        if (!stdlib.isNamespace(ns)) return false;
+        const sym = scope.lookup(ns) orelse return false;
+        const dotted = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ ns, m.name.name });
+        if (stdlib.function(dotted) == null) return false;
+        const loc = m.receiver.ident.span.location(self.source);
+        const decl = sym.span.location(self.source);
+        try self.diagnostics.append(self.allocator, .{
+            .code = "NAM011",
+            .message = try std.fmt.allocPrint(self.allocator, "'{s}' here is the {s} declared at line {d}, which hides the stdlib's {s}()", .{ ns, symbolKindName(sym.kind), decl.line, dotted }),
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = m.receiver.ident.span.end - m.receiver.ident.span.start },
+            .expected = try std.fmt.allocPrint(self.allocator, "the stdlib namespace '{s}'", .{ns}),
+            .actual = try std.fmt.allocPrint(self.allocator, "a {s} named '{s}'", .{ symbolKindName(sym.kind), ns }),
+            .help = try std.fmt.allocPrint(self.allocator, "rename the {s} (e.g. '{s}_value'), so '{s}' means the stdlib again", .{ symbolKindName(sym.kind), ns, dotted }),
+            .fix_safety = .@"local-edit",
+            .repair = .{ .id = "rename-shadowing-binding", .summary = "Rename the binding that hides the stdlib namespace; `cmo explain NAM011`." },
+        });
+        return true;
+    }
+
+    /// Walk a call's argument values. A bare name passed to a choice
+    /// argument is a value, not a binding: `checkArgValue` judges it
+    /// (TYP004), so it isn't also reported as an unknown name.
+    fn checkArgExprs(self: *Checker, f: ?stdlib.Fn, args: []const ast.Arg, scope: *const Scope) !void {
+        for (args) |a| {
+            if (f != null and a.name != null and a.value.* == .ident and scope.lookup(a.value.ident.name) == null) {
+                if (f.?.arg(a.name.?.name)) |spec| if (spec.kind == .choice) continue;
+            }
+            try self.checkExpr(a.value.*, scope);
+        }
+    }
+
+    /// The root of a dotted stdlib name (`text` in `text.block`), when
+    /// the receiver is a bare namespace that no binding shadows.
+    fn namespaceRoot(e: ast.Expr, scope: *const Scope) ?[]const u8 {
+        if (e != .ident) return null;
+        const name = e.ident.name;
+        if (!stdlib.isNamespace(name)) return null;
+        // `use std.text;` binds the namespace itself; any other binding shadows it
+        if (scope.lookup(name)) |sym| if (sym.kind != .import) return null;
+        return name;
+    }
+
+    /// The named arguments of a stdlib call against the manifest:
+    /// NAM010 for one nothing reads, and for a literal value, its kind
+    /// (TYP004) and unit (UNT001, UNT003). Values that need inference
+    /// (a binding, an expression) are left alone.
+    fn checkArgs(self: *Checker, f: stdlib.Fn, args: []const ast.Arg, receiver: usize, span: ast.Span, scope: *const Scope) !void {
+        if (f.open()) return;
+        if (f.positional()) |max| {
+            var n = receiver;
+            var extra: ?ast.Arg = null;
+            for (args) |a| if (a.name == null) {
+                n += 1;
+                if (n > max and extra == null) extra = a;
+            };
+            if (extra) |a| try self.ignoredPositional(f, max, receiver, a.value.span(), span);
+        }
+        for (args) |a| {
+            const id = a.name orelse continue;
+            const spec = f.arg(id.name) orelse {
+                try self.unknownArg(f, id);
+                continue;
+            };
+            try self.checkArgValue(f, spec, a.value.*, scope);
+        }
+    }
+
+    fn checkArgValue(self: *Checker, f: stdlib.Fn, spec: stdlib.Arg, v: ast.Expr, scope: *const Scope) !void {
+        const value = switch (v) {
+            .unary => |u| if (u.op == .neg) u.operand.* else v,
+            .paren => |p| p.inner.*,
+            else => v,
+        };
+        switch (value) {
+            .ident => |id| {
+                if (spec.kind != .choice or scope.lookup(id.name) != null) return;
+                if (spec.allows(id.name)) return;
+                return self.argProblem(f, spec, id.span, try std.fmt.allocPrint(self.allocator, "'{s}'", .{id.name}), id.name);
+            },
+            .literal => |lit| {
+                const want_unit: ?UnitCategory = switch (spec.kind) {
+                    .px => .length,
+                    .s => .time,
+                    .deg => .angle,
+                    .num, .int => .none,
+                    else => null,
+                };
+                if (lit == .string and spec.kind == .choice and spec.takesStrings()) {
+                    const raw = lit.string.raw;
+                    const inner = if (raw.len >= 2) raw[1 .. raw.len - 1] else raw;
+                    if (spec.allows(inner)) return;
+                    return self.argProblem(f, spec, lit.string.span, try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{inner}), inner);
+                }
+                const fits = switch (lit) {
+                    .number => want_unit != null or spec.kind == .any,
+                    .string => spec.kind == .string or spec.kind == .any,
+                    .@"bool" => spec.kind == .bool or spec.kind == .any,
+                    .color => spec.kind == .color or spec.kind == .any,
+                };
+                if (!fits) return self.argProblem(f, spec, (ast.Expr{ .literal = lit }).span(), categoryName(literalCategory(lit)), null);
+                if (lit != .number) return;
+                const n = lit.number;
+                const want = want_unit orelse return;
+                if (n.unit) |u| {
+                    if (unitCategory(u) != want) try self.argUnitMismatch(f, spec, n, want);
+                } else if (want != .none) {
+                    try self.argUnitMissing(f, spec, n, want);
+                }
+            },
+            else => {},
+        }
     }
 
     fn firstPositional(c: ast.Call) ?ast.Arg {
@@ -927,6 +1114,7 @@ pub const Checker = struct {
     fn checkIdent(self: *Checker, id: ast.Ident, scope: *const Scope) !void {
         if (scope.lookup(id.name) != null) return;
         if (scope.has_wildcard_import) return;
+        if (stdlib.function(id.name) != null or stdlib.isNamespace(id.name) or stdlib.isValue(id.name)) return;
 
         // Forward-reference within a block? Pre-scan populated
         // `future_names` on block scopes; a hit upgrades NAM003 to NAM004
@@ -964,24 +1152,176 @@ pub const Checker = struct {
             return;
         }
 
-        const loc = id.span.location(self.source);
+        try self.unknownName(id.name, id.span, scope);
+    }
+
+    /// NAM003: a name that is neither in scope nor in the stdlib. Without
+    /// this the evaluator stages it as a call nothing renders, so a typo
+    /// draws nothing; the help names the closest known name.
+    fn unknownName(self: *Checker, name: []const u8, span: ast.Span, scope: *const Scope) !void {
+        const loc = span.location(self.source);
+        const near = stdlib.nearest(name, try self.knownNames(scope));
         try self.diagnostics.append(self.allocator, .{
             .code = "NAM003",
-            .message = try std.fmt.allocPrint(self.allocator, "unknown identifier '{s}'", .{id.name}),
-            .span = .{
-                .path = self.path,
-                .line = loc.line,
-                .column = loc.column,
-                .length = id.span.end - id.span.start,
-            },
-            .expected = "visible local, parameter, top-level declaration, or imported name",
-            .actual = try std.fmt.allocPrint(self.allocator, "no visible symbol named '{s}'", .{id.name}),
-            .help = "declare the name before using it, or import the module that exports it",
+            .message = if (near) |n|
+                try std.fmt.allocPrint(self.allocator, "unknown identifier '{s}' — did you mean '{s}'?", .{ name, n })
+            else
+                try std.fmt.allocPrint(self.allocator, "unknown identifier '{s}'", .{name}),
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = span.end - span.start },
+            .expected = "visible local, parameter, top-level declaration, or a stdlib name",
+            .actual = try std.fmt.allocPrint(self.allocator, "no visible symbol or stdlib name '{s}'", .{name}),
+            .help = if (near) |n|
+                try std.fmt.allocPrint(self.allocator, "'{s}' is the closest known name; otherwise declare it before using it", .{n})
+            else
+                "declare the name before using it; `cmo explain NAM003` lists where stdlib names come from",
             .fix_safety = .@"local-edit",
             .repair = .{
-                .id = "declare-or-import",
-                .summary = "Add a let-binding or `use ...` for this name.",
+                .id = if (near != null) "rename-to-known" else "declare-or-import",
+                .summary = "Use a name the stdlib or this source defines, or add a let-binding for it.",
             },
+        });
+    }
+
+    /// Every name a typo could have meant: bindings in scope, then the
+    /// stdlib's functions, namespaces and values.
+    fn knownNames(self: *Checker, scope: *const Scope) ![]const []const u8 {
+        var out: std.ArrayListUnmanaged([]const u8) = .{};
+        var s: ?*const Scope = scope;
+        while (s) |sc| : (s = sc.parent) {
+            var it = sc.symbols.keyIterator();
+            while (it.next()) |k| try out.append(self.allocator, k.*);
+        }
+        for (stdlib.functions) |f| {
+            if (std.mem.indexOfScalar(u8, f.name, '.') == null) try out.append(self.allocator, f.name);
+        }
+        for (stdlib.namespaces) |n| try out.append(self.allocator, n);
+        for (stdlib.values) |v| try out.append(self.allocator, v);
+        try stdlib.appendChoices(self.allocator, &out);
+        return out.items;
+    }
+
+    /// NAM010 (warning): a named argument the function does not read.
+    fn unknownArg(self: *Checker, f: stdlib.Fn, id: ast.Ident) !void {
+        var buf: [32][]const u8 = undefined;
+        const near = stdlib.nearest(id.name, f.argNames(&buf));
+        const loc = id.span.location(self.source);
+        const takes = try std.mem.join(self.allocator, ", ", f.argNames(&buf));
+        try self.diagnostics.append(self.allocator, .{
+            .severity = .warning,
+            .code = "NAM010",
+            .message = if (near) |n|
+                try std.fmt.allocPrint(self.allocator, "{s}() has no argument '{s}' — did you mean '{s}'?", .{ f.name, id.name, n })
+            else
+                try std.fmt.allocPrint(self.allocator, "{s}() has no argument '{s}'; it is ignored", .{ f.name, id.name }),
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = id.span.end - id.span.start },
+            .expected = try std.fmt.allocPrint(self.allocator, "one of: {s}", .{takes}),
+            .help = "nothing reads an argument the function doesn't take, so its value has no effect",
+            .fix_safety = .@"local-edit",
+            .repair = .{ .id = "rename-argument", .summary = "Use an argument the function reads; `cmo explain NAM010`." },
+        });
+    }
+
+    /// NAM012 (warning): a positional argument the function does not read
+    /// (`wave(10deg, 4s)`, `rotate(30deg)`): it has no effect.
+    fn ignoredPositional(self: *Checker, f: stdlib.Fn, max: usize, receiver: usize, at: ast.Span, call: ast.Span) !void {
+        _ = call;
+        const loc = at.location(self.source);
+        var buf: [32][]const u8 = undefined;
+        const takes = try std.mem.join(self.allocator, ", ", f.argNames(&buf));
+        const reads = if (max == 0)
+            "no positional arguments"
+        else if (receiver == 1 and max == 1)
+            "only its receiver positionally"
+        else
+            try std.fmt.allocPrint(self.allocator, "{d} positional argument{s}", .{ max, if (max == 1) "" else "s" });
+        try self.diagnostics.append(self.allocator, .{
+            .severity = .warning,
+            .code = "NAM012",
+            .message = try std.fmt.allocPrint(self.allocator, "{s}() reads {s}; this one is ignored", .{ f.name, reads }),
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = at.end - at.start },
+            .expected = if (takes.len > 0) try std.fmt.allocPrint(self.allocator, "named arguments: {s}", .{takes}) else "no further arguments",
+            .help = if (takes.len > 0) "pass it by name" else "remove it",
+            .fix_safety = .@"local-edit",
+            .repair = .{ .id = "name-the-argument", .summary = "Pass the value as a named argument; `cmo explain NAM012`." },
+        });
+    }
+
+    /// `x.f()` where `f` is a local binding: a method call only reaches
+    /// the stdlib, so it is staged as a call nothing draws.
+    fn methodOnBinding(self: *Checker, m: ast.MethodCall, sym: Symbol) !void {
+        const loc = m.name.span.location(self.source);
+        const decl = sym.span.location(self.source);
+        try self.diagnostics.append(self.allocator, .{
+            .code = "NAM003",
+            .message = try std.fmt.allocPrint(self.allocator, "'.{s}(…)' calls a stdlib function, and there is none named '{s}' ('{s}' is the {s} at line {d})", .{ m.name.name, m.name.name, m.name.name, symbolKindName(sym.kind), decl.line }),
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = m.name.span.end - m.name.span.start },
+            .expected = "a stdlib function after the dot",
+            .actual = try std.fmt.allocPrint(self.allocator, "the {s} '{s}'", .{ symbolKindName(sym.kind), m.name.name }),
+            .help = try std.fmt.allocPrint(self.allocator, "call it directly: {s}(<receiver>, …)", .{m.name.name}),
+            .fix_safety = .@"local-edit",
+            .repair = .{ .id = "call-binding-directly", .summary = "Call the binding as a function instead of as a method." },
+        });
+    }
+
+    /// TYP004: a literal of the wrong kind for the argument, or a bare
+    /// name that isn't one of its choices.
+    fn argProblem(self: *Checker, f: stdlib.Fn, spec: stdlib.Arg, span: ast.Span, got: []const u8, symbol: ?[]const u8) !void {
+        const loc = span.location(self.source);
+        var near: ?[]const u8 = null;
+        if (symbol) |sym| {
+            var buf: [16][]const u8 = undefined;
+            near = stdlib.nearest(sym, spec.names(&buf));
+        }
+        const want = try kindDescription(self.allocator, spec);
+        try self.diagnostics.append(self.allocator, .{
+            .code = "TYP004",
+            .message = try std.fmt.allocPrint(self.allocator, "{s}(): '{s}' takes {s}, found {s}", .{ f.name, spec.name, want, got }),
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = span.end - span.start },
+            .expected = want,
+            .actual = got,
+            .help = if (near) |n| try std.fmt.allocPrint(self.allocator, "did you mean '{s}'?", .{n}) else "change the value to the kind the argument takes",
+            .fix_safety = .@"local-edit",
+            .repair = .{ .id = "fix-argument-value", .summary = "Pass a value of the kind the argument takes; `cmo explain TYP004`." },
+        });
+    }
+
+    /// UNT001: a number in the wrong unit family for the argument
+    /// (`radius: 2s`), which a renderer would misread.
+    fn argUnitMismatch(self: *Checker, f: stdlib.Fn, spec: stdlib.Arg, n: ast.NumberLit, want: UnitCategory) !void {
+        const loc = n.span.location(self.source);
+        const unit = unitName(n.unit.?);
+        try self.diagnostics.append(self.allocator, .{
+            .code = "UNT001",
+            .message = if (want == .none)
+                try std.fmt.allocPrint(self.allocator, "{s}(): '{s}' takes a plain number, found '{s}{s}'", .{ f.name, spec.name, n.text, unit })
+            else
+                try std.fmt.allocPrint(self.allocator, "{s}(): '{s}' takes a {s}, found a {s} ('{s}{s}')", .{ f.name, spec.name, unitCategoryName(want), unitCategoryName(unitCategory(n.unit.?)), n.text, unit }),
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = n.span.end - n.span.start },
+            .expected = if (defaultUnitFor(want)) |u| try std.fmt.allocPrint(self.allocator, "a number in {s} ({s})", .{ unitCategoryName(want), u }) else "a number without a unit",
+            .actual = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ n.text, unit }),
+            .help = if (defaultUnitFor(want)) |u| try std.fmt.allocPrint(self.allocator, "write it in {s}, e.g. {s}{s}", .{ u, n.text, u }) else "drop the unit",
+            .fix_safety = .@"local-edit",
+            .repair = .{ .id = "fix-argument-unit", .summary = "Use the argument's unit family; `cmo explain UNT001`." },
+        });
+    }
+
+    /// UNT003 (warning): a bare number where the argument takes a unit.
+    /// Renderers disagree on what it means (the web viewer reads a bare
+    /// `translate` in world units and a bare `rotate` in radians; native
+    /// reads px and degrees), and `at: 300` is easily meant as ms.
+    fn argUnitMissing(self: *Checker, f: stdlib.Fn, spec: stdlib.Arg, n: ast.NumberLit, want: UnitCategory) !void {
+        const loc = n.span.location(self.source);
+        const u = defaultUnitFor(want) orelse return;
+        try self.diagnostics.append(self.allocator, .{
+            .severity = .warning,
+            .code = "UNT003",
+            .message = try std.fmt.allocPrint(self.allocator, "{s}(): '{s}' takes a {s}; write '{s}' with its unit, e.g. {s}{s}", .{ f.name, spec.name, unitCategoryName(want), n.text, n.text, u }),
+            .span = .{ .path = self.path, .line = loc.line, .column = loc.column, .length = n.span.end - n.span.start },
+            .expected = try std.fmt.allocPrint(self.allocator, "a number with a {s} unit", .{unitCategoryName(want)}),
+            .actual = n.text,
+            .help = try std.fmt.allocPrint(self.allocator, "write the unit: {s}{s}", .{ n.text, u }),
+            .fix_safety = .@"behavior-preserving",
+            .repair = .{ .id = "add-unit", .summary = "Add the unit the renderer assumes; `cmo explain UNT003`." },
         });
     }
 
@@ -1166,6 +1506,115 @@ test "check: a for loop's variable is in scope in its body only" {
     var r = try checkSource(
         \\let xs = for i in 0..3 { i * 2 };
         \\let y = i;
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
+    try std.testing.expectEqualStrings("NAM003", r.diagnostics[0].code);
+}
+
+test "check: a misspelt stdlib function is NAM003 with a suggestion, through std wildcards" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\scene s() -> Frame { compose [rect(width: 1920px, height: 1080px, fill: #000000), circl(radius: 40px)] }
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
+    try std.testing.expectEqualStrings("NAM003", r.diagnostics[0].code);
+    try std.testing.expect(std.mem.indexOf(u8, r.diagnostics[0].message, "did you mean 'circle'") != null);
+}
+
+test "check: an undefined loop bound is NAM003 under a std wildcard" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\scene s() -> Frame { compose [for i in 0..n { circle(radius: 4px) }] }
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
+    try std.testing.expectEqualStrings("NAM003", r.diagnostics[0].code);
+}
+
+test "check: a wildcard from outside std still turns NAM003 off" {
+    var r = try checkSource(
+        \\use mylib.*;
+        \\let x = whatever(1);
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+}
+
+test "check: stdlib arguments — unknown name, wrong kind, wrong and missing unit" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\let a = circle(radius: 40px, colour: #ffffff);
+        \\let b = circle(radius: 2s);
+        \\let c = circle(radius: 40);
+        \\let d = circle(radius: 40px, fill: 3);
+        \\let e = text.block("hi", align: middle);
+        \\let f = text.block("hi", align: center, size: 64px).translate(x: -10px, y: 20px);
+    );
+    defer r.arena.deinit();
+    const want = [_][]const u8{ "NAM010", "UNT001", "UNT003", "TYP004", "TYP004" };
+    try std.testing.expectEqual(want.len, r.diagnostics.len);
+    for (want, r.diagnostics) |code, d| try std.testing.expectEqualStrings(code, d.code);
+    try std.testing.expect(std.mem.indexOf(u8, r.diagnostics[0].message, "did you mean 'color'") != null or
+        std.mem.indexOf(u8, r.diagnostics[0].message, "colour") != null);
+    try std.testing.expectEqual(diag.Severity.warning, r.diagnostics[0].severity);
+    try std.testing.expectEqual(diag.Severity.warning, r.diagnostics[2].severity);
+}
+
+test "check: a misspelt method or dotted name is NAM003" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\let a = circle(radius: 4px).translat(x: 1px);
+        \\let b = text.blok("hi");
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 2), r.diagnostics.len);
+    for (r.diagnostics) |d| try std.testing.expectEqualStrings("NAM003", d.code);
+}
+
+
+test "check: a binding named like a stdlib namespace is NAM011 at a dotted call" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\scene title(text: String = "Hello") -> Frame { compose [text.block(text)] }
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
+    try std.testing.expectEqualStrings("NAM011", r.diagnostics[0].code);
+    try std.testing.expect(std.mem.indexOf(u8, r.diagnostics[0].message, "parameter declared at line 2") != null);
+}
+
+test "check: positional arguments a function doesn't read warn with NAM012" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\let a = wave(10deg, 4s);
+        \\let b = circle(radius: 4px).rotate(30deg);
+        \\let c = during(0.5s, 3s, circle(radius: 4px), fade_in: 0.2s);
+        \\let d = circle(radius: 4px).translate(x: 1px).scale(2);
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 2), r.diagnostics.len);
+    for (r.diagnostics) |d| try std.testing.expectEqualStrings("NAM012", d.code);
+}
+
+test "check: choices may be strings where the renderer takes them" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\let a = text.block("hi", align: "center", by: "word");
+        \\let b = text.block("hi", align: "middle");
+        \\let c = transition(circle(radius: 4px), circle(radius: 8px), at: 1s, kind: "slide_left");
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 2), r.diagnostics.len);
+    for (r.diagnostics) |d| try std.testing.expectEqualStrings("TYP004", d.code);
+}
+
+test "check: a method call does not reach a local binding" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\let grow = |l| l.scale(2);
+        \\let a = circle(radius: 4px).grow();
     );
     defer r.arena.deinit();
     try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);

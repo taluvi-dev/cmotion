@@ -38,8 +38,8 @@ how much trust to extend to the repair:
 | `PAR*` | Parser (tree-sitter) | implemented |
 | `LWR*` | CST → AST lowering | implemented |
 | `NAM*` | Name resolution | implemented |
-| `TYP*` | Type checker | partial (TYP002, TYP003) |
-| `UNT*` | Unit checker | partial (UNT001, UNT002) |
+| `TYP*` | Type checker | partial (TYP002–TYP004) |
+| `UNT*` | Unit checker | partial (UNT001–UNT003) |
 | `EVL*` | Reference interpreter | partial (EVL004, EVL005, EVL006) |
 | `TIM*` | Timeline (negative duration, out-of-range keyframe) | reserved |
 | `ANM*` | Animate / keyframe rules | reserved |
@@ -161,21 +161,31 @@ outline from straight `vec2` points.
 
 ### `NAM003` — Unknown identifier
 
-A name was referenced that resolves to nothing in the current scope
-chain (local lets, parameters, top-level declarations, imported names).
+A name was referenced that resolves to nothing: not a local `let`, a
+parameter, a loop variable, a top-level declaration or an imported
+name, and not in the stdlib. The evaluator would stage it as a call no
+renderer draws, so a misspelt function renders as nothing; the message
+names the closest known name when there is one.
 
-The check is **suppressed when any `use foo.*` wildcard import is
-present**, since cmotion does not yet have module manifests — we
-don't know what names a wildcard brings into scope. Once manifests
-land, `NAM003` will fire through wildcards too.
+```cm
+compose [circl(radius: 40px)]       // NAM003: unknown identifier 'circl' — did you mean 'circle'?
+for i in 0..n { … }                  // NAM003 when nothing declares n
+circle(radius: 4px).grow()           // NAM003: a method call reaches only the stdlib, not a `let grow`
+```
+
+The stdlib's names (its functions, `text.` and `easing.` names, and
+the bare values its arguments take, like `center` or `word`) come from
+the checker's manifest (`apps/cli/src/stdlib.zig`), so `use std.….*`
+does not hide unknown names. A wildcard import from anywhere else
+still turns the check off, since nothing says what it brings.
 
 Repair is one of:
 
+- fix a typo (the suggested name)
 - add a `let name = ...;` before the use site
 - bring the name into scope with `use mod.name;` or `use mod as alias;`
-- fix a typo
 
-- **Repair:** `declare-or-import`.
+- **Repair:** `rename-to-known` (with a suggestion) or `declare-or-import`.
 - **Fix safety:** `local-edit`.
 
 ### `NAM004` — Forward reference within a block
@@ -269,6 +279,53 @@ circ, back, elastic, bounce; `easing.bezier(x1, y1, x2, y2)`,
 
 ---
 
+### `NAM010` — Argument nothing reads
+
+*Warning.* A stdlib call has a named argument the function does not
+take, so its value has no effect. The message lists the arguments it
+does take, and names the closest.
+
+```cm
+circle(radius: 40px, colour: #ffffff)   // NAM010: circle() has no argument 'colour'
+```
+
+- **Repair:** `rename-argument`.
+- **Fix safety:** `local-edit`.
+
+---
+
+### `NAM011` — A binding hides a stdlib namespace
+
+A parameter or `let` is named like a stdlib namespace (`text`), and a
+dotted call uses it, so `text.block(…)` calls a method `block` on that
+value, which nothing draws.
+
+```cm
+scene title(text: String = "Hi") -> Frame { compose [text.block(text)] }   // NAM011
+```
+
+- **Repair:** `rename-shadowing-binding` (`label: String`, then `text.block(label)`).
+- **Fix safety:** `local-edit`.
+
+---
+
+### `NAM012` — Positional argument nothing reads
+
+*Warning.* A stdlib call passes more positional arguments than the
+function reads. A method call's receiver counts as the first:
+`layer.f(a)` is `f(layer, a)`.
+
+```cm
+wave(10deg, 4s)                 // NAM012: write wave(amplitude: 10deg, period: 4s)
+circle(radius: 8px).rotate(30deg)   // NAM012: write .rotate(z: 30deg)
+extrude(shape, 30px)            // NAM012: write depth: 30px
+```
+
+- **Repair:** `name-the-argument`.
+- **Fix safety:** `local-edit`.
+
+---
+
 ## `TYP*` — Type checker
 
 ### `TYP002` — Type mismatch on an annotated value
@@ -316,6 +373,24 @@ on a `Duration` has no meaning and is dropped.
 
 ---
 
+### `TYP004` — Argument value of the wrong kind
+
+A stdlib call passes a literal of the wrong kind for an argument, or a
+bare name that is not one of its choices. Only literals and bare names
+are checked; a value from a binding or an expression is left to the
+full type checker.
+
+```cm
+circle(radius: 40px, fill: 3)       // TYP004: 'fill' takes a color, found number
+text.block("Hi", align: middle)     // TYP004: 'align' takes one of left, center, right
+transition(a, b, at: 1s, kind: "slide_left")   // TYP004: 'kind' takes a bare name, not a string
+```
+
+- **Repair:** `fix-argument-value`.
+- **Fix safety:** `local-edit`.
+
+---
+
 ## `UNT*` — Unit checker
 
 ### `UNT001` — Unit category mismatch
@@ -354,6 +429,16 @@ If the literal has **no unit at all** (`let x: Duration = 42`), see
 - **Repair:** `align-unit-with-type`.
 - **Fix safety:** `local-edit`.
 
+The same check covers the named arguments of stdlib calls: renderers
+read the number and drop the unit, so a unit from the wrong family is
+read as if it were right.
+
+```cm
+circle(radius: 2s)       // UNT001: 'radius' takes a Length, found a Time
+shift(title, by: 2px)    // UNT001: 'by' takes a Time (it would be read as 2 s)
+circle(radius: 4px).scale(x: 2px)   // UNT001: 'x' takes a plain number
+```
+
 ### `UNT002` — Missing required unit
 
 An annotated number-family `let`, `param`, or `export` was assigned a
@@ -382,6 +467,29 @@ Canonical units used in the suggestion:
 
 - **Repair:** `add-required-unit`.
 - **Fix safety:** `local-edit`.
+
+---
+
+### `UNT003` — Argument without its unit
+
+*Warning.* A stdlib call passes a bare number where the argument takes
+a length, time or angle. The renderers disagree on what a bare number
+means: the native renderer reads `translate(x: 40)` as 40 px and
+`rotate(z: 30)` as 30°, the web viewer as 40 world units (about
+14 000 px) and 30 radians. And `at: 300` is easily meant as
+milliseconds. Only named arguments are checked.
+
+```cm
+circle(radius: 40)                  // UNT003: write 40px
+title.during(0.5s, 3s, fade_in: 0.3)   // UNT003: write 0.3s
+```
+
+Arguments that sources conventionally write bare (light intensities,
+`camera(distance:)`, `vec2`/`vec3` components, `spring(from:, to:)`)
+take plain numbers and don't warn.
+
+- **Repair:** `add-unit`.
+- **Fix safety:** `behavior-preserving`.
 
 ---
 

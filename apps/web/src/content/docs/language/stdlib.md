@@ -153,8 +153,9 @@ new constructor, type or argument. (0.0.14 also freezes the
   | extend | loop | ping_pong }`. `hold` is the default; `extend`
   carries the end segment's slope on; `repeat: forever` is still
   `after: loop`.
-- **Colour keyframes blend** in OKLab (`with { blend: oklab }`, the
-  default from runner 0.0.14; `blend: step` keeps the old jump). Sources
+- **Colour keyframes blend** in OKLab, the default from runner 0.0.14;
+  `with { blend: step }` keeps the old jump. (`oklab` is a keyword, so
+  the default can't be spelled out as `blend: oklab`.) Sources
   pinned to an earlier runner keep stepping.
 - **`spring(from:, to:, at:, stiffness:, damping:, mass:)`** — a value
   that springs from `from` to `to` starting at `at`, overshooting when

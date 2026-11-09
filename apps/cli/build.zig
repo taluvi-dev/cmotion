@@ -113,8 +113,11 @@ pub fn build(b: *std.Build) void {
     // consumer.
     const interp_cmd = b.addSystemCommand(&.{ "node", "tests/wasm-interp-smoke.mjs" });
     interp_cmd.step.dependOn(wasm_build.step);
+    const manifest_cmd = b.addSystemCommand(&.{ "node", "tests/stdlib-manifest.mjs" });
+    manifest_cmd.step.dependOn(wasm_build.step);
     const interp_step = b.step("test-interp", "Drive the WASM interpreter (parse_eval + sample_at) from Node");
     interp_step.dependOn(&interp_cmd.step);
+    interp_step.dependOn(&manifest_cmd.step);
 }
 
 fn addWasmStep(b: *std.Build) WasmBuild {

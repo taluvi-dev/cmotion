@@ -79,10 +79,19 @@ owns the Pages project. Pushing to `main` does **not** publish.
 - `lower.zig` — CST → AST lowering. One `Lowerer` per parse. Field-name
   driven: the grammar's `field('foo', …)` annotations match the lookups
   here.
-- `check.zig` — narrow semantic checks (NAM003/004/005/006/**007**,
-  TYP002, UNT001/002, **LWR001**). Not a full typechecker — see "What's
+- `check.zig` — narrow semantic checks (NAM003–012, TYP002–004,
+  UNT001–003, **LWR001**). Not a full typechecker — see "What's
   intentionally missing". NAM007 + LWR001 make the stage-3 path/extrude
   slice fail legibly (unextrudable shape / malformed path).
+- `stdlib.zig` — the stdlib manifest: every function, its named
+  arguments (with unit kind or choices) and how many positionals it
+  reads, plus the bare values. `check.zig` reads it to catch a
+  misspelt name, an argument nothing reads, or a wrong unit — which
+  the evaluator would otherwise stage as a `Constructed` nothing draws.
+  **When a renderer starts reading a new name or argument, add it
+  here**; `zig build test-interp` fails if the web viewer draws a name
+  the manifest lacks. A check error also fails `parse_eval_with`, so a
+  gap here blocks a render, not just a check.
 - `eval.zig` — the AST-walking evaluator. Produces a `Value` tree;
   stages unknown calls as `Constructed(name, fields)` so new stdlib
   forms render without an eval change.
