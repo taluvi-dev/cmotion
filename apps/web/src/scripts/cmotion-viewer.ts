@@ -263,10 +263,20 @@ const textureCache = new Map<string, THREE.Texture>();
 const textureLoader = new THREE.TextureLoader();
 const texturePending = new Set<string>();
 const textureFailed = new Set<string>();
+// Least recently used first. A host hands out a fresh blob: URL for every
+// version of a picture, so without a bound every replaced or re-fetched
+// picture would keep its texture (and bitmap) for the life of the page.
+// An evicted texture still in a material is re-uploaded from its image
+// on the next render; its GPU copy is what goes.
+const MAX_TEXTURES = 64;
 
 function loadTexture(path: string): THREE.Texture {
   const cached = textureCache.get(path);
-  if (cached) return cached;
+  if (cached) {
+    textureCache.delete(path);
+    textureCache.set(path, cached);
+    return cached;
+  }
   texturePending.add(path);
   const done = () => {
     texturePending.delete(path);
@@ -279,6 +289,12 @@ function loadTexture(path: string): THREE.Texture {
   });
   tex.colorSpace = THREE.SRGBColorSpace;
   textureCache.set(path, tex);
+  for (const [k, t] of textureCache) {
+    if (textureCache.size <= MAX_TEXTURES || k === path) break;
+    textureCache.delete(k);
+    textureFailed.delete(k);
+    t.dispose();
+  }
   return tex;
 }
 
@@ -1190,7 +1206,7 @@ function buildExtrude(node: JsonNode, ctx: BuildCtx): THREE.Mesh | null {
     return buildExtrudePath(inner, numberOf(f.depth, 16));
   }
   const innerSpec = shapeSpecOf(inner);
-  if (innerSpec && !(inner.name === "path")) {
+  if (innerSpec) {
     const rings = shapeRings(innerSpec);
     if (!rings || rings.fill.length === 0) return null;
     const depthPx = numberOf(f.depth, 16);
