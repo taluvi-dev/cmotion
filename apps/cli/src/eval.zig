@@ -95,6 +95,38 @@ const Scope = struct {
     }
 };
 
+/// The frame a host renders a scene into, as `output` in the source:
+/// `output.width` / `.height` (px), `.aspect` (width / height), `.fps`,
+/// `.duration` (s) and `.safe.top` / `.right` / `.bottom` / `.left` (px,
+/// the margins platform UI covers). Layout written against it fits any
+/// aspect ratio. Without a host the defaults below apply.
+pub const Output = struct {
+    width: f64 = 1920,
+    height: f64 = 1080,
+    fps: f64 = 30,
+    duration: f64 = 5,
+    safe: [4]f64 = .{ 0, 0, 0, 0 },
+
+    pub fn toValue(self: Output, arena: std.mem.Allocator) !Value {
+        const px = struct {
+            fn of(v: f64) Value {
+                return .{ .number = .{ .value = v, .unit = .px } };
+            }
+        }.of;
+        const safe = try arena.alloc(value.Field, 4);
+        const sides = [_][]const u8{ "top", "right", "bottom", "left" };
+        for (sides, 0..) |name, i| safe[i] = .{ .name = name, .value = px(self.safe[i]) };
+        const fs = try arena.alloc(value.Field, 6);
+        fs[0] = .{ .name = "width", .value = px(self.width) };
+        fs[1] = .{ .name = "height", .value = px(self.height) };
+        fs[2] = .{ .name = "aspect", .value = .{ .number = .{ .value = if (self.height > 0) self.width / self.height else 1, .unit = null } } };
+        fs[3] = .{ .name = "fps", .value = .{ .number = .{ .value = self.fps, .unit = null } } };
+        fs[4] = .{ .name = "duration", .value = .{ .number = .{ .value = self.duration, .unit = .s } } };
+        fs[5] = .{ .name = "safe", .value = .{ .record = .{ .fields = safe } } };
+        return .{ .record = .{ .fields = fs } };
+    }
+};
+
 pub const Evaluator = struct {
     arena: std.mem.Allocator,
     /// Allocator for transient state (the scope hashmaps, the diagnostics
@@ -112,6 +144,9 @@ pub const Evaluator = struct {
     entry_args: ?*const std.StringHashMapUnmanaged(Value) = null,
     /// The source's `runner` pin, for defaults that depend on it.
     runner_pin: ?ast.RunnerDecl = null,
+    /// What the host renders to (`Output`), bound as `output` from runner
+    /// 0.0.14. Null: the defaults (`Output{}`).
+    output: ?Output = null,
 
     pub fn init(
         arena: std.mem.Allocator,
@@ -130,6 +165,7 @@ pub const Evaluator = struct {
         self.runner_pin = program.runner;
         var top = Scope{ .parent = null };
         defer top.names.deinit(self.gpa);
+        try self.bindOutput(&top);
 
         var bindings: std.ArrayListUnmanaged(Binding) = .{};
         defer bindings.deinit(self.gpa);
@@ -204,8 +240,10 @@ pub const Evaluator = struct {
         program: ast.Program,
         scene: ast.ComponentLike,
     ) EvalError![]const ?Value {
+        self.runner_pin = program.runner;
         var top = Scope{ .parent = null };
         defer top.names.deinit(self.gpa);
+        try self.bindOutput(&top);
         for (program.decls) |decl| switch (decl) {
             .let => |d| try top.names.put(self.gpa, d.name.name, try self.evalExpr(d.value.*, &top)),
             .@"export" => |e| try top.names.put(self.gpa, e.name.name, try self.evalExpr(e.value.*, &top)),
@@ -217,6 +255,14 @@ pub const Evaluator = struct {
             out[i] = if (p.default) |default| try self.evalExpr(default.*, &top) else null;
         }
         return out;
+    }
+
+    /// `output` — the frame the host renders: from runner 0.0.14 (an older
+    /// pin never had the name, so a source using it as its own word keeps
+    /// what it had). A top-level `let output` still shadows it.
+    fn bindOutput(self: *Evaluator, top: *Scope) !void {
+        if (!runner.atLeast(self.runner_pin, .{ 0, 0, 14 })) return;
+        try top.names.put(self.gpa, "output", try (self.output orelse Output{}).toValue(self.arena));
     }
 
     pub fn takeDiagnostics(self: *Evaluator) ![]const diag.Diagnostic {

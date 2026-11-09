@@ -253,20 +253,154 @@ function toThreeColor(v: JsonNode): THREE.Color {
 // ---- Texture loading --------------------------------------------
 //
 // Each `image("/path.jpg")` resolves to a Three.js texture loaded
-// from /public via the WebGL texture loader, cached per-path. The
-// loader is async — the texture object is returned immediately, with
-// pixels arriving on the next render after the fetch completes.
+// via the WebGL texture loader, cached per-path. The loader is async —
+// the texture object is returned immediately, with pixels arriving on
+// the next render after the fetch completes. A load in flight counts in
+// `pending`, so a bake waits for the pixels instead of capturing frames
+// without them.
 
 const textureCache = new Map<string, THREE.Texture>();
 const textureLoader = new THREE.TextureLoader();
+const texturePending = new Set<string>();
+const textureFailed = new Set<string>();
 
 function loadTexture(path: string): THREE.Texture {
   const cached = textureCache.get(path);
   if (cached) return cached;
-  const tex = textureLoader.load(path);
+  texturePending.add(path);
+  const done = () => {
+    texturePending.delete(path);
+    requestFrame?.();
+  };
+  const tex = textureLoader.load(path, done, undefined, (e) => {
+    console.warn(`[cmotion-viewer] image ${path} failed to load`, e);
+    textureFailed.add(path);
+    done();
+  });
   tex.colorSpace = THREE.SRGBColorSpace;
   textureCache.set(path, tex);
   return tex;
+}
+
+/** A loaded picture and its size in pixels, or null while it loads (or failed). */
+function loadedImage(path: string): { tex: THREE.Texture; width: number; height: number } | null {
+  const tex = loadTexture(path);
+  if (texturePending.has(path) || textureFailed.has(path)) return null;
+  const img = tex.image as { width?: number; height?: number } | undefined;
+  if (!img?.width || !img?.height) return null;
+  return { tex, width: img.width, height: img.height };
+}
+
+// image(src, width:, height:, fit:, radius:) as a layer: a picture at a
+// size, moved, timed and faded like any other layer. A width or a height
+// is what makes it a layer (nothing read them before, so older sources
+// keep drawing an unsized first-layer image as the background); with one
+// of them the other follows the picture's aspect, with both the picture
+// fills the box per `fit` (cover crops, contain letterboxes, fill
+// stretches; cover by default). `radius:` rounds the corners.
+function isImageLayer(node: JsonNode): boolean {
+  if (!node || node.kind !== "constructed" || node.name !== "image") return false;
+  const f = namedFields(node);
+  return f.width !== undefined || f.height !== undefined;
+}
+
+function buildImageLayer(node: JsonNode): THREE.Object3D | null {
+  const path = imagePath(node);
+  if (!path) return null;
+  const f = namedFields(node);
+  const wantW = f.width !== undefined ? numberOf(f.width) : null;
+  const wantH = f.height !== undefined ? numberOf(f.height) : null;
+  const img = loadedImage(path);
+  if (!img) return null;
+  const aspect = img.width / img.height;
+  const boxW = wantW ?? (wantH ?? img.height) * aspect;
+  const boxH = wantH ?? (wantW ?? img.width) / aspect;
+  if (!(boxW > 0 && boxH > 0)) return null;
+  const fit = f.fit?.kind === "constructed" ? f.fit.name : f.fit?.kind === "string" ? String(f.fit.raw).replace(/^"|"$/g, "") : "cover";
+  // the drawn size, and the part of the picture shown (u0..u1, v0..v1)
+  let w = boxW, h = boxH, u0 = 0, u1 = 1, v0 = 0, v1 = 1;
+  if (wantW !== null && wantH !== null) {
+    const box = boxW / boxH;
+    if (fit === "contain") {
+      if (aspect > box) h = boxW / aspect;
+      else w = boxH * aspect;
+    } else if (fit !== "fill") {
+      if (aspect > box) {
+        const r = box / aspect;
+        u0 = (1 - r) / 2; u1 = 1 - u0;
+      } else {
+        const r = aspect / box;
+        v0 = (1 - r) / 2; v1 = 1 - v0;
+      }
+    }
+  }
+  const W = w * pxToWorld, H = h * pxToWorld;
+  const radius = Math.min(numberOf(f.radius, 0) * pxToWorld, W / 2, H / 2);
+  let geom: THREE.BufferGeometry;
+  if (radius > 0) {
+    const sh = new THREE.Shape();
+    const x = -W / 2, y = -H / 2;
+    sh.moveTo(x + radius, y);
+    sh.lineTo(x + W - radius, y);
+    sh.quadraticCurveTo(x + W, y, x + W, y + radius);
+    sh.lineTo(x + W, y + H - radius);
+    sh.quadraticCurveTo(x + W, y + H, x + W - radius, y + H);
+    sh.lineTo(x + radius, y + H);
+    sh.quadraticCurveTo(x, y + H, x, y + H - radius);
+    sh.lineTo(x, y + radius);
+    sh.quadraticCurveTo(x, y, x + radius, y);
+    geom = new THREE.ShapeGeometry(sh, 12);
+  } else {
+    geom = new THREE.PlaneGeometry(W, H);
+  }
+  // map positions onto the shown part of the picture
+  const pos = geom.getAttribute("position");
+  const uv = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    uv[i * 2] = u0 + (pos.getX(i) / W + 0.5) * (u1 - u0);
+    uv[i * 2 + 1] = v0 + (pos.getY(i) / H + 0.5) * (v1 - v0);
+  }
+  geom.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  const mat = new THREE.MeshBasicMaterial({ map: img.tex, transparent: true, toneMapped: false });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.userData.imageLayer = true;
+  return mesh;
+}
+
+/**
+ * A picture can have transparent pixels, so it draws in three.js's
+ * transparent pass, after every opaque object — it would cover layers
+ * listed after it. From the first picture on, a compose's layers move to
+ * that pass in their listed order. Only a compose with a picture layer
+ * is affected, so other sources draw exactly as before.
+ */
+function stackInOrder(obj: THREE.Object3D, order: number) {
+  obj.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.renderOrder = order;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const m of mats) if (m && !(m as THREE.ShaderMaterial).uniforms) m.transparent = true;
+  });
+}
+
+function hasImageLayer(obj: THREE.Object3D): boolean {
+  let found = false;
+  obj.traverse((o) => { if (o.userData.imageLayer) found = true; });
+  return found;
+}
+
+/** Add a compose's layers to `group`, stacking in order once a picture appears. */
+function addLayers(group: THREE.Group, layers: JsonNode[], ctx: BuildCtx, skipFirst: boolean) {
+  let stacking = false;
+  layers.forEach((layer, i) => {
+    if (i === 0 && skipFirst) return;
+    const obj = buildLayer(layer, ctx);
+    if (!obj) return;
+    if (!stacking && hasImageLayer(obj)) stacking = true;
+    if (stacking) stackInOrder(obj, i + 1);
+    group.add(obj);
+  });
 }
 
 // Walk an `as_texture(image(...))` (or a bare `image(...)`) and return
@@ -1723,10 +1857,7 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
       // top-level compose is handled by buildCompose (bg promotion); this
       // branch is the plain-group case.
       const group = new THREE.Group();
-      for (const layer of arrayElems(namedFields(node).layers)) {
-        const obj = buildLayer(layer, ctx);
-        if (obj) group.add(obj);
-      }
+      addLayers(group, arrayElems(namedFields(node).layers), ctx, false);
       return group;
     }
     case "rect":
@@ -1773,6 +1904,9 @@ function buildLayer(node: JsonNode, ctx: BuildCtx): THREE.Object3D | null {
     // buildMaterial and buildCompose. Reaching them via buildLayer means
     // they were placed somewhere the viewer can't render them yet.
     case "image":
+      if (isImageLayer(node)) return buildImageLayer(node);
+      console.warn(`[cmotion-viewer] "image" without width: or height: only renders as a material fill or compose background`);
+      return null;
     case "fit":
     case "as_texture":
       console.warn(`[cmotion-viewer] "${node.name}" only renders as a material fill or compose background`);
@@ -1797,7 +1931,7 @@ function buildCompose(node: JsonNode, ctx: BuildCtx): THREE.Object3D {
     ctx.sceneAspect = bgH > 0 ? bgW / bgH : 16 / 9;
     // Promote the first full-bleed rect to the scene background.
     ctx.background = toThreeColor(bgFields.fill);
-  } else if (head?.kind === "constructed" && (head.name === "fit" || head.name === "image")) {
+  } else if (head?.kind === "constructed" && (head.name === "fit" || head.name === "image") && !isImageLayer(head)) {
     // Image used as a layer — load as a scene background texture.
     // No size info on `image(path)` alone, so fall back to the default
     // 1080-px tall, 16:9 canvas.
@@ -1808,13 +1942,8 @@ function buildCompose(node: JsonNode, ctx: BuildCtx): THREE.Object3D {
       ctx.background = loadTexture(path);
     }
   }
-  layers.forEach((layer, i) => {
-    // Skip the layer we just promoted to background.
-    if (i === 0 && ctx.background) return;
-    const obj = buildLayer(layer, ctx);
-    if (!obj) return;
-    group.add(obj);
-  });
+  // Skip the layer just promoted to background.
+  addLayers(group, layers, ctx, ctx.background !== null);
   return group;
 }
 
@@ -2024,7 +2153,7 @@ export async function boot(canvas: HTMLCanvasElement): Promise<ViewerHandle> {
     versions: { cmotion: interpVersion, three: THREE.REVISION },
     // Count of deferred assets still resolving (e.g. vectorize() traces).
     // The headless render driver waits for this to hit 0 before screenshotting.
-    get pending() { return vectorizePending.size + fontPending.size; },
+    get pending() { return vectorizePending.size + fontPending.size + texturePending.size; },
     // The entry scene's parameters (the clip's props) and the
     // diagnostics of the source, without evaluating its body.
     sceneParams(source: string): CmSceneParams { return sceneParams(exp, source); },

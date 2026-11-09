@@ -46,6 +46,24 @@ A scene's parameters are its props. `scene_params` describes each one:
 
 `parse_eval_with(src, "{}")` renders exactly what `parse_eval(src)` renders. An argument that names no parameter, or has the wrong kind of value, fails with [`EVL005`](/language/diagnostics/#evl005--scene-argument-does-not-match-the-entry-scene), which names the parameter. A required parameter left out fails with `EVL004`.
 
+### The frame: `$output`
+
+A host says what it renders into with the reserved key `$output` among
+the arguments (a parameter name can't start with `$`):
+
+```json
+{ "title": "Launch day",
+  "$output": { "width": 1080, "height": 1920, "fps": 30, "duration": 15,
+               "safe": { "top": 220, "right": 40, "bottom": 320, "left": 40 } } }
+```
+
+Pixels, frames per second and seconds; any field left out keeps its
+default (1920 × 1080, 30 fps, 5 s, no margins). From runner `0.0.14` the
+source reads it as `output` — `output.width`, `.height`, `.aspect`,
+`.fps`, `.duration`, `.safe.top` / `.right` / `.bottom` / `.left` — so one
+scene lays itself out for 16:9, 1:1 and 9:16. A value of the wrong kind,
+or an unknown `$` key, fails with `EVL005`.
+
 ## Testing
 
 A vitest/Zig conformance suite runs the WASM interpreter and compares against the native build; rendering is checked with golden-image diffs. As the WASM-codegen backend lands, its output will be compared against this interpreter headlessly in CI.

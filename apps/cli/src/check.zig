@@ -805,7 +805,7 @@ pub const Checker = struct {
                 if (namespaceRoot(f.receiver.*, scope)) |ns| {
                     if (std.mem.eql(u8, ns, "easing")) return self.checkEasing(expr);
                     const name = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ ns, f.name.name });
-                    if (stdlib.function(name) == null) try self.unknownName(name, f.name.span, scope);
+                    if (stdlib.function(name) == null and !stdlib.isField(name)) try self.unknownName(name, f.name.span, scope);
                     return;
                 }
                 try self.checkExpr(f.receiver.*, scope);
@@ -1160,7 +1160,7 @@ pub const Checker = struct {
     /// draws nothing; the help names the closest known name.
     fn unknownName(self: *Checker, name: []const u8, span: ast.Span, scope: *const Scope) !void {
         const loc = span.location(self.source);
-        const near = stdlib.nearest(name, try self.knownNames(scope));
+        const near = stdlib.nearest(name, if (std.mem.indexOfScalar(u8, name, '.') != null) try dottedNames(self.allocator) else try self.knownNames(scope));
         try self.diagnostics.append(self.allocator, .{
             .code = "NAM003",
             .message = if (near) |n|
@@ -1197,6 +1197,15 @@ pub const Checker = struct {
         for (stdlib.namespaces) |n| try out.append(self.allocator, n);
         for (stdlib.values) |v| try out.append(self.allocator, v);
         try stdlib.appendChoices(self.allocator, &out);
+        return out.items;
+    }
+
+    /// The stdlib's dotted names (`text.block`, `output.width`), for a
+    /// suggestion on a misspelt one.
+    fn dottedNames(allocator: std.mem.Allocator) ![]const []const u8 {
+        var out: std.ArrayListUnmanaged([]const u8) = .{};
+        for (stdlib.functions) |f| if (std.mem.indexOfScalar(u8, f.name, '.') != null) try out.append(allocator, f.name);
+        for (stdlib.fields) |f| try out.append(allocator, f);
         return out.items;
     }
 
@@ -1619,4 +1628,17 @@ test "check: a method call does not reach a local binding" {
     defer r.arena.deinit();
     try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
     try std.testing.expectEqualStrings("NAM003", r.diagnostics[0].code);
+}
+
+test "check: output's fields are known, a misspelt one is NAM003 with a suggestion" {
+    var r = try checkSource(
+        \\use std.shapes.*;
+        \\let a = rect(width: output.width, height: output.height).translate(y: output.safe.top);
+        \\let b = if output.aspect < 1.0 { output.fps } else { 0 };
+        \\let c = output.widht;
+    );
+    defer r.arena.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.diagnostics.len);
+    try std.testing.expectEqualStrings("NAM003", r.diagnostics[0].code);
+    try std.testing.expect(std.mem.indexOf(u8, r.diagnostics[0].message, "did you mean 'output.width'") != null);
 }

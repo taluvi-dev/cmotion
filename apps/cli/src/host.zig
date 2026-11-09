@@ -532,9 +532,11 @@ pub fn build(
     var args: std.StringHashMapUnmanaged(Value) = .{};
     const scene = entryScene(program);
     if (args_json) |json| {
-        try bindArgs(arena, source, path, scene, json, &args, &analysis.diagnostics);
+        var output: ?eval_mod.Output = null;
+        try bindArgs(arena, source, path, scene, json, &args, &output, &analysis.diagnostics);
         if (analysis.hasError()) return .{ .value = null, .diagnostics = analysis.diagnostics.items };
         if (scene != null) ev.entry_args = &args;
+        ev.output = output;
     }
 
     const result = try ev.evalProgram(program);
@@ -568,6 +570,7 @@ fn bindArgs(
     scene: ?ast.ComponentLike,
     json: []const u8,
     out: *std.StringHashMapUnmanaged(Value),
+    output: *?eval_mod.Output,
     diags: *std.ArrayListUnmanaged(diag.Diagnostic),
 ) !void {
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, json, .{}) catch {
@@ -581,8 +584,23 @@ fn bindArgs(
             return;
         },
     };
+    // `$`-keys are host values, not scene parameters (a parameter name
+    // can't start with `$`): `$output` is the frame the host renders.
+    var scene_args: usize = 0;
+    var hit = obj.iterator();
+    while (hit.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (name.len == 0 or name[0] != '$') {
+            scene_args += 1;
+        } else if (std.mem.eql(u8, name, "$output")) {
+            output.* = try parseOutput(arena, diags, path, source, entry.value_ptr.*);
+        } else {
+            const msg = try std.fmt.allocPrint(arena, "unknown host value '{s}'", .{name});
+            try argError(arena, diags, path, null, source, msg, "$output", null);
+        }
+    }
     const s = scene orelse {
-        if (obj.count() != 0)
+        if (scene_args != 0)
             try argError(arena, diags, path, null, source, "the source declares no scene to pass arguments to", null, null);
         return;
     };
@@ -590,6 +608,7 @@ fn bindArgs(
     var it = obj.iterator();
     while (it.next()) |entry| {
         const name = entry.key_ptr.*;
+        if (name.len > 0 and name[0] == '$') continue;
         const param = for (s.params) |p| {
             if (std.mem.eql(u8, p.name.name, name)) break p;
         } else {
@@ -614,6 +633,73 @@ fn bindArgs(
             try argError(arena, diags, path, param.span, source, msg, type_text, jsonKind(entry.value_ptr.*));
         }
     }
+}
+
+/// `$output`: `{ width, height, fps, duration, safe: { top, right,
+/// bottom, left } }` — pixels, frames per second, seconds. Fields left out
+/// keep their defaults (`eval.Output`).
+fn parseOutput(
+    arena: std.mem.Allocator,
+    diags: *std.ArrayListUnmanaged(diag.Diagnostic),
+    path: []const u8,
+    source: []const u8,
+    j: std.json.Value,
+) !?eval_mod.Output {
+    const expected = "{ width, height, fps, duration, safe: { top, right, bottom, left } } as numbers";
+    const obj = switch (j) {
+        .object => |o| o,
+        else => {
+            try argError(arena, diags, path, null, source, "'$output' must be an object", expected, jsonKind(j));
+            return null;
+        },
+    };
+    var o: eval_mod.Output = .{};
+    const fields = [_]struct { name: []const u8, ptr: *f64 }{
+        .{ .name = "width", .ptr = &o.width },
+        .{ .name = "height", .ptr = &o.height },
+        .{ .name = "fps", .ptr = &o.fps },
+        .{ .name = "duration", .ptr = &o.duration },
+    };
+    for (fields) |f| if (obj.get(f.name)) |v| {
+        f.ptr.* = jsonPositive(v) orelse {
+            const msg = try std.fmt.allocPrint(arena, "'$output.{s}' must be a positive number", .{f.name});
+            try argError(arena, diags, path, null, source, msg, expected, jsonKind(v));
+            return null;
+        };
+    };
+    if (obj.get("safe")) |sv| {
+        const so = switch (sv) {
+            .object => |x| x,
+            else => {
+                try argError(arena, diags, path, null, source, "'$output.safe' must be an object of margins", expected, jsonKind(sv));
+                return null;
+            },
+        };
+        const sides = [_][]const u8{ "top", "right", "bottom", "left" };
+        for (sides, 0..) |side, i| if (so.get(side)) |v| {
+            const n: ?f64 = switch (v) {
+                .integer => |x| @floatFromInt(x),
+                .float => |x| x,
+                else => null,
+            };
+            if (n == null or n.? < 0 or !std.math.isFinite(n.?)) {
+                const msg = try std.fmt.allocPrint(arena, "'$output.safe.{s}' must be a number of pixels, 0 or more", .{side});
+                try argError(arena, diags, path, null, source, msg, expected, jsonKind(v));
+                return null;
+            }
+            o.safe[i] = n.?;
+        };
+    }
+    return o;
+}
+
+fn jsonPositive(v: std.json.Value) ?f64 {
+    const n: f64 = switch (v) {
+        .integer => |x| @floatFromInt(x),
+        .float => |x| x,
+        else => return null,
+    };
+    return if (n > 0 and std.math.isFinite(n)) n else null;
 }
 
 fn expectedText(kind: PropKind, type_text: []const u8, arena: std.mem.Allocator) ![]const u8 {
@@ -948,4 +1034,48 @@ test "host: asset parameters take a URL and stand for their constructor" {
 
     const bad = try build(a, src, "<test>", "{\"logo\":42}");
     try testing.expectEqualStrings("EVL005", bad.diagnostics[0].code);
+}
+
+test "host: $output is the frame the scene lays out in" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src =
+        \\runner "0.0.14";
+        \\scene s(w: Number = 1) -> Frame { rect(width: output.width, height: output.height, at: vec2(output.safe.bottom, output.duration)) }
+    ;
+    const json = struct {
+        fn of(al: std.mem.Allocator, b: Built) ![]const u8 {
+            var w = std.Io.Writer.Allocating.init(al);
+            try b.value.?.writeJson(&w.writer);
+            return w.written();
+        }
+    }.of;
+    const dflt = try json(a, try build(a, src, "<test>", "{}"));
+    try testing.expect(std.mem.indexOf(u8, dflt, "\"value\":1920,\"unit\":\"px\"") != null);
+    const tall = try json(a, try build(a, src, "<test>", "{\"$output\":{\"width\":1080,\"height\":1920,\"duration\":15,\"safe\":{\"bottom\":320}}}"));
+    try testing.expect(std.mem.indexOf(u8, tall, "\"value\":1080,\"unit\":\"px\"") != null);
+    try testing.expect(std.mem.indexOf(u8, tall, "\"value\":320,\"unit\":\"px\"") != null);
+    try testing.expect(std.mem.indexOf(u8, tall, "\"value\":15,\"unit\":\"s\"") != null);
+}
+
+test "host: a bad $output or an unknown $ key is EVL005" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "{\"$output\":{\"width\":-1}}", "{\"$output\":3}", "{\"$output\":{\"safe\":{\"top\":\"x\"}}}", "{\"$size\":1}" }) |args| {
+        const built = try build(a, title_src, "<test>", args);
+        try testing.expect(built.value == null);
+        try testing.expectEqualStrings("EVL005", built.diagnostics[0].code);
+    }
+}
+
+test "host: a source pinned before 0.0.14 has no output" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const built = try build(a, "runner \"0.0.13\";\nlet x = output.width;\n", "<test>", "{\"$output\":{\"width\":640}}");
+    var w = std.Io.Writer.Allocating.init(a);
+    try built.value.?.writeJson(&w.writer);
+    try testing.expect(std.mem.indexOf(u8, w.written(), "640") == null);
 }

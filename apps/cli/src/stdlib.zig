@@ -133,7 +133,7 @@ pub const functions = [_]Fn{
     .{ .name = "text.glyph", .spec = "@1 size:px font:any curve_segments:int" },
     .{ .name = "text.block", .spec = "@1 size:px line_height:num width:px kerning:bool align:left|center|right|str fill:color reveal:num by:char|word|line|str rise:px fit:px font:any curve_segments:int" },
     // assets
-    .{ .name = "image", .spec = "@1" },
+    .{ .name = "image", .spec = "@1 width:px height:px fit:cover|contain|fill radius:px" },
     .{ .name = "fit", .spec = "@2" },
     .{ .name = "as_texture", .spec = "@1 projection:equirectangular" },
     .{ .name = "font", .spec = "@1" },
@@ -183,8 +183,17 @@ pub const functions = [_]Fn{
 /// `pivot`.
 pub const values = [_][]const u8{ "forever", "hold", "extend", "loop", "ping_pong", "step", "cover", "contain", "bottom", "top", "left", "right" };
 
-/// Roots of dotted names (`text.block`, `easing.out_cubic`).
-pub const namespaces = [_][]const u8{ "text", "easing" };
+/// Roots of dotted names (`text.block`, `easing.out_cubic`, `output.width`).
+pub const namespaces = [_][]const u8{ "text", "easing", "output" };
+
+/// Dotted names that are values, not functions: the frame the host
+/// renders (eval.zig `Output`, from runner 0.0.14).
+pub const fields = [_][]const u8{ "output.width", "output.height", "output.aspect", "output.fps", "output.duration", "output.safe" };
+
+pub fn isField(name: []const u8) bool {
+    for (fields) |f| if (std.mem.eql(u8, f, name)) return true;
+    return false;
+}
 
 pub fn function(name: []const u8) ?Fn {
     for (functions) |f| if (std.mem.eql(u8, f.name, name)) return f;

@@ -215,6 +215,33 @@ new constructor, type or argument. (0.0.14 also freezes the
   (Remotion's `evolvePath`): `stroke(circle(radius: 120px), width: 8px,
   draw: animate { 0s => 0, 2s => 1 })`. A stroked shape is filled only
   if it has its own `fill:`.
+- **Pictures as layers** — `image(src, width:, height:, fit:, radius:)`
+  draws a picture at a size, placed, timed and faded like any layer:
+  `image(logo, width: 320px).translate(x: 600px, y: -380px)`. With only a
+  width or a height the other follows the picture's aspect; with both,
+  `fit: cover` (default) crops to the box, `contain` letterboxes, `fill`
+  stretches. `radius:` rounds the corners. Layers listed after a picture
+  draw over it. A width or height is what makes it a layer: an unsized
+  `image(…)` as the first `compose` layer is still the background. Web
+  viewer only (the native renderer draws no pictures); the viewer waits
+  for every picture before a render or bake.
+- **`output`** — the frame the host renders: `output.width` / `.height`
+  (px), `.aspect`, `.fps`, `.duration` (s) and `.safe.top` / `.right` /
+  `.bottom` / `.left` (px, the margins a platform's UI covers). Lay out
+  against it and one scene fits 16:9, 1:1 and 9:16:
+
+  ```cm
+  compose [
+    rect(width: output.width, height: output.height, fill: #101418),
+    image(product, width: output.width * 0.6)
+      .translate(y: output.height * 0.1),
+    text.block(headline, fit: output.width - 120px)
+      .translate(y: -(output.height / 2) + output.safe.bottom + 160px),
+  ]
+  ```
+
+  Defaults without a host: 1920 × 1080, 30 fps, 5 s, no margins. A host
+  passes its frame as `$output` ([host API](/impl/interpreter/#the-frame-output)).
 - **y is up** in every renderer: `translate(y: 100px)` and `vec2(0, 100)`
   point up. (The native renderer drew 2D layers y-down before 0.0.14.)
 - **`@ui(min:, max:, step:, label:)`** on a scene parameter — hints for a
