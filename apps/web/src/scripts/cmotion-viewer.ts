@@ -164,22 +164,28 @@ function sceneParams(exp: CmExports, source: string): CmSceneParams {
 }
 
 function sample(exp: CmExports, handle: number, tSeconds: number): unknown {
+  // `sample_at` writes 0 when the tree does not fit the buffer (and when
+  // sampling itself fails): grow from 64 KB to 4 MiB before giving up. A
+  // frame of a few dozen layers is past 64 KB, so the first size is only
+  // the common case, not the limit.
+  const MAX = 4 * 1024 * 1024;
   let cap = 64 * 1024;
-  while (cap <= 4 * 1024 * 1024) {
+  for (;;) {
     const p = exp.cm_alloc(cap);
     const tNs = BigInt(Math.floor(tSeconds * 1e9));
     const n = exp.sample_at(handle, tNs, p, cap);
-    if (n === 0 && cap > 64 * 1024) {
+    if (n === 0) {
       exp.cm_free(p, cap);
-      cap *= 2;
-      continue;
+      if (cap < MAX) {
+        cap *= 2;
+        continue;
+      }
+      throw new Error(`sample_at failed at t=${tSeconds}s (or its output exceeded 4 MiB)`);
     }
-    if (n === 0) throw new Error(`sample_at returned 0 at t=${tSeconds}s`);
     const json = readString(exp, p, n);
     exp.cm_free(p, cap);
     return JSON.parse(json);
   }
-  throw new Error("sample_at output exceeded 4 MiB");
 }
 
 // ---- JSON value-tree helpers -------------------------------------
