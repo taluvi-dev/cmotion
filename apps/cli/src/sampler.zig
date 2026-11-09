@@ -1466,7 +1466,7 @@ test "sampleAt: arithmetic with a time-varying side is folded at t" {
     const scaled = try evalAndSample(a, "let x = animate { 0s => 0px, 1s => 10px } * 2;", 0.5);
     try std.testing.expectApproxEqAbs(@as(f64, 10), scaled.number.value, 1e-9);
     try std.testing.expect(scaled.number.unit.? == .px);
-    const summed = try evalAndSample(a, "let x = 10px + wave(4px, 1s);", 0.25);
+    const summed = try evalAndSample(a, "let x = 10px + wave(amplitude: 4px, period: 1s);", 0.25);
     try std.testing.expectApproxEqAbs(@as(f64, 14), summed.number.value, 1e-9);
     // a ratio of like units is a plain number, as eval's own rule
     const ratio = try evalAndSample(a, "let x = animate { 0s => 0px, 1s => 100px } / 50px;", 0.5);
