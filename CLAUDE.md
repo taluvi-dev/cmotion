@@ -100,6 +100,10 @@ owns the Pages project. Pushing to `main` does **not** publish.
 - `render.zig` / `render3d.zig` / `mesh.zig` / `font.zig` — the native
   renderer: 2D raster, 3D projection/lighting, mesh extrusion
   (glyphs + paths), and glyph outlines.
+- `units.zig` — the unit table: each unit's family and scale in its
+  base unit, and its name. The evaluator (a ratio of like units),
+  `host.zig` (`@ui` bounds in the prop's unit) and `check.zig` (UNT001)
+  all read it; adding a unit is one edit here.
 - `easing.zig` — the easing curves, springs, `random` and `noise`, in
   plain math. PSL ships the same curve set (`ease_<name>`); keep them
   in step.

@@ -33,6 +33,7 @@ const ast = @import("ast.zig");
 const diag = @import("diagnostics.zig");
 const value = @import("value.zig");
 const runner = @import("runner.zig");
+const units = @import("units.zig");
 
 pub const Value = value.Value;
 
@@ -96,32 +97,6 @@ const Scope = struct {
 };
 
 /// A unit's family, for "same kind of quantity" (a ratio of two is a plain number).
-fn unitFamily(u: ast.Unit) u8 {
-    return switch (u) {
-        .s, .ms, .us, .ns => 1,
-        .deg, .rad, .turn => 2,
-        .px => 3,
-        .percent => 4,
-        .hz, .khz => 5,
-        .bpm => 6,
-        .bars => 7,
-        .beats => 8,
-    };
-}
-
-/// A unit in its family's base unit (s, deg, hz, …).
-fn unitScale(u: ast.Unit) f64 {
-    return switch (u) {
-        .ms => 1e-3,
-        .us => 1e-6,
-        .ns => 1e-9,
-        .rad => 180.0 / std.math.pi,
-        .turn => 360,
-        .khz => 1000,
-        else => 1,
-    };
-}
-
 /// The frame a host renders a scene into, as `output` in the source:
 /// `output.width` / `.height` (px), `.aspect` (width / height), `.fps`,
 /// `.duration` (s) and `.safe.top` / `.right` / `.bottom` / `.left` (px,
@@ -964,10 +939,10 @@ pub const Evaluator = struct {
         // 2 — instead of keeping the left unit. Older pins keep it, since a
         // renderer reads a bare number differently from a `px` one.
         if (b.op == .div and ln.unit != null and rn.unit != null and
-            unitFamily(ln.unit.?) == unitFamily(rn.unit.?) and runner.atLeast(self.runner_pin, .{ 0, 0, 14 }))
+            units.family(ln.unit.?) == units.family(rn.unit.?) and runner.atLeast(self.runner_pin, .{ 0, 0, 14 }))
         {
-            const den = rn.value * unitScale(rn.unit.?);
-            return .{ .number = .{ .value = if (den == 0) 0 else ln.value * unitScale(ln.unit.?) / den, .unit = null } };
+            const den = rn.value * units.scale(rn.unit.?);
+            return .{ .number = .{ .value = if (den == 0) 0 else ln.value * units.scale(ln.unit.?) / den, .unit = null } };
         }
         const v: f64 = switch (b.op) {
             .add => ln.value + rn.value,

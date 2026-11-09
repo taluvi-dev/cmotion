@@ -156,17 +156,35 @@ fn breakLines(arena: std.mem.Allocator, cps: []const u32, opts: Options, m: Metr
             try lines.append(arena, para);
             continue;
         };
-        // Greedy wrap over words.
+        // Greedy wrap over words. The line's width runs along with it
+        // (one add per glyph, not a re-sum from the line start — that
+        // was quadratic in a caption's length), summed in the same
+        // order as `runWidth` so the breaks fall where they always did.
+        // `tail` is the width since the last space, what the next line
+        // starts with after a break there.
         var line_start: usize = 0;
         var last_break: ?usize = null; // index of a space inside `para`
+        var w: f32 = 0;
+        var tail: f32 = 0;
         var j: usize = 0;
         while (j < para.len) : (j += 1) {
-            if (para[j] == ' ') last_break = j;
-            if (runWidth(para[line_start .. j + 1], opts, m) <= limit) continue;
+            const cp = para[j];
+            if (cp == ' ') {
+                last_break = j;
+                tail = 0;
+            }
+            if (opts.kerning and j > line_start) w += m.kern(para[j - 1], cp, opts.size);
+            w += m.advance(cp, opts.size);
+            if (last_break) |b| if (j > b) {
+                if (opts.kerning and j > b + 1) tail += m.kern(para[j - 1], cp, opts.size);
+                tail += m.advance(cp, opts.size);
+            };
+            if (w <= limit) continue;
             if (last_break) |b| if (b > line_start) {
                 try lines.append(arena, para[line_start..b]);
                 line_start = b + 1;
                 last_break = null;
+                w = tail;
                 continue;
             };
         }
@@ -273,6 +291,40 @@ test "text_layout: wrapping breaks at spaces within the width" {
     try std.testing.expectEqual(@as(usize, 2), l.lines);
     try std.testing.expectEqual(@as(u32, 's'), l.glyphs[7].cp);
     try std.testing.expectEqual(@as(f32, 0), l.glyphs[7].x);
+}
+
+test "text_layout: the running wrap breaks exactly where a re-summed one does" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Kerned pairs and words of many lengths, over several widths: the
+    // breaks must match the plain "re-sum the line from its start" rule
+    // the fast path replaced (so pinned sources keep their lines).
+    const text = "AV To the quick brown fox jumps over AWAY the lazy dog ATA while Ta Te To Tu wander AV AV";
+    const cps = try codepoints(a, text);
+    const widths = [_]f32{ 40, 55, 75, 100, 130, 200, 1000 };
+    for (widths) |limit| {
+        const opts: Options = .{ .size = 10, .width = limit, .kerning = true };
+        const fast = try breakLines(a, cps, opts, fake);
+        // the naive rule
+        var naive: std.ArrayListUnmanaged([]const u32) = .{};
+        var line_start: usize = 0;
+        var last_break: ?usize = null;
+        var j: usize = 0;
+        while (j < cps.len) : (j += 1) {
+            if (cps[j] == ' ') last_break = j;
+            if (runWidth(cps[line_start .. j + 1], opts, fake) <= limit) continue;
+            if (last_break) |b| if (b > line_start) {
+                try naive.append(a, cps[line_start..b]);
+                line_start = b + 1;
+                last_break = null;
+                continue;
+            };
+        }
+        try naive.append(a, cps[line_start..]);
+        try std.testing.expectEqual(naive.items.len, fast.len);
+        for (naive.items, fast) |n, f| try std.testing.expectEqualSlices(u32, n, f);
+    }
 }
 
 test "text_layout: a word wider than the width stays whole" {

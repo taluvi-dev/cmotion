@@ -47,6 +47,7 @@ test {
     _ = @import("easing.zig");
     _ = @import("runner.zig");
     _ = @import("shape2d.zig");
+    _ = @import("units.zig");
     _ = @import("sampler.zig");
     _ = @import("render.zig");
     _ = @import("font.zig");

@@ -50,6 +50,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const units = @import("units.zig");
 const diag = @import("diagnostics.zig");
 const host = @import("host.zig");
 const easing = @import("easing.zig");
@@ -180,15 +181,9 @@ const UnitCategory = enum {
 };
 
 fn unitCategory(u: ast.Unit) UnitCategory {
-    return switch (u) {
-        .s, .ms, .us, .ns => .time,
-        .hz, .khz => .frequency,
-        .deg, .rad, .turn => .angle,
-        .px => .length,
-        .percent => .percent,
-        .bpm => .tempo,
-        .bars => .bars,
-        .beats => .beats,
+    // the families of units.zig, by name (UnitCategory adds `.none`)
+    return switch (units.family(u)) {
+        inline else => |f| @field(UnitCategory, @tagName(f)),
     };
 }
 
@@ -222,22 +217,7 @@ fn unitCategoryName(c: UnitCategory) []const u8 {
 }
 
 fn unitName(u: ast.Unit) []const u8 {
-    return switch (u) {
-        .s => "s",
-        .ms => "ms",
-        .us => "us",
-        .ns => "ns",
-        .hz => "hz",
-        .khz => "khz",
-        .deg => "deg",
-        .rad => "rad",
-        .turn => "turn",
-        .px => "px",
-        .percent => "%",
-        .bpm => "bpm",
-        .bars => "bars",
-        .beats => "beats",
-    };
+    return units.name(u);
 }
 
 /// Canonical unit per category, used to suggest a concrete repair for

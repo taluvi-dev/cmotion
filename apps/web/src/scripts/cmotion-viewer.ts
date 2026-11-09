@@ -759,15 +759,30 @@ function layoutBlock(font: opentype.Font, text: string, o0: BlockOptions) {
     const chars = Array.from(para);
     const run = glyphs(para);
     if (o.width === null) { lines.push(run); continue; }
+    // The line's width runs along with it (one add per glyph, not a
+    // re-sum from the line start — quadratic in a caption's length),
+    // in `runWidth`'s order so the breaks fall where they always did;
+    // `tail` is the width since the last space, what the next line
+    // starts with after a break there.
     let start = 0;
     let lastBreak: number | null = null;
+    let w = 0;
+    let tail = 0;
     for (let j = 0; j < run.length; j++) {
-      if (chars[j] === " ") lastBreak = j;
-      if (runWidth(run.slice(start, j + 1)) <= o.width) continue;
-      if (lastBreak !== null && lastBreak > start) {
+      const g = run[j];
+      if (chars[j] === " ") { lastBreak = j; tail = 0; }
+      if (j > start) w += kern(run[j - 1], g);
+      w += adv(g);
+      if (lastBreak !== null && j > lastBreak) {
+        if (j > lastBreak + 1) tail += kern(run[j - 1], g);
+        tail += adv(g);
+      }
+      if (w <= o.width) continue;
+      if (lastBreak > start) {
         lines.push(run.slice(start, lastBreak));
         start = lastBreak + 1;
         lastBreak = null;
+        w = tail;
       }
     }
     lines.push(run.slice(start));

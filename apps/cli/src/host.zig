@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const ast = @import("ast.zig");
+const units = @import("units.zig");
 const diag = @import("diagnostics.zig");
 const ts = @import("tree_sitter.zig");
 const lower_mod = @import("lower.zig");
@@ -462,31 +463,8 @@ pub fn literalString(e: ast.Expr) ?[]const u8 {
 pub fn toUnit(n: value.Number, target: ?ast.Unit) ?f64 {
     const from = n.unit orelse return n.value;
     const to = target orelse return null;
-    const f = unitFactor(from) orelse return null;
-    const t = unitFactor(to) orelse return null;
-    if (f.family != t.family) return null;
-    return n.value * f.scale / t.scale;
-}
-
-const UnitFamily = enum { time, angle, frequency, length, percent, tempo, bars, beats };
-
-fn unitFactor(u: ast.Unit) ?struct { family: UnitFamily, scale: f64 } {
-    return switch (u) {
-        .s => .{ .family = .time, .scale = 1 },
-        .ms => .{ .family = .time, .scale = 1e-3 },
-        .us => .{ .family = .time, .scale = 1e-6 },
-        .ns => .{ .family = .time, .scale = 1e-9 },
-        .deg => .{ .family = .angle, .scale = 1 },
-        .rad => .{ .family = .angle, .scale = 180.0 / std.math.pi },
-        .turn => .{ .family = .angle, .scale = 360 },
-        .hz => .{ .family = .frequency, .scale = 1 },
-        .khz => .{ .family = .frequency, .scale = 1000 },
-        .px => .{ .family = .length, .scale = 1 },
-        .percent => .{ .family = .percent, .scale = 1 },
-        .bpm => .{ .family = .tempo, .scale = 1 },
-        .bars => .{ .family = .bars, .scale = 1 },
-        .beats => .{ .family = .beats, .scale = 1 },
-    };
+    if (units.family(from) != units.family(to)) return null;
+    return n.value * units.scale(from) / units.scale(to);
 }
 
 fn collectComments(arena: std.mem.Allocator, root: ts.Node) ![]const Comment {
