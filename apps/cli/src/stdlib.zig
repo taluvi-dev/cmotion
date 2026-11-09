@@ -169,6 +169,7 @@ pub const functions = [_]Fn{
     .{ .name = "spring", .spec = "@0 from:any to:any at:s stiffness:num damping:num mass:num" },
     .{ .name = "noise", .spec = "@3 seed:any period:s amplitude:any" },
     .{ .name = "random", .spec = "@1 seed:any" },
+    .{ .name = "len", .spec = "@1" },
     .{ .name = "bounce", .spec = "@0 height:px period:s floor:px" },
     .{ .name = "on_event", .spec = "@1 events:any decay:s peak:any" },
     .{ .name = "during", .spec = "@3 from:s to:s layer:any layers:any fade_in:s fade_out:s" },

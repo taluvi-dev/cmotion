@@ -23,7 +23,7 @@ Once the [grammar](/language/grammar/) and [type system](/language/types/) are l
 
 | Export | Does |
 |---|---|
-| `get_version(out, cap)` | The WASM ABI version (`0.2.0`). |
+| `get_version(out, cap)` | The WASM ABI version (`0.3.0`: `$output`, list and record arguments). |
 | `parse_eval(src, len)` → handle | Parse, lower and evaluate; sample the first top-level binding. `0` on failure. |
 | `parse_eval_with(src, len, args, args_len)` → handle | Like `parse_eval`, with the **entry scene's** arguments as a JSON object by parameter name. The entry scene is the first `scene` declaration, and it is what gets sampled. The source is also checked as `cmo check` does. |
 | `sample_at(handle, t_ns, out, cap)` | The value tree at `t` nanoseconds, as JSON. |
@@ -40,7 +40,8 @@ A scene's parameters are its props. `scene_params` describes each one:
   "doc": "How long the title runs." }
 ```
 
-- `prop` is the kind of JSON value that sets it (`number`, `int`, `bool`, `string`, `color`), or `null` when arguments cannot set the type yet.
+- `prop` is the kind of JSON value that sets it (`number`, `int`, `bool`, `string`, `color`, `asset`, `list`, `record`), or `null` when arguments cannot set the type yet.
+- A `list` (`List<T>`) also has `item` — `{ type, prop, asset, unit }` for T, plus `fields` when T is a record; it is set with a JSON array. A `record` (`{ label: String, … }`) has `fields` — `[{ name, type, prop, asset, unit }]`; it is set with a JSON object with exactly those fields.
 - `unit` is the unit that number is in. Hosts pass times in seconds, angles in degrees, lengths in pixels and colours as `"#rrggbb"`.
 - `doc` is the `//` comment block directly above the parameter.
 

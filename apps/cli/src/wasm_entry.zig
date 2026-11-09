@@ -39,7 +39,9 @@ const gpa = std.heap.wasm_allocator;
 /// here. Bundles ship this verbatim so a saved `.cm` + interpreter
 /// version produces a reproducible render. Bump on any breaking
 /// ABI / language change; additions bump the minor version.
-const cmotion_version: []const u8 = "0.2.0";
+/// 0.3.0: `parse_eval_with` takes `$output` and list / record arguments;
+/// `scene_params` describes a list's `item` and a record's `fields`.
+const cmotion_version: []const u8 = "0.3.0";
 
 /// Path diagnostics name; a host has no file.
 const source_path = "<source>";

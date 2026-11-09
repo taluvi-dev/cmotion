@@ -148,8 +148,15 @@ pub const PropKind = union(enum) {
     /// is the matching constructor (`image("…")`, `font("…")`, …), so a
     /// parameter can stand wherever the call would.
     asset: AssetKind,
-    /// No host value maps onto this type yet (records, tuples,
-    /// functions, `Animation<T>`, unknown names).
+    /// `List<T>`: a JSON array of T's values. T is any kind above, or a
+    /// record of them — not another list. Points at the item type in the
+    /// AST (arena-owned), so the kind needs no allocation.
+    list: *const ast.Type,
+    /// `{ title: String, logo: Image }`: a JSON object with exactly these
+    /// fields, each any kind above (not a list or another record).
+    record: []const ast.RecordTypeField,
+    /// No host value maps onto this type yet (tuples, functions,
+    /// `Animation<T>`, lists of lists, unknown names).
     unsupported,
 };
 
@@ -175,11 +182,21 @@ pub const AssetKind = enum {
 pub fn propKind(t: ast.Type) PropKind {
     const st = switch (t) {
         .simple => |s| s,
+        .record => |r| {
+            for (r.fields) |f| if (!isFlat(propKind(f.type))) return .unsupported;
+            return .{ .record = r.fields };
+        },
         else => return .unsupported,
     };
-    if (st.args.len != 0) return .unsupported;
     const n = st.name.name;
     const eq = std.mem.eql;
+    if (st.args.len != 0) {
+        if (!eq(u8, n, "List") or st.args.len != 1) return .unsupported;
+        return switch (propKind(st.args[0])) {
+            .list, .unsupported => .unsupported,
+            else => .{ .list = &st.args[0] },
+        };
+    }
     if (eq(u8, n, "Duration") or eq(u8, n, "Time")) return .{ .number = .s };
     if (eq(u8, n, "Angle")) return .{ .number = .deg };
     if (eq(u8, n, "Length") or eq(u8, n, "Pixels")) return .{ .number = .px };
@@ -208,8 +225,60 @@ fn propKindName(k: PropKind) ?[]const u8 {
         .string => "string",
         .color => "color",
         .asset => "asset",
+        .list => "list",
+        .record => "record",
         .unsupported => null,
     };
+}
+
+/// A kind that holds one value (not a list or a record).
+fn isFlat(k: PropKind) bool {
+    return switch (k) {
+        .list, .record, .unsupported => false,
+        else => true,
+    };
+}
+
+/// `"prop":…,"asset":…,"unit":…` for one kind, and for a list its
+/// `"item"`, for a record its `"fields"` — how a host builds an editor
+/// for the value.
+fn writeKind(w: *std.Io.Writer, source: []const u8, kind: PropKind) !void {
+    try w.writeAll("\"prop\":");
+    if (propKindName(kind)) |k| try diag.writeJsonString(w, k) else try w.writeAll("null");
+    try w.writeAll(",\"asset\":");
+    switch (kind) {
+        .asset => |k| try diag.writeJsonString(w, @tagName(k)),
+        else => try w.writeAll("null"),
+    }
+    try w.writeAll(",\"unit\":");
+    switch (kind) {
+        .number => |u| if (u) |unit| try diag.writeJsonString(w, @tagName(unit)) else try w.writeAll("null"),
+        else => try w.writeAll("null"),
+    }
+    switch (kind) {
+        .list => |item| {
+            try w.writeAll(",\"item\":{\"type\":");
+            try diag.writeJsonString(w, spanText(source, typeSpan(item.*)));
+            try w.writeAll(",");
+            try writeKind(w, source, propKind(item.*));
+            try w.writeAll("}");
+        },
+        .record => |fields| {
+            try w.writeAll(",\"fields\":[");
+            for (fields, 0..) |f, i| {
+                if (i != 0) try w.writeAll(",");
+                try w.writeAll("{\"name\":");
+                try diag.writeJsonString(w, f.name.name);
+                try w.writeAll(",\"type\":");
+                try diag.writeJsonString(w, spanText(source, typeSpan(f.type)));
+                try w.writeAll(",");
+                try writeKind(w, source, propKind(f.type));
+                try w.writeAll("}");
+            }
+            try w.writeAll("]");
+        },
+        else => {},
+    }
 }
 
 fn typeSpan(t: ast.Type) ast.Span {
@@ -275,18 +344,8 @@ pub fn writeSceneParams(
             try diag.writeJsonString(w, p.name.name);
             try w.writeAll(",\"type\":");
             try diag.writeJsonString(w, spanText(source, typeSpan(p.type)));
-            try w.writeAll(",\"prop\":");
-            if (propKindName(kind)) |k| try diag.writeJsonString(w, k) else try w.writeAll("null");
-            try w.writeAll(",\"asset\":");
-            switch (kind) {
-                .asset => |k| try diag.writeJsonString(w, @tagName(k)),
-                else => try w.writeAll("null"),
-            }
-            try w.writeAll(",\"unit\":");
-            switch (kind) {
-                .number => |u| if (u) |unit| try diag.writeJsonString(w, @tagName(unit)) else try w.writeAll("null"),
-                else => try w.writeAll("null"),
-            }
+            try w.writeAll(",");
+            try writeKind(w, source, kind);
             try w.writeAll(",\"required\":");
             try w.writeAll(if (p.default == null) "true" else "false");
             try w.writeAll(",\"default\":");
@@ -626,8 +685,11 @@ fn bindArgs(
         } else {
             const kind = propKind(param.type);
             const type_text = spanText(source, typeSpan(param.type));
+            const why = try whyNot(arena, source, kind, entry.value_ptr.*);
             const msg = if (kind == .unsupported)
                 try std.fmt.allocPrint(arena, "parameter '{s}' has type {s}, which scene arguments cannot set yet", .{ name, type_text })
+            else if (why) |w|
+                try std.fmt.allocPrint(arena, "parameter '{s}': {s}", .{ name, w })
             else
                 try std.fmt.allocPrint(arena, "parameter '{s}' expects {s}, got {s}", .{ name, expectedText(kind, type_text, arena) catch type_text, jsonKind(entry.value_ptr.*) });
             try argError(arena, diags, path, param.span, source, msg, type_text, jsonKind(entry.value_ptr.*));
@@ -702,6 +764,59 @@ fn jsonPositive(v: std.json.Value) ?f64 {
     return if (n > 0 and std.math.isFinite(n)) n else null;
 }
 
+/// For a list or record value that doesn't fit, where inside it fails:
+/// "item 2: no field 'color'", "item 0, field 'logo': expects Image as a
+/// URL string, got a number". Null for any other kind (the caller's
+/// message says enough).
+fn whyNot(arena: std.mem.Allocator, source: []const u8, kind: PropKind, j: std.json.Value) !?[]const u8 {
+    switch (kind) {
+        .list => |item| {
+            const a = switch (j) {
+                .array => |x| x,
+                else => return null,
+            };
+            const ik = propKind(item.*);
+            for (a.items, 0..) |x, i| {
+                if (try kindValue(arena, ik, x) != null) continue;
+                const inner = try whyNot(arena, source, ik, x);
+                return if (inner) |w|
+                    try std.fmt.allocPrint(arena, "item {d}: {s}", .{ i, w })
+                else
+                    try std.fmt.allocPrint(arena, "item {d}: expects {s}, got {s}", .{ i, try expectedText(ik, spanText(source, typeSpan(item.*)), arena), jsonKind(x) });
+            }
+            return null;
+        },
+        .record => |fields| {
+            const o = switch (j) {
+                .object => |x| x,
+                else => return null,
+            };
+            for (fields) |f| {
+                const v = o.get(f.name.name) orelse return try std.fmt.allocPrint(arena, "no field '{s}'", .{f.name.name});
+                const fk = propKind(f.type);
+                if (try kindValue(arena, fk, v) == null)
+                    return try std.fmt.allocPrint(arena, "field '{s}' expects {s}, got {s}", .{ f.name.name, try expectedText(fk, spanText(source, typeSpan(f.type)), arena), jsonKind(v) });
+            }
+            var it = o.iterator();
+            while (it.next()) |e| {
+                const known = for (fields) |f| {
+                    if (std.mem.eql(u8, f.name.name, e.key_ptr.*)) break true;
+                } else false;
+                if (!known) {
+                    var names: std.ArrayListUnmanaged(u8) = .{};
+                    for (fields, 0..) |f, i| {
+                        if (i != 0) try names.appendSlice(arena, ", ");
+                        try names.appendSlice(arena, f.name.name);
+                    }
+                    return try std.fmt.allocPrint(arena, "unknown field '{s}' (the fields are {s})", .{ e.key_ptr.*, names.items });
+                }
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
 fn expectedText(kind: PropKind, type_text: []const u8, arena: std.mem.Allocator) ![]const u8 {
     return switch (kind) {
         .number => |u| if (u) |unit|
@@ -713,6 +828,8 @@ fn expectedText(kind: PropKind, type_text: []const u8, arena: std.mem.Allocator)
         .string => "String as a string",
         .color => "Color as a \"#rrggbb\" string",
         .asset => try std.fmt.allocPrint(arena, "{s} as a URL string", .{type_text}),
+        .list => try std.fmt.allocPrint(arena, "{s} as a JSON array of its items", .{type_text}),
+        .record => try std.fmt.allocPrint(arena, "{s} as a JSON object with exactly those fields", .{type_text}),
         .unsupported => type_text,
     };
 }
@@ -732,7 +849,13 @@ fn unitWord(u: ast.Unit) []const u8 {
 }
 
 fn argValue(arena: std.mem.Allocator, param: ast.Param, j: std.json.Value) !?Value {
-    return switch (propKind(param.type)) {
+    return kindValue(arena, propKind(param.type), j);
+}
+
+/// A host value as the value of a parameter of `kind`, or null if it
+/// isn't one.
+fn kindValue(arena: std.mem.Allocator, kind: PropKind, j: std.json.Value) !?Value {
+    return switch (kind) {
         .number => |unit| switch (j) {
             .integer => |n| .{ .number = .{ .value = @floatFromInt(n), .unit = unit } },
             .float => |f| .{ .number = .{ .value = f, .unit = unit } },
@@ -757,6 +880,29 @@ fn argValue(arena: std.mem.Allocator, param: ast.Param, j: std.json.Value) !?Val
         },
         .asset => |k| switch (j) {
             .string => |s| if (s.len == 0) null else try assetValue(arena, k, s),
+            else => null,
+        },
+        .list => |item| switch (j) {
+            .array => |a| blk: {
+                const ik = propKind(item.*);
+                const elems = try arena.alloc(Value, a.items.len);
+                for (a.items, 0..) |x, i| elems[i] = (try kindValue(arena, ik, x)) orelse break :blk null;
+                break :blk .{ .array = .{ .elems = elems } };
+            },
+            else => null,
+        },
+        .record => |fields| switch (j) {
+            // exactly the record's fields: a missing or a misspelt one is
+            // an error rather than a value the scene silently lacks
+            .object => |o| blk: {
+                if (o.count() != fields.len) break :blk null;
+                const fs = try arena.alloc(value.Field, fields.len);
+                for (fields, 0..) |f, i| {
+                    const v = o.get(f.name.name) orelse break :blk null;
+                    fs[i] = .{ .name = f.name.name, .value = (try kindValue(arena, propKind(f.type), v)) orelse break :blk null };
+                }
+                break :blk .{ .record = .{ .fields = fs } };
+            },
             else => null,
         },
         .unsupported => null,
@@ -1078,4 +1224,62 @@ test "host: a source pinned before 0.0.14 has no output" {
     var w = std.Io.Writer.Allocating.init(a);
     try built.value.?.writeJson(&w.writer);
     try testing.expect(std.mem.indexOf(u8, w.written(), "640") == null);
+}
+
+const list_src =
+    \\runner "0.0.14";
+    \\scene steps(
+    \\  steps: List<{ label: String, color: Color }> = [{ label: "a", color: #ff0000 }],
+    \\  photos: List<Image> = [image("/a.jpg")],
+    \\  tags: List<String> = ["x", "y"],
+    \\  grid: List<List<Number>> = [[1]],
+    \\) -> Frame { rect(width: len(steps) * 100px, height: len(tags) * 10px) }
+;
+
+test "host: list and record parameters describe their items" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var w = std.Io.Writer.Allocating.init(a);
+    try writeSceneParams(&w.writer, a, list_src, "<test>");
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, w.written(), .{});
+    const params = parsed.object.get("params").?.array.items;
+    const steps = params[0].object;
+    try testing.expectEqualStrings("list", steps.get("prop").?.string);
+    const item = steps.get("item").?.object;
+    try testing.expectEqualStrings("record", item.get("prop").?.string);
+    const fields = item.get("fields").?.array.items;
+    try testing.expectEqualStrings("label", fields[0].object.get("name").?.string);
+    try testing.expectEqualStrings("color", fields[1].object.get("prop").?.string);
+    try testing.expectEqualStrings("image", params[1].object.get("item").?.object.get("asset").?.string);
+    try testing.expectEqualStrings("string", params[2].object.get("item").?.object.get("prop").?.string);
+    // a list of lists has no prop form
+    try testing.expect(params[3].object.get("prop").? == .null);
+}
+
+test "host: list arguments are arrays of their items, with errors that say where" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ok = try build(a, list_src, "<test>",
+        \\{"steps":[{"label":"a","color":"#ff0000"},{"label":"b","color":"#00ff00"},{"label":"c","color":"#0000ff"}],"tags":["one"]}
+    );
+    var w = std.Io.Writer.Allocating.init(a);
+    try ok.value.?.writeJson(&w.writer);
+    // len(steps) = 3 → width 300px; len(tags) = 1 → height 10px
+    try testing.expect(std.mem.indexOf(u8, w.written(), "\"value\":300,\"unit\":\"px\"") != null);
+    try testing.expect(std.mem.indexOf(u8, w.written(), "\"value\":10,\"unit\":\"px\"") != null);
+
+    const cases = [_]struct { args: []const u8, says: []const u8 }{
+        .{ .args = "{\"steps\":[{\"label\":\"a\"}]}", .says = "item 0: no field 'color'" },
+        .{ .args = "{\"steps\":[{\"label\":\"a\",\"color\":\"#ff0000\",\"x\":1}]}", .says = "unknown field 'x'" },
+        .{ .args = "{\"tags\":[\"a\",2]}", .says = "item 1: expects String" },
+        .{ .args = "{\"photos\":[3]}", .says = "item 0: expects Image" },
+    };
+    for (cases) |c| {
+        const bad = try build(a, list_src, "<test>", c.args);
+        try testing.expect(bad.value == null);
+        try testing.expectEqualStrings("EVL005", bad.diagnostics[0].code);
+        try testing.expect(std.mem.indexOf(u8, bad.diagnostics[0].message, c.says) != null);
+    }
 }

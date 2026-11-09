@@ -284,6 +284,27 @@ pub const Evaluator = struct {
         return out;
     }
 
+    /// `len(list)` — how many items a list has (a list parameter, an array,
+    /// a loop's result), computed here rather than staged, so it can bound
+    /// a loop: `for i in 0..len(steps) { … steps[i] … }`. From runner
+    /// 0.0.14; a binding named `len` shadows it.
+    fn evalLen(self: *Evaluator, c: ast.Call, scope: *Scope) EvalError!?Value {
+        if (c.callee.* != .ident or !std.mem.eql(u8, c.callee.ident.name, "len")) return null;
+        if (scope.lookup("len") != null or !runner.atLeast(self.runner_pin, .{ 0, 0, 14 })) return null;
+        if (c.args.len != 1 or c.args[0].name != null) {
+            try self.typeError(c.span, "len", "one list", .nil);
+            return .nil;
+        }
+        const v = try self.evalExpr(c.args[0].value.*, scope);
+        return switch (v) {
+            .array => |a| .{ .number = .{ .value = @floatFromInt(a.elems.len), .unit = null } },
+            else => blk: {
+                try self.typeError(c.span, "len", "a list", v);
+                break :blk .nil;
+            },
+        };
+    }
+
     /// A `video(…)` plays on its layer's clock: from runner 0.0.14 the
     /// evaluator adds `media_clock`, which the sampler turns into the
     /// layer's local time in seconds — so `during`, `shift`, `loop` and
@@ -383,6 +404,7 @@ pub const Evaluator = struct {
     // as opaque records the interpreter has preserved verbatim.
 
     fn evalCall(self: *Evaluator, c: ast.Call, scope: *Scope) EvalError!Value {
+        if (try self.evalLen(c, scope)) |n| return n;
         if (try self.constructorName(c.callee.*, scope)) |name| {
             const fields = try self.evalArgs(c.args, scope, null);
             return .{ .constructed = .{ .name = name, .fields = try self.withMediaClock(name, fields) } };
@@ -1835,4 +1857,18 @@ test "eval: a ratio of two lengths (or times) is a plain number from runner 0.0.
         try std.testing.expectApproxEqAbs(c.value, n.value, 1e-9);
         try std.testing.expectEqual(c.unit, n.unit);
     }
+}
+
+test "eval: len counts a list, and bounds a loop over it" {
+    var r = try evalSource(
+        \\runner "0.0.14";
+        \\let xs = ["a", "b", "c"];
+        \\let n = len(xs);
+        \\let ys = for i in 0..len(xs) { xs[i] };
+    );
+    defer r.arena.deinit();
+    defer std.testing.allocator.free(r.diagnostics);
+    try std.testing.expectEqual(@as(usize, 0), r.diagnostics.len);
+    try std.testing.expectEqual(@as(f64, 3), r.program.bindings[1].value.number.value);
+    try std.testing.expectEqual(@as(usize, 3), r.program.bindings[2].value.array.elems.len);
 }

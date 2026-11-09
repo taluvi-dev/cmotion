@@ -121,6 +121,31 @@ new constructor, type or argument. (0.0.14 also freezes the
   WOFF) and waits for it before a render or bake; the native renderer
   ships one font (DM Sans Bold) and uses it for every font. A font
   *name* (`font: "Inter Bold"`) still selects the default font.
+- **List and record parameters** — `List<T>` is a list of T, where T is
+  any parameter type above or a record of them:
+
+  ```cm
+  scene explain(
+    steps: List<{ label: String, color: Color }> = [
+      { label: "source", color: #2a4d7a },
+      { label: "compiler", color: #3a6d9a },
+    ],
+    photos: List<Image> = [image("/img/a.jpg")],
+  ) -> Frame {
+    let n = len(steps);
+    compose [
+      for i in 0..n {
+        text.block(steps[i].label).translate(x: (i - (n - 1) / 2) * 420px)
+      },
+    ]
+  }
+  ```
+
+  `len(list)` is how many items it has — a plain number, so it bounds a
+  loop — and `steps[i].label` reads an item's field. A host passes a list
+  as a JSON array and a record as a JSON object with exactly its fields;
+  a wrong item is `EVL005` naming it (`item 2: no field 'color'`). Lists
+  of lists aren't parameters yet.
 - **Asset parameter types** — `Image`, `Video`, `Audio`, `Font`. A scene
   parameter of one of these types is a file the host resolves:
   `scene card(logo: Image = image("/img/logo.png"), face: Font = font("/fonts/Inter.ttf"))`.
