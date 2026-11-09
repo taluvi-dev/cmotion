@@ -118,7 +118,10 @@ owns the Pages project. Pushing to `main` does **not** publish.
   `text.glyph` keeps its original layout so pinned sources don't move.
 - `value.zig` — the `Value` union + its JSON encoding (the contract the
   web Three.js viewer consumes).
-- `host.zig` — the host API, natively unit-tested: the entry scene
+- `host.zig` — the host API, natively unit-tested: the host values
+  (`$output` is the frame; `$tracks` the samples that feed `Track`
+  parameters — `host_track` in the tree, read by the sampler at t; a
+  staged `expr` is arithmetic with a time-varying side), the entry scene
   (first `scene`), its parameters as props (`writeSceneParams`), and
   evaluation with host-supplied arguments (`build`, EVL005 for a bad
   one).

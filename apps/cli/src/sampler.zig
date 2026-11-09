@@ -53,6 +53,7 @@ const std = @import("std");
 const value = @import("value.zig");
 const easing = @import("easing.zig");
 const ast = @import("ast.zig");
+const units = @import("units.zig");
 
 pub const SampleError = error{OutOfMemory};
 
@@ -145,6 +146,14 @@ fn sampleConstructed(
     } else if (std.mem.eql(u8, c.name, "media_clock")) {
         // a video's clock (eval.zig `withMediaClock`): the local time here
         return .{ .number = .{ .value = t, .unit = .s } };
+    } else if (std.mem.eql(u8, c.name, "host_track")) {
+        // a Track the host fed (`$tracks`): its samples read at t
+        return .{ .number = .{ .value = hostTrackAt(c, t), .unit = null } };
+    } else if (std.mem.eql(u8, c.name, "track")) {
+        // a Track nobody fed: silence
+        return .{ .number = .{ .value = 0, .unit = null } };
+    } else if (std.mem.eql(u8, c.name, "expr")) {
+        if (try tryEvalExpr(arena, c, t)) |sampled| return sampled;
     }
     const fields = try arena.alloc(value.Field, c.fields.len);
     for (c.fields, 0..) |f, i| fields[i] = .{
@@ -152,6 +161,79 @@ fn sampleConstructed(
         .value = try sampleAt(arena, f.value, t),
     };
     return .{ .constructed = .{ .name = c.name, .fields = fields } };
+}
+
+/// `host_track(rate, values)` at t: linear between the two samples around
+/// `t · rate`, the first or last sample outside the range, 0 when empty.
+fn hostTrackAt(c: value.Constructed, t: f64) f64 {
+    var rate: f64 = 0;
+    var vals: []const Value = &.{};
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "rate") and f.value == .number) {
+            rate = f.value.number.value;
+        } else if (std.mem.eql(u8, f.name, "values") and f.value == .array) {
+            vals = f.value.array.elems;
+        }
+    }
+    if (vals.len == 0 or !(rate > 0)) return 0;
+    const at = struct {
+        fn of(v: Value) f64 {
+            return if (v == .number) v.number.value else 0;
+        }
+    }.of;
+    const pos = t * rate;
+    const last: f64 = @floatFromInt(vals.len - 1);
+    if (!(pos > 0)) return at(vals[0]);
+    if (pos >= last) return at(vals[vals.len - 1]);
+    const i: usize = @intFromFloat(@floor(pos));
+    const frac = pos - @floor(pos);
+    return at(vals[i]) * (1 - frac) + at(vals[i + 1]) * frac;
+}
+
+/// `expr(op, left, right)` — arithmetic eval staged because a side varies
+/// with time: both sides sampled at t and folded under eval's unit rules
+/// (a sum keeps the left unit, a product whichever side has one, a ratio
+/// of like units is a plain number). Null when a side is still not a
+/// number, which leaves the expr in the tree.
+fn tryEvalExpr(arena: std.mem.Allocator, c: value.Constructed, t: f64) SampleError!?Value {
+    var op: []const u8 = "";
+    var left: ?Value = null;
+    var right: ?Value = null;
+    for (c.fields) |f| {
+        if (std.mem.eql(u8, f.name, "op") and f.value == .string) {
+            op = std.mem.trim(u8, f.value.string, "\"");
+        } else if (std.mem.eql(u8, f.name, "left")) {
+            left = try sampleAt(arena, f.value, t);
+        } else if (std.mem.eql(u8, f.name, "right")) {
+            right = try sampleAt(arena, f.value, t);
+        }
+    }
+    const l = left orelse return null;
+    const r = right orelse return null;
+    if (l != .number or r != .number) return null;
+    const ln = l.number;
+    const rn = r.number;
+    const eq = std.mem.eql;
+    if (eq(u8, op, "div") and ln.unit != null and rn.unit != null and units.family(ln.unit.?) == units.family(rn.unit.?)) {
+        const den = rn.value * units.scale(rn.unit.?);
+        return .{ .number = .{ .value = if (den == 0) 0 else ln.value * units.scale(ln.unit.?) / den, .unit = null } };
+    }
+    const unit: ?ast.Unit = if (eq(u8, op, "add") or eq(u8, op, "sub") or eq(u8, op, "mod")) ln.unit orelse rn.unit else ln.unit orelse rn.unit;
+    const v: f64 = if (eq(u8, op, "add"))
+        ln.value + rn.value
+    else if (eq(u8, op, "sub"))
+        ln.value - rn.value
+    else if (eq(u8, op, "mul"))
+        ln.value * rn.value
+    else if (eq(u8, op, "div"))
+        (if (rn.value == 0) 0 else ln.value / rn.value)
+    else if (eq(u8, op, "mod"))
+        @rem(ln.value, if (rn.value == 0) 1 else rn.value)
+    else if (eq(u8, op, "pow"))
+        std.math.pow(f64, ln.value, rn.value)
+    else
+        return null;
+    return .{ .number = .{ .value = v, .unit = unit } };
 }
 
 /// `wave(amplitude, period)` → `amplitude · sin(2π · t / period)`.
@@ -1375,6 +1457,22 @@ test "eval: for loops make arrays, nest, and splice into compose" {
 }
 
 const ast_unit_px = @import("ast.zig").Unit.px;
+
+test "sampleAt: arithmetic with a time-varying side is folded at t" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // an animate times a number, a number plus a wave: both staged as expr by eval
+    const scaled = try evalAndSample(a, "let x = animate { 0s => 0px, 1s => 10px } * 2;", 0.5);
+    try std.testing.expectApproxEqAbs(@as(f64, 10), scaled.number.value, 1e-9);
+    try std.testing.expect(scaled.number.unit.? == .px);
+    const summed = try evalAndSample(a, "let x = 10px + wave(4px, 1s);", 0.25);
+    try std.testing.expectApproxEqAbs(@as(f64, 14), summed.number.value, 1e-9);
+    // a ratio of like units is a plain number, as eval's own rule
+    const ratio = try evalAndSample(a, "let x = animate { 0s => 0px, 1s => 100px } / 50px;", 0.5);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), ratio.number.value, 1e-9);
+    try std.testing.expect(ratio.number.unit == null);
+}
 
 test "sampleAt: a video plays on its layer's clock, through during, freeze and loop" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

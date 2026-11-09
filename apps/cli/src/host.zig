@@ -156,6 +156,11 @@ pub const PropKind = union(enum) {
     /// `{ title: String, logo: Image }`: a JSON object with exactly these
     /// fields, each any kind above (not a list or another record).
     record: []const ast.RecordTypeField,
+    /// `Track`: a number that varies with time, 0..1, fed by the host from
+    /// its audio analysis (`$tracks`, samples at a rate) rather than set as
+    /// a scene argument. Its default, `track("envelope")`, names which
+    /// analysis feeds it; unfed it samples to 0.
+    track,
     /// No host value maps onto this type yet (tuples, functions,
     /// `Animation<T>`, lists of lists, unknown names).
     unsupported,
@@ -211,6 +216,7 @@ pub fn propKind(t: ast.Type) PropKind {
     if (eq(u8, n, "Bool")) return .boolean;
     if (eq(u8, n, "String")) return .string;
     if (eq(u8, n, "Color")) return .color;
+    if (eq(u8, n, "Track")) return .track;
     inline for (std.meta.fields(AssetKind)) |f| {
         const k: AssetKind = @enumFromInt(f.value);
         if (eq(u8, n, k.typeName())) return .{ .asset = k };
@@ -228,6 +234,7 @@ fn propKindName(k: PropKind) ?[]const u8 {
         .asset => "asset",
         .list => "list",
         .record => "record",
+        .track => "track",
         .unsupported => null,
     };
 }
@@ -235,7 +242,7 @@ fn propKindName(k: PropKind) ?[]const u8 {
 /// A kind that holds one value (not a list or a record).
 fn isFlat(k: PropKind) bool {
     return switch (k) {
-        .list, .record, .unsupported => false,
+        .list, .record, .track, .unsupported => false,
         else => true,
     };
 }
@@ -358,6 +365,11 @@ pub fn writeSceneParams(
                 if (kind == .asset) {
                     try w.writeAll(",\"url\":");
                     if (defaultUrl(kind.asset, d.*)) |url| try diag.writeJsonString(w, url) else try w.writeAll("null");
+                }
+                if (kind == .track) {
+                    // which analysis feeds it: `track("envelope")`
+                    try w.writeAll(",\"track\":");
+                    if (defaultCallString("track", d.*)) |name| try diag.writeJsonString(w, name) else try w.writeAll("null");
                 }
                 try w.writeAll("}");
             } else try w.writeAll("null");
@@ -622,8 +634,10 @@ fn bindArgs(
         },
     };
     // `$`-keys are host values, not scene parameters (a parameter name
-    // can't start with `$`): `$output` is the frame the host renders.
+    // can't start with `$`): `$output` is the frame the host renders,
+    // `$tracks` the samples that feed the scene's `Track` parameters.
     var scene_args: usize = 0;
+    var tracks: ?std.json.Value = null;
     var hit = obj.iterator();
     while (hit.next()) |entry| {
         const name = entry.key_ptr.*;
@@ -631,16 +645,19 @@ fn bindArgs(
             scene_args += 1;
         } else if (std.mem.eql(u8, name, "$output")) {
             output.* = try parseOutput(arena, diags, path, source, entry.value_ptr.*);
+        } else if (std.mem.eql(u8, name, "$tracks")) {
+            tracks = entry.value_ptr.*;
         } else {
             const msg = try std.fmt.allocPrint(arena, "unknown host value '{s}'", .{name});
-            try argError(arena, diags, path, null, source, msg, "$output", null);
+            try argError(arena, diags, path, null, source, msg, "$output, $tracks", null);
         }
     }
     const s = scene orelse {
-        if (scene_args != 0)
+        if (scene_args != 0 or tracks != null)
             try argError(arena, diags, path, null, source, "the source declares no scene to pass arguments to", null, null);
         return;
     };
+    if (tracks) |tj| try bindTracks(arena, source, path, s, tj, out, diags);
 
     var it = obj.iterator();
     while (it.next()) |entry| {
@@ -673,6 +690,77 @@ fn bindArgs(
             try argError(arena, diags, path, param.span, source, msg, type_text, jsonKind(entry.value_ptr.*));
         }
     }
+}
+
+/// `$tracks`: `{ <param>: { rate, values: [n, …] } }` — for each `Track`
+/// parameter the host feeds, its samples at `rate` per second from t = 0.
+/// The parameter's value becomes `host_track(rate, values)`, which the
+/// sampler reads at t (linear between samples, held outside). A name
+/// that is not a `Track` parameter, or a malformed entry, is an EVL005.
+fn bindTracks(
+    arena: std.mem.Allocator,
+    source: []const u8,
+    path: []const u8,
+    s: ast.ComponentLike,
+    j: std.json.Value,
+    out: *std.StringHashMapUnmanaged(Value),
+    diags: *std.ArrayListUnmanaged(diag.Diagnostic),
+) !void {
+    const obj = switch (j) {
+        .object => |o| o,
+        else => {
+            try argError(arena, diags, path, null, source, "'$tracks' must be an object of samples by parameter name", "{ <param>: { rate, values } }", jsonKind(j));
+            return;
+        },
+    };
+    var it = obj.iterator();
+    while (it.next()) |entry| {
+        const name = entry.key_ptr.*;
+        const param = for (s.params) |p| {
+            if (std.mem.eql(u8, p.name.name, name)) break p;
+        } else null;
+        if (param == null or propKind(param.?.type) != .track) {
+            const msg = try std.fmt.allocPrint(arena, "'$tracks.{s}': scene '{s}' has no Track parameter '{s}'", .{ name, s.name.name, name });
+            try argError(arena, diags, path, s.name.span, source, msg, "a Track parameter", null);
+            continue;
+        }
+        const tv = (try trackValue(arena, entry.value_ptr.*)) orelse {
+            const msg = try std.fmt.allocPrint(arena, "'$tracks.{s}' must be {{ rate: samples per second, values: [numbers] }}", .{name});
+            try argError(arena, diags, path, param.?.span, source, msg, "{ rate, values }", jsonKind(entry.value_ptr.*));
+            continue;
+        };
+        try out.put(arena, param.?.name.name, tv);
+    }
+}
+
+/// `{ rate, values }` as `host_track(rate: …, values: […])`, or null.
+fn trackValue(arena: std.mem.Allocator, j: std.json.Value) !?Value {
+    const o = switch (j) {
+        .object => |o| o,
+        else => return null,
+    };
+    const rate: f64 = switch (o.get("rate") orelse return null) {
+        .integer => |n| @floatFromInt(n),
+        .float => |f| f,
+        else => return null,
+    };
+    if (!(rate > 0)) return null;
+    const arr = switch (o.get("values") orelse return null) {
+        .array => |a| a,
+        else => return null,
+    };
+    const elems = try arena.alloc(Value, arr.items.len);
+    for (arr.items, 0..) |x, i| {
+        elems[i] = switch (x) {
+            .integer => |n| .{ .number = .{ .value = @floatFromInt(n), .unit = null } },
+            .float => |f| .{ .number = .{ .value = f, .unit = null } },
+            else => return null,
+        };
+    }
+    const fields = try arena.alloc(value.Field, 2);
+    fields[0] = .{ .name = "rate", .value = .{ .number = .{ .value = rate, .unit = null } } };
+    fields[1] = .{ .name = "values", .value = .{ .array = .{ .elems = elems } } };
+    return .{ .constructed = .{ .name = "host_track", .fields = fields } };
 }
 
 /// `$output`: `{ width, height, fps, duration, safe: { top, right,
@@ -808,6 +896,7 @@ fn expectedText(kind: PropKind, type_text: []const u8, arena: std.mem.Allocator)
         .asset => try std.fmt.allocPrint(arena, "{s} as a URL string", .{type_text}),
         .list => try std.fmt.allocPrint(arena, "{s} as a JSON array of its items", .{type_text}),
         .record => try std.fmt.allocPrint(arena, "{s} as a JSON object with exactly those fields", .{type_text}),
+        .track => "Track to be fed through '$tracks' (the host's audio analysis), not set as an argument",
         .unsupported => type_text,
     };
 }
@@ -883,7 +972,7 @@ fn kindValue(arena: std.mem.Allocator, kind: PropKind, j: std.json.Value) !?Valu
             },
             else => null,
         },
-        .unsupported => null,
+        .track, .unsupported => null,
     };
 }
 
@@ -897,6 +986,12 @@ fn assetValue(arena: std.mem.Allocator, kind: AssetKind, url: []const u8) !Value
 /// The URL in an asset default written as the constructor call with a
 /// string literal (`image("/logo.png")`), else null.
 fn defaultUrl(kind: AssetKind, e: ast.Expr) ?[]const u8 {
+    return defaultCallString(@tagName(kind), e);
+}
+
+/// The string literal a default passes to `callee` (`track("envelope")`
+/// → `envelope`), else null.
+fn defaultCallString(callee_name: []const u8, e: ast.Expr) ?[]const u8 {
     const call = switch (e) {
         .call => |c| c,
         else => return null,
@@ -905,7 +1000,7 @@ fn defaultUrl(kind: AssetKind, e: ast.Expr) ?[]const u8 {
         .ident => |id| id.name,
         else => return null,
     };
-    if (!std.mem.eql(u8, callee, @tagName(kind)) or call.args.len == 0) return null;
+    if (!std.mem.eql(u8, callee, callee_name) or call.args.len == 0) return null;
     return literalString(call.args[0].value.*);
 }
 
@@ -1181,6 +1276,47 @@ test "host: $output is the frame the scene lays out in" {
     try testing.expect(std.mem.indexOf(u8, tall, "\"value\":1080,\"unit\":\"px\"") != null);
     try testing.expect(std.mem.indexOf(u8, tall, "\"value\":320,\"unit\":\"px\"") != null);
     try testing.expect(std.mem.indexOf(u8, tall, "\"value\":15,\"unit\":\"s\"") != null);
+}
+
+test "host: Track parameters are fed by $tracks, sample linearly, and are silent unfed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sampler = @import("sampler.zig");
+    const src =
+        \\runner "0.0.14";
+        \\use std.shapes.*;
+        \\scene pulse(level: Track = track("envelope")) -> Frame { circle(radius: 10px + 40px * level) }
+    ;
+    const radiusAt = struct {
+        fn of(al: std.mem.Allocator, b: Built, t: f64) ![]const u8 {
+            const sampled = try sampler.sampleAt(al, b.value.?, t);
+            var w = std.Io.Writer.Allocating.init(al);
+            try sampled.writeJson(&w.writer);
+            return w.written();
+        }
+    }.of;
+    // fed: 2 samples/s, values 0, 1, 0.5 → at 0.25 s the position is 0.5, halfway from 0 to 1
+    const fed = try build(a, src, "<test>", "{\"$tracks\":{\"level\":{\"rate\":2,\"values\":[0,1,0.5]}}}");
+    try testing.expect(fed.value != null);
+    try testing.expect(std.mem.indexOf(u8, try radiusAt(a, fed, 0.25), "\"value\":30,\"unit\":\"px\"") != null);
+    try testing.expect(std.mem.indexOf(u8, try radiusAt(a, fed, 0.5), "\"value\":50,\"unit\":\"px\"") != null);
+    // held past the last sample
+    try testing.expect(std.mem.indexOf(u8, try radiusAt(a, fed, 9), "\"value\":30,\"unit\":\"px\"") != null);
+    // unfed: the default `track("envelope")` is 0
+    const unfed = try build(a, src, "<test>", "{}");
+    try testing.expect(std.mem.indexOf(u8, try radiusAt(a, unfed, 0.25), "\"value\":10,\"unit\":\"px\"") != null);
+    // a Track is not a scene argument, and $tracks names only Track parameters
+    const asArg = try build(a, src, "<test>", "{\"level\":0.5}");
+    try testing.expect(asArg.value == null);
+    const wrongName = try build(a, src, "<test>", "{\"$tracks\":{\"nope\":{\"rate\":2,\"values\":[]}}}");
+    try testing.expect(wrongName.value == null);
+    // scene_params: prop "track", and the analysis the default names
+    var w = std.Io.Writer.Allocating.init(a);
+    try writeSceneParams(&w.writer, a, src, "<test>");
+    const params = w.written();
+    try testing.expect(std.mem.indexOf(u8, params, "\"prop\":\"track\"") != null);
+    try testing.expect(std.mem.indexOf(u8, params, "\"track\":\"envelope\"") != null);
 }
 
 test "host: a bad $output or an unknown $ key is EVL005" {

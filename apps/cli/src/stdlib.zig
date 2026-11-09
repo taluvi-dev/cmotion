@@ -139,6 +139,8 @@ pub const functions = [_]Fn{
     .{ .name = "font", .spec = "@1" },
     .{ .name = "video", .spec = "@1 width:px height:px fit:cover|contain|fill|str radius:px start:s speed:num loop:bool" },
     .{ .name = "audio", .spec = "@1" },
+    // a `Track` parameter's default: which host analysis feeds it
+    .{ .name = "track", .spec = "@1" },
     .{ .name = "size", .spec = "@2" },
     // 3D
     .{ .name = "extrude", .spec = "@1 depth:px bevel:px bevel_segments:int curve_segments:int" },

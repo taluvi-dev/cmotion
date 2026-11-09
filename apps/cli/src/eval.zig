@@ -918,6 +918,10 @@ pub const Evaluator = struct {
     }
 
     fn evalArith(self: *Evaluator, b: ast.Binary, left: Value, right: Value) EvalError!Value {
+        // A time-varying operand (an `animate`, a `Track`, …) has no value
+        // until the sampler picks a t: the operation is staged as `expr`
+        // and folded there, under the same unit rules as below.
+        if (isTimeVarying(left) or isTimeVarying(right)) return try self.stageArith(b.op, left, right);
         const ln = numberOrError(self, b.span, "arithmetic", left) orelse return .nil;
         const rn = numberOrError(self, b.span, "arithmetic", right) orelse return .nil;
         // Unit handling for v0: addition/subtraction require matching
@@ -954,6 +958,22 @@ pub const Evaluator = struct {
             else => unreachable,
         };
         return .{ .number = .{ .value = v, .unit = unit } };
+    }
+
+    fn stageArith(self: *Evaluator, op: ast.BinOp, left: Value, right: Value) EvalError!Value {
+        const fields = try self.arena.alloc(value.Field, 3);
+        fields[0] = .{ .name = "op", .value = .{ .string = switch (op) {
+            .add => "\"add\"",
+            .sub => "\"sub\"",
+            .mul => "\"mul\"",
+            .div => "\"div\"",
+            .mod => "\"mod\"",
+            .pow => "\"pow\"",
+            else => unreachable,
+        } } };
+        fields[1] = .{ .name = "left", .value = left };
+        fields[2] = .{ .name = "right", .value = right };
+        return .{ .constructed = .{ .name = "expr", .fields = fields } };
     }
 
     fn evalEquality(self: *Evaluator, op: ast.BinOp, left: Value, right: Value) Value {
@@ -1215,6 +1235,19 @@ pub fn parseNumber(n: ast.NumberLit) value.Number {
     const slice = buf[0..len];
     const v = std.fmt.parseFloat(f64, slice) catch 0;
     return .{ .value = v, .unit = n.unit };
+}
+
+/// A value the sampler turns into a number at t: the staged generators,
+/// a host-fed track, and an `expr` of them. Named, so a shape or a
+/// string in arithmetic is still the error it was.
+fn isTimeVarying(v: Value) bool {
+    const c = switch (v) {
+        .constructed => |c| c,
+        else => return false,
+    };
+    const names = [_][]const u8{ "animate", "wave", "spring", "noise", "random", "bounce", "host_track", "track", "expr" };
+    for (names) |n| if (std.mem.eql(u8, n, c.name)) return true;
+    return false;
 }
 
 fn numberOrError(

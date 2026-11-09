@@ -155,6 +155,20 @@ new constructor, type or argument. (0.0.14 also freezes the
   never fetches by asset id. A `Video` parameter draws with
   `video(clip, width: …)` (below); `Audio` declares the slot, and nothing
   plays it yet (a scene makes no sound).
+- **Track parameters** — `Track` is a number that varies with time, 0..1,
+  fed by the host from its audio analysis rather than set as an argument:
+  `scene pulse(level: Track = track("envelope"), kick: Track = track("onsets"))`.
+  The default names which analysis feeds it (`envelope`, `onsets`, `low`,
+  `mid`, `high` in Plinken; a host may know more). A `Track` stands
+  wherever a number does and arithmetic with it follows the time:
+  `circle(radius: 40px + 120px * level)` breathes with the music. The
+  host passes samples as `$tracks` in the scene arguments
+  (`{ "$tracks": { "level": { "rate": 60, "values": [0, 0.2, …] } } }`),
+  read linearly between samples and held outside them; a track nobody
+  feeds is 0, so the scene still renders without a host. The same
+  staging makes `animate { … } * 2` and `wave(…) + 10px` valid:
+  arithmetic with a time-varying side is folded when the frame is
+  sampled.
 - **Easing** — every segment of an `animate` can take a curve: the
   `easing:` option sets the default, and `t => v with <easing>` sets the
   curve of the segment arriving at that keyframe:
